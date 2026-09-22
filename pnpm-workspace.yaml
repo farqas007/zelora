@@ -1,0 +1,21 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  esbuild: true
+
+# The UI packages were published recently and would otherwise be blocked by
+# pnpm's minimum-release-age supply-chain check.
+minimumReleaseAgeExclude:
+  - "@typescript-eslint/eslint-plugin@8.70.1"
+  - "@typescript-eslint/parser@8.70.1"
+  - "@typescript-eslint/project-service@8.70.1"
+  - "@typescript-eslint/scope-manager@8.70.1"
+  - "@typescript-eslint/tsconfig-utils@8.70.1"
+  - "@typescript-eslint/type-utils@8.70.1"
+  - "@typescript-eslint/types@8.70.1"
+  - "@typescript-eslint/typescript-estree@8.70.1"
+  - "@typescript-eslint/utils@8.70.1"
+  - "@typescript-eslint/visitor-keys@8.70.1"
+  - typescript-eslint@8.70.1

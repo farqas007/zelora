@@ -1,0 +1,19 @@
+{
+  "name": "@zelora/core",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zelora foundational configuration, errors and logging primitives.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@zelora/shared": "workspace:*"
+  }
+}

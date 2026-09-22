@@ -1,0 +1,25 @@
+{
+  "name": "@zelora/api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zelora Hono API service (Node dev / Cloudflare Workers later).",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "@zelora/core": "workspace:*",
+    "@zelora/shared": "workspace:*",
+    "hono": "^4.13.8"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.1"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "name": "zelora",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zelora — multi-vendor marketplace platform.",
+  "type": "module",
+  "packageManager": "pnpm@12.5.1",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel -r run dev",
+    "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "pnpm -r run typecheck"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "eslint": "^10.11.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.70.1"
+  }
+}

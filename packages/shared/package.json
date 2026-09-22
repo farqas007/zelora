@@ -1,0 +1,16 @@
+{
+  "name": "@zelora/shared",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zelora shared types and API contracts.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

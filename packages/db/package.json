@@ -13,6 +13,10 @@
       "types": "./src/schema/auth.ts",
       "default": "./src/schema/auth.ts"
     },
+    "./d1": {
+      "types": "./src/d1.ts",
+      "default": "./src/d1.ts"
+    },
     "./auth": {
       "types": "./src/auth/repository.ts",
       "default": "./src/auth/repository.ts"
@@ -20,6 +24,10 @@
     "./auth/local": {
       "types": "./src/auth/local-repository.ts",
       "default": "./src/auth/local-repository.ts"
+    },
+    "./auth/d1": {
+      "types": "./src/auth/d1-repository.ts",
+      "default": "./src/auth/d1-repository.ts"
     },
     "./users": {
       "types": "./src/users/repository.ts",
@@ -29,6 +37,10 @@
       "types": "./src/users/local-repository.ts",
       "default": "./src/users/local-repository.ts"
     },
+    "./users/d1": {
+      "types": "./src/users/d1-repository.ts",
+      "default": "./src/users/d1-repository.ts"
+    },
     "./seller": {
       "types": "./src/seller/repository.ts",
       "default": "./src/seller/repository.ts"
@@ -36,6 +48,10 @@
     "./seller/local": {
       "types": "./src/seller/local-repository.ts",
       "default": "./src/seller/local-repository.ts"
+    },
+    "./seller/d1": {
+      "types": "./src/seller/d1-repository.ts",
+      "default": "./src/seller/d1-repository.ts"
     }
   },
   "scripts": {

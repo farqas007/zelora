@@ -40,6 +40,36 @@ Key properties:
 - Workspace packages are consumed as TypeScript source (no build step for
   `packages/*`). Local packages export `./src/index.ts` directly.
 
+## Cloudflare deployment foundation
+
+A Cloudflare Workers runtime path is implemented and ready to be wired to a real
+account, but Zelora is **not deployed** to Cloudflare yet.
+
+- `apps/api/src/index.ts` remains the Node/better-sqlite3 runtime used for local
+  dev (`pnpm dev`).
+- `apps/api/src/worker.ts` is the Cloudflare Workers composition root: it maps
+  the Worker `env` bindings into the same `createApp()` the Node server uses, so
+  routes, middleware and services are identical on both runtimes.
+- The Worker uses the Cloudflare D1 repositories (`@zelora/db/*/d1`) instead of
+  the local better-sqlite3 ones, and reads the real client address from the
+  `CF-Connecting-IP` header for per-IP rate limiting.
+- `apps/api/wrangler.jsonc` holds the Worker config: the `DB` D1 binding and its
+  `migrations_dir`, pointing at `../../packages/db/migrations`.
+- The `database_id` in `wrangler.jsonc` is intentionally a placeholder. A real
+  D1 database must be created in a Cloudflare account and its id filled in
+  before any Wrangler command reads the config.
+- Real Cloudflare credentials, database ids and secrets must never be committed.
+- D1 migrations must be applied to the production database before the deployed
+  API can serve requests.
+- Worker configuration provides production environment values through Cloudflare
+  bindings and variables, which `src/worker.ts` maps into the shared config
+  contract (no `process.env` on the edge).
+- The Worker build (`pnpm build:worker`, chained into `pnpm build`) bundles
+  `src/worker.ts` for a neutral platform and runs
+  `scripts/check-worker-bundle.mjs`, which fails the build if the emitted bundle
+  still contains Node-only runtime code (`node:` builtins, `@hono/node-server`,
+  `better-sqlite3`).
+
 ## Local development
 
 ```sh

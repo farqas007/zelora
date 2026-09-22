@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "zelora-api",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-03-01",
+  "d1_databases": [
+    {
+      // Raw D1 binding name, exposed to the Worker as `env.DB`.
+      "binding": "DB",
+      "database_name": "zelora",
+      // PLACEHOLDER ONLY. Set this to the real database_id returned by
+      // `wrangler d1 create zelora` (or `wrangler d1 list`) before running any
+      // Wrangler command that reads this config. Never commit a real id.
+      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      // Reuses the existing Drizzle migrations (packages/db/migrations),
+      // resolved relative to this config file (apps/api).
+      "migrations_dir": "../../packages/db/migrations"
+    }
+  ]
+}

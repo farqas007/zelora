@@ -81,7 +81,7 @@ const WORKER_CONFIG_KEYS = [
   "RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS",
 ] as const;
 
-function loadWorkerConfig(env: Env): AppConfig {
+export function loadWorkerConfig(env: Env): AppConfig {
   const values: Record<string, string | undefined> = {};
   for (const key of WORKER_CONFIG_KEYS) {
     values[key] = env[key];
@@ -91,6 +91,12 @@ function loadWorkerConfig(env: Env): AppConfig {
   // default to `production` unless the operator explicitly overrides it (for
   // example with `wrangler dev --var NODE_ENV:development`).
   values.NODE_ENV = values.NODE_ENV ?? "production";
+  // Cloudflare Workers Web Crypto rejects PBKDF2 iteration counts > 100000.
+  // Never fall back to the unsupported 210000 default in the Worker runtime.
+  // Prefer explicit binding; otherwise use a Workers-supported safe default.
+  if (values.PBKDF2_ITERATIONS === undefined || values.PBKDF2_ITERATIONS === "") {
+    values.PBKDF2_ITERATIONS = "100000";
+  }
   return loadConfig(values);
 }
 

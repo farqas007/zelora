@@ -189,3 +189,14 @@ describe("parsePasswordHash and encodePasswordHash", () => {
     expect(encodePasswordHash(parsed.iterations, parsed.salt, parsed.digest)).toBe(hash);
   });
 });
+  it("maintains self-describing hash format and uses encoded iterations for verification", async () => {
+    const highIterHasher = new PBKDF2PasswordHasher(5000);
+    const hash = await highIterHasher.hash(TEST_PASSWORD);
+    const parts = hash.split("$");
+    expect(parts.length).toBe(4);
+    expect(parts[0]).toBe(PASSWORD_HASH_ALGORITHM);
+    expect(parts[1]).toBe("5000");
+    const lowIterHasher = new PBKDF2PasswordHasher(1000);
+    await expect(lowIterHasher.verify(TEST_PASSWORD, hash)).resolves.toBe(true);
+    await expect(highIterHasher.verify(TEST_PASSWORD, hash)).resolves.toBe(true);
+  });

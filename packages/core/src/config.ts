@@ -10,6 +10,14 @@ export interface AppConfig {
   sessionTtlSeconds: number;
   sessionCookieSecure: boolean;
   pbkdf2Iterations: number;
+  rateLimitEnabled: boolean;
+  rateLimitTrustProxy: boolean;
+  rateLimitLoginIpMax: number;
+  rateLimitLoginIpWindowSeconds: number;
+  rateLimitLoginEmailMax: number;
+  rateLimitLoginEmailWindowSeconds: number;
+  rateLimitRegisterIpMax: number;
+  rateLimitRegisterIpWindowSeconds: number;
 }
 
 const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
@@ -21,6 +29,14 @@ const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
   sessionTtlSeconds: 2_592_000,
   sessionCookieSecure: false,
   pbkdf2Iterations: 210_000,
+  rateLimitEnabled: true,
+  rateLimitTrustProxy: false,
+  rateLimitLoginIpMax: 20,
+  rateLimitLoginIpWindowSeconds: 900,
+  rateLimitLoginEmailMax: 10,
+  rateLimitLoginEmailWindowSeconds: 900,
+  rateLimitRegisterIpMax: 10,
+  rateLimitRegisterIpWindowSeconds: 3_600,
 };
 
 function parsePort(value: string | undefined): number {
@@ -142,6 +158,46 @@ export function loadConfig(
       env.PBKDF2_ITERATIONS,
       DEFAULT_CONFIG.pbkdf2Iterations,
       "PBKDF2_ITERATIONS",
+    ),
+    rateLimitEnabled: parseBoolean(
+      env.RATE_LIMIT_ENABLED,
+      DEFAULT_CONFIG.rateLimitEnabled,
+      "RATE_LIMIT_ENABLED",
+    ),
+    rateLimitTrustProxy: parseBoolean(
+      env.RATE_LIMIT_TRUST_PROXY,
+      DEFAULT_CONFIG.rateLimitTrustProxy,
+      "RATE_LIMIT_TRUST_PROXY",
+    ),
+    rateLimitLoginIpMax: parsePositiveInteger(
+      env.RATE_LIMIT_LOGIN_IP_MAX,
+      DEFAULT_CONFIG.rateLimitLoginIpMax,
+      "RATE_LIMIT_LOGIN_IP_MAX",
+    ),
+    rateLimitLoginIpWindowSeconds: parsePositiveInteger(
+      env.RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS,
+      DEFAULT_CONFIG.rateLimitLoginIpWindowSeconds,
+      "RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS",
+    ),
+    rateLimitLoginEmailMax: parsePositiveInteger(
+      env.RATE_LIMIT_LOGIN_EMAIL_MAX,
+      DEFAULT_CONFIG.rateLimitLoginEmailMax,
+      "RATE_LIMIT_LOGIN_EMAIL_MAX",
+    ),
+    rateLimitLoginEmailWindowSeconds: parsePositiveInteger(
+      env.RATE_LIMIT_LOGIN_EMAIL_WINDOW_SECONDS,
+      DEFAULT_CONFIG.rateLimitLoginEmailWindowSeconds,
+      "RATE_LIMIT_LOGIN_EMAIL_WINDOW_SECONDS",
+    ),
+    rateLimitRegisterIpMax: parsePositiveInteger(
+      env.RATE_LIMIT_REGISTER_IP_MAX,
+      DEFAULT_CONFIG.rateLimitRegisterIpMax,
+      "RATE_LIMIT_REGISTER_IP_MAX",
+    ),
+    rateLimitRegisterIpWindowSeconds: parsePositiveInteger(
+      env.RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS,
+      DEFAULT_CONFIG.rateLimitRegisterIpWindowSeconds,
+      "RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS",
     ),
   };
 }

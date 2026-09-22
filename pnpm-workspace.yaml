@@ -4,6 +4,7 @@ packages:
 
 allowBuilds:
   esbuild: true
+  better-sqlite3: true
 
 # The UI packages were published recently and would otherwise be blocked by
 # pnpm's minimum-release-age supply-chain check.

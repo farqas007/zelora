@@ -1,0 +1,33 @@
+{
+  "name": "@zelora/db",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zelora database layer: Drizzle schema, SQLite/D1 clients, migrations and schema tests.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc --noEmit",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "mkdir -p .data && drizzle-kit migrate",
+    "db:studio": "drizzle-kit studio --verbose",
+    "db:seed": "npm run db:migrate && tsx seed/dev.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "drizzle-orm": "^0.45.3",
+    "uuid": "^14.0.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^9.6.0",
+    "drizzle-kit": "^0.31.11",
+    "tsx": "^4.23.15",
+    "vitest": "^5.0.1"
+  }
+}

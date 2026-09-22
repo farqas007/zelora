@@ -27,6 +27,8 @@ apps/api        Hono 4 API service — runs on Node for local dev with
                 @hono/node-server; deployable to Cloudflare Workers later
 packages/shared Shared domain types and API contracts (no runtime deps)
 packages/core   Foundational config, typed errors and logging primitives
+packages/db     Data layer: Drizzle schema (SQLite/Cloudflare-D1 compatible),
+                SQLite client, migration workflow and schema tests
 ```
 
 Key properties:
@@ -55,9 +57,13 @@ Other scripts:
 | Command              | Description                                     |
 | -------------------- | ----------------------------------------------- |
 | `pnpm build`         | Builds runnable artifacts (web + API bundle)    |
-| `pnpm test`          | Runs the test suites (API via Vitest)           |
+| `pnpm test`          | Runs the test suites (API and database)         |
 | `pnpm lint`          | ESLint over the whole workspace (no warnings)   |
 | `pnpm typecheck`     | `tsc --noEmit` for every package                |
+| `pnpm db:generate`   | Generate a new migration from `packages/db` schema |
+| `pnpm db:migrate`    | Apply migrations to the local dev SQLite file   |
+| `pnpm db:seed`       | Load clearly-marked dev/test seed data (blocked in production) |
+| `pnpm db:studio`     | Open Drizzle Studio against the local dev DB    |
 
 Environment variables are optional at this phase — defaults are documented in
 `.env.example`. A `.env` loader arrives in a later phase, when the data layer

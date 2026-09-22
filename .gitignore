@@ -3,6 +3,8 @@ dist/
 coverage/
 *.log
 *.tsbuildinfo
+*.db
+.data/
 .env
 .env.*
 !.env.example

@@ -12,6 +12,10 @@
     "dev": "pnpm --parallel -r run dev",
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
+    "db:generate": "pnpm --filter @zelora/db run db:generate",
+    "db:migrate": "pnpm --filter @zelora/db run db:migrate",
+    "db:seed": "pnpm --filter @zelora/db run db:seed",
+    "db:studio": "pnpm --filter @zelora/db run db:studio",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "pnpm -r run typecheck"
   },

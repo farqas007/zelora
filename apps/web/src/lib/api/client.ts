@@ -1,0 +1,163 @@
+import type {
+  ApiEnvelope,
+  AuthCsrfEnvelope,
+  AuthMeEnvelope,
+  HealthResponse,
+  LoginEnvelope,
+  LoginRequest,
+  LogoutAllEnvelope,
+  LogoutEnvelope,
+  RegisterEnvelope,
+  RegisterRequest,
+  SellerOnboardingEnvelope,
+  SellerOnboardingRequest,
+} from "@zelora/shared";
+
+/**
+ * Browser-safe Zelora API client.
+ *
+ * The session cookie is HttpOnly, so it is never read or stored from
+ * JavaScript: requests are made with `credentials: "include"` and the browser
+ * attaches the cookie itself. CSRF-protected endpoints additionally echo the
+ * in-memory synchronizer token in the `X-Zelora-CSRF` header supplied by the
+ * injected token provider.
+ *
+ * This module is deliberately React-independent: callers wire in their own
+ * CSRF token holder (a closure over in-memory state) and receive typed
+ * {@link ApiEnvelope} responses straight from the existing shared contracts.
+ */
+
+/** Header the API's CSRF middleware requires on mutating requests. */
+export const CSRF_HEADER = "X-Zelora-CSRF";
+
+/** Absolute API base URL. Defaults to the local dev server. */
+export const API_BASE_URL: string =
+  import.meta.env.VITE_API_BASE_URL ?? "http://localhost:3001";
+
+export interface ApiClientDependencies {
+  /**
+   * Absolute origin the API is served from. Defaults to {@link API_BASE_URL}.
+   */
+  baseUrl?: string;
+  /**
+   * Returns the current in-memory session CSRF token, or `null` when there is
+   * no authenticated session. Invoked per mutating request so the token is
+   * always read fresh.
+   */
+  getCsrfToken: () => string | null;
+}
+
+/** Typed endpoints of the Zelora API, keyed by HTTP route. */
+export interface ZeloraApi {
+  getHealth(): Promise<ApiEnvelope<HealthResponse>>;
+  register(input: RegisterRequest): Promise<RegisterEnvelope>;
+  login(input: LoginRequest): Promise<LoginEnvelope>;
+  me(): Promise<AuthMeEnvelope>;
+  csrf(): Promise<AuthCsrfEnvelope>;
+  logout(): Promise<LogoutEnvelope>;
+  logoutAll(): Promise<LogoutAllEnvelope>;
+  onboardSeller(input: SellerOnboardingRequest): Promise<SellerOnboardingEnvelope>;
+}
+
+/**
+ * Transport-level failure: network error, non-JSON response, or an unexpected
+ * payload shape. API-level failures arrive as valid {@link ApiFailure}
+ * envelopes instead and are the caller's responsibility to narrow.
+ */
+export class ApiClientError extends Error {
+  /** HTTP status when the failure came from a non-envelope response. */
+  readonly status: number | undefined;
+
+  constructor(message: string, status?: number, options?: { cause?: unknown }) {
+    super(message, options);
+    this.name = "ApiClientError";
+    this.status = status;
+  }
+}
+
+export function createApiClient(
+  dependencies: ApiClientDependencies,
+): ZeloraApi {
+  const baseUrl = dependencies.baseUrl ?? API_BASE_URL;
+
+  interface RequestOptions {
+    method: "GET" | "POST";
+    body?: unknown;
+    /** Send the CSRF header when a token is available. */
+    csrf?: boolean;
+  }
+
+  async function request<E extends ApiEnvelope<unknown>>(
+    path: string,
+    options: RequestOptions,
+  ): Promise<E> {
+    const url = `${baseUrl}${path}`;
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (options.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
+    if (options.csrf === true) {
+      const token = dependencies.getCsrfToken();
+      if (token !== null && token.length > 0) {
+        headers[CSRF_HEADER] = token;
+      }
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: options.method,
+        headers,
+        credentials: "include",
+        body: options.body === undefined ? undefined : JSON.stringify(options.body),
+      });
+    } catch (cause) {
+      throw new ApiClientError(`Unable to reach the Zelora API at ${url}.`, undefined, {
+        cause,
+      });
+    }
+
+    const body = await parseBody(response, url);
+    if (typeof body === "object" && body !== null && "ok" in body) {
+      return body as E;
+    }
+    throw new ApiClientError(
+      `The Zelora API returned an unexpected payload for ${url}.`,
+      response.status,
+    );
+  }
+
+  return {
+    getHealth: () => request<ApiEnvelope<HealthResponse>>("/api/health", { method: "GET" }),
+    register: (input: RegisterRequest) =>
+      request<RegisterEnvelope>("/api/auth/register", { method: "POST", body: input }),
+    login: (input: LoginRequest) =>
+      request<LoginEnvelope>("/api/auth/login", { method: "POST", body: input }),
+    me: () => request<AuthMeEnvelope>("/api/auth/me", { method: "GET" }),
+    csrf: () => request<AuthCsrfEnvelope>("/api/auth/csrf", { method: "GET" }),
+    logout: () => request<LogoutEnvelope>("/api/auth/logout", { method: "POST", csrf: true }),
+    logoutAll: () =>
+      request<LogoutAllEnvelope>("/api/auth/logout-all", { method: "POST", csrf: true }),
+    onboardSeller: (input: SellerOnboardingRequest) =>
+      request<SellerOnboardingEnvelope>("/api/seller/onboarding", {
+        method: "POST",
+        body: input,
+        csrf: true,
+      }),
+  };
+}
+
+async function parseBody(response: Response, url: string): Promise<unknown> {
+  const text = await response.text();
+  if (text === "") {
+    return null;
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new ApiClientError(
+      `The Zelora API returned a non-JSON response for ${url}.`,
+      response.status,
+    );
+  }
+}

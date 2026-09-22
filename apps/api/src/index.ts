@@ -1,11 +1,28 @@
 import { serve } from "@hono/node-server";
-import { loadConfig, createLogger } from "@zelora/core";
+import { createLogger, loadConfig, PBKDF2PasswordHasher } from "@zelora/core";
+import { createLocalClient, resolveDbPath } from "@zelora/db";
+import { createLocalAuthSessionRepository } from "@zelora/db/auth/local";
+import { createLocalUserRepository } from "@zelora/db/users/local";
 import { createApp } from "./app";
+import { systemClock } from "./services/clock";
 
 const config = loadConfig();
 const logger = createLogger("server");
 
-const app = createApp(config);
+/**
+ * Node composition/runtime boundary. The local better-sqlite3 repositories
+ * are instantiated here and injected into the application so edge-compatible
+ * modules (app/routes/middleware/services) never pull in the native stack.
+ */
+const { db } = createLocalClient(resolveDbPath());
+
+const app = createApp({
+  config,
+  userRepository: createLocalUserRepository(db),
+  sessionRepository: createLocalAuthSessionRepository(db),
+  passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
+  clock: systemClock,
+});
 
 const server = serve(
   { fetch: app.fetch, hostname: config.host, port: config.port },

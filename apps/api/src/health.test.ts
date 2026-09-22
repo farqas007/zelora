@@ -1,15 +1,60 @@
 import { describe, expect, it } from "vitest";
 import type { ApiFailure, HealthResponse } from "@zelora/shared";
-import { loadConfig } from "@zelora/core";
-import { createApp } from "./app";
+import { loadConfig, type PasswordHasher } from "@zelora/core";
+import type { AuthSessionRepository } from "@zelora/db/auth";
+import type { UserRepository } from "@zelora/db/users";
+import { createApp, type AppDependencies } from "./app";
+import type { Clock } from "./services/clock";
 
 function makeTestConfig() {
   return loadConfig({ NODE_ENV: "test" });
 }
 
+/**
+ * Health routes never touch auth repositories, password hashing or the clock.
+ * These are inert stubs that fail loudly if anything ever calls them.
+ */
+const unimplemented = (): never => {
+  throw new Error("unexpected dependency call");
+};
+
+const clock: Clock = { now: () => new Date() };
+
+const passwordHasher: PasswordHasher = {
+  hash: unimplemented,
+  verify: unimplemented,
+};
+
+const userRepository: UserRepository = {
+  create: unimplemented,
+  findByEmail: unimplemented,
+  findById: unimplemented,
+};
+
+const sessionRepository: AuthSessionRepository = {
+  create: unimplemented,
+  findByTokenHash: unimplemented,
+  deleteById: unimplemented,
+  deleteAllForUser: unimplemented,
+  updateLastUsedAt: unimplemented,
+  purgeExpired: unimplemented,
+};
+
+function makeApp(): ReturnType<typeof createApp> {
+  const config = makeTestConfig();
+  const dependencies: AppDependencies = {
+    config,
+    userRepository,
+    sessionRepository,
+    passwordHasher,
+    clock,
+  };
+  return createApp(dependencies);
+}
+
 describe("GET /api/health", () => {
   it("returns 200 with a typed success envelope", async () => {
-    const app = createApp(makeTestConfig());
+    const app = makeApp();
     const response = await app.request("/api/health");
 
     expect(response.status).toBe(200);
@@ -24,7 +69,7 @@ describe("GET /api/health", () => {
   });
 
   it("responds to unknown routes with a typed error envelope", async () => {
-    const app = createApp(makeTestConfig());
+    const app = makeApp();
     const response = await app.request("/api/does-not-exist");
 
     expect(response.status).toBe(404);

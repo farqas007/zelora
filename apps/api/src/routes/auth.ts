@@ -4,6 +4,7 @@ import type { AppConfig } from "@zelora/core";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { UserRecord, UserRepository } from "@zelora/db/users";
 import type {
+  AuthCsrfEnvelope,
   AuthMeEnvelope,
   AuthUserResponse,
   LoginEnvelope,
@@ -145,6 +146,11 @@ export function createAuthRoutes(dependencies: AuthRoutesDependencies): Hono<App
   app.get("/me", requireAuth, async (c) => {
     const auth = c.get("auth");
     return c.json<AuthMeEnvelope>({ ok: true, data: { user: toUserDto(auth.user) } });
+  });
+
+  app.get("/csrf", requireAuth, async (c) => {
+    const auth = c.get("auth");
+    return c.json<AuthCsrfEnvelope>({ ok: true, data: { csrfToken: auth.session.csrfToken } });
   });
 
   return app;

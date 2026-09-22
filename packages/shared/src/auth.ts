@@ -139,6 +139,16 @@ export type AuthMeEnvelope = ApiEnvelope<{
   user: UserDto;
 }>;
 
+/**
+ * Payload for the authenticated CSRF bootstrap endpoint. The session cookie is
+ * HttpOnly, so after a page reload the SPA can re-obtain the synchronizer
+ * token it needs for mutating requests without ever seeing the raw session
+ * token.
+ */
+export type AuthCsrfEnvelope = ApiEnvelope<{
+  csrfToken: string;
+}>;
+
 export type LogoutEnvelope = ApiEnvelope<{
   done: true;
 }>;

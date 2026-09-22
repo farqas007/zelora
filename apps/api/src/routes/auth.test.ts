@@ -678,6 +678,68 @@ describe("auth routes", () => {
     });
   });
 
+  describe("GET /api/auth/csrf", () => {
+    it("K: unauthenticated request returns 401", async () => {
+      const response = await app.request("/api/auth/csrf");
+
+      await expectFailure(response, "SESSION_EXPIRED", 401);
+    });
+
+    it("K: an authenticated client can obtain its CSRF token without a CSRF header", async () => {
+      const { cookie, csrfToken } = await registerSession();
+
+      const response = await getWithCookie("/api/auth/csrf", cookie);
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: true;
+        data: { csrfToken: string };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.data.csrfToken).toBe(csrfToken);
+    });
+
+    it("K: after a reload (only the cookie remains) the token is re-obtainable and logout works", async () => {
+      const { cookie } = await registerSession();
+
+      const csrfResponse = await getWithCookie("/api/auth/csrf", cookie);
+      expect(csrfResponse.status).toBe(200);
+      const csrfBody = (await csrfResponse.json()) as {
+        ok: true;
+        data: { csrfToken: string };
+      };
+      const reloadedCsrfToken = csrfBody.data.csrfToken;
+      expect(reloadedCsrfToken.length).toBeGreaterThan(0);
+
+      const logoutResponse = await postJson(
+        "/api/auth/logout",
+        {},
+        cookie,
+        reloadedCsrfToken,
+      );
+      expect(logoutResponse.status).toBe(200);
+      const logoutBody = (await logoutResponse.json()) as {
+        ok: true;
+        data: { done: true };
+      };
+      expect(logoutBody.data.done).toBe(true);
+
+      const meAfterLogout = await getWithCookie("/api/auth/me", cookie);
+      await expectFailure(meAfterLogout, "SESSION_EXPIRED", 401);
+    });
+
+    it("K: never exposes the raw session cookie/token in the response body", async () => {
+      const { cookie } = await registerSession();
+      const rawToken = cookie.slice(cookie.indexOf("=") + 1);
+
+      const response = await getWithCookie("/api/auth/csrf", cookie);
+      const rawBody = await response.text();
+
+      expect(response.status).toBe(200);
+      expect(rawBody).not.toContain(rawToken);
+    });
+  });
+
   describe("suspended/deleted accounts", () => {
     it("H: login with a suspended account returns ACCOUNT_SUSPENDED 403 without a cookie", async () => {
       expect((await register()).status).toBe(201);

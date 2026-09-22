@@ -15,3 +15,8 @@ export type {
   AuthSessionRepository,
   CreateAuthSessionInput,
 } from "./auth/repository";
+export type {
+  UserRecord,
+  UserRepository,
+  CreateUserInput,
+} from "./users/repository";

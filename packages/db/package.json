@@ -20,6 +20,14 @@
     "./auth/local": {
       "types": "./src/auth/local-repository.ts",
       "default": "./src/auth/local-repository.ts"
+    },
+    "./users": {
+      "types": "./src/users/repository.ts",
+      "default": "./src/users/repository.ts"
+    },
+    "./users/local": {
+      "types": "./src/users/local-repository.ts",
+      "default": "./src/users/local-repository.ts"
     }
   },
   "scripts": {
@@ -32,6 +40,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@zelora/shared": "workspace:*",
     "better-sqlite3": "^13.0.3",
     "drizzle-orm": "^0.45.3",
     "uuid": "^14.0.2"

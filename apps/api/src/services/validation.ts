@@ -2,8 +2,10 @@ import { ValidationError } from "@zelora/core";
 import {
   AUTH_LIMITS,
   EMAIL_PATTERN,
+  SLUG_PATTERN,
   type LoginRequest,
   type RegisterRequest,
+  type SellerOnboardingRequest,
 } from "@zelora/shared";
 
 /**
@@ -26,6 +28,11 @@ export function normalizeEmail(email: string): string {
 /** Trim surrounding whitespace from a display name. */
 export function normalizeName(name: string): string {
   return name.trim();
+}
+
+/** Trim surrounding whitespace and lowercase a slug. */
+export function normalizeSlug(slug: string): string {
+  return slug.trim().toLowerCase();
 }
 
 /** Validate a (previously normalized) email. Returns an empty array when valid. */
@@ -63,6 +70,48 @@ export function validateName(name: string): string[] {
   ) {
     return [
       `Name must be between ${AUTH_LIMITS.nameMinLength} and ${AUTH_LIMITS.nameMaxLength} characters.`,
+    ];
+  }
+  return [];
+}
+
+/** Validate a (previously normalized) slug against {@link AUTH_LIMITS} and {@link SLUG_PATTERN}. */
+export function validateSlug(slug: string, label = "Slug"): string[] {
+  if (
+    slug.length < AUTH_LIMITS.slugMinLength ||
+    slug.length > AUTH_LIMITS.slugMaxLength
+  ) {
+    return [
+      `${label} must be between ${AUTH_LIMITS.slugMinLength} and ${AUTH_LIMITS.slugMaxLength} characters.`,
+    ];
+  }
+  if (!SLUG_PATTERN.test(slug)) {
+    return [`${label} is invalid.`];
+  }
+  return [];
+}
+
+/** Validate a (previously trimmed) display name against {@link AUTH_LIMITS}. */
+export function validateDisplayName(displayName: string): string[] {
+  if (
+    displayName.length < AUTH_LIMITS.displayNameMinLength ||
+    displayName.length > AUTH_LIMITS.displayNameMaxLength
+  ) {
+    return [
+      `Display name must be between ${AUTH_LIMITS.displayNameMinLength} and ${AUTH_LIMITS.displayNameMaxLength} characters.`,
+    ];
+  }
+  return [];
+}
+
+/** Validate a (previously trimmed) store name against {@link AUTH_LIMITS}. */
+export function validateStoreName(storeName: string): string[] {
+  if (
+    storeName.length < AUTH_LIMITS.storeNameMinLength ||
+    storeName.length > AUTH_LIMITS.storeNameMaxLength
+  ) {
+    return [
+      `Store name must be between ${AUTH_LIMITS.storeNameMinLength} and ${AUTH_LIMITS.storeNameMaxLength} characters.`,
     ];
   }
   return [];
@@ -146,4 +195,33 @@ export function parseLoginRequest(body: unknown): LoginRequest {
   }
 
   return { email: email as string, password: password as string };
+}
+
+/**
+ * Parse and validate a seller-onboarding request body. Slugs are normalized
+ * (trim + lowercase), names are trimmed, and every field is checked against
+ * the shared {@link AUTH_LIMITS} and {@link SLUG_PATTERN}. Field problems are
+ * collected into a single {@link ValidationError} with per-field errors. Only
+ * the four onboarding fields are consumed; anything else in the body is
+ * ignored (never trusted) by callers.
+ */
+export function parseSellerOnboardingRequest(body: unknown): SellerOnboardingRequest {
+  const record = asObjectBody(body);
+  const fields: FieldErrors = {};
+
+  const slug = collectField(fields, record, "slug", "Slug", normalizeSlug, (value) => validateSlug(value, "Slug"));
+  const displayName = collectField(fields, record, "displayName", "Display name", normalizeName, validateDisplayName);
+  const storeName = collectField(fields, record, "storeName", "Store name", normalizeName, validateStoreName);
+  const storeSlug = collectField(fields, record, "storeSlug", "Store slug", normalizeSlug, (value) => validateSlug(value, "Store slug"));
+
+  if (Object.keys(fields).length > 0) {
+    throw new ValidationError("The request is invalid.", fields);
+  }
+
+  return {
+    slug: slug as string,
+    displayName: displayName as string,
+    storeName: storeName as string,
+    storeSlug: storeSlug as string,
+  };
 }

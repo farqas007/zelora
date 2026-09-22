@@ -18,6 +18,8 @@ describe("loadConfig auth defaults", () => {
     expect(config.rateLimitLoginEmailWindowSeconds).toBe(900);
     expect(config.rateLimitRegisterIpMax).toBe(10);
     expect(config.rateLimitRegisterIpWindowSeconds).toBe(3_600);
+    expect(config.rateLimitSellerOnboardingIpMax).toBe(10);
+    expect(config.rateLimitSellerOnboardingIpWindowSeconds).toBe(3_600);
   });
 
   it("defaults the session cookie to Secure in production", () => {
@@ -55,6 +57,8 @@ describe("loadConfig auth defaults", () => {
     expect(defaults.rateLimitLoginEmailWindowSeconds).toBe(900);
     expect(defaults.rateLimitRegisterIpMax).toBe(10);
     expect(defaults.rateLimitRegisterIpWindowSeconds).toBe(3_600);
+    expect(defaults.rateLimitSellerOnboardingIpMax).toBe(10);
+    expect(defaults.rateLimitSellerOnboardingIpWindowSeconds).toBe(3_600);
 
     const config = loadConfig({
       NODE_ENV: "test",
@@ -66,6 +70,8 @@ describe("loadConfig auth defaults", () => {
       RATE_LIMIT_LOGIN_EMAIL_WINDOW_SECONDS: "120",
       RATE_LIMIT_REGISTER_IP_MAX: "2",
       RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS: "1800",
+      RATE_LIMIT_SELLER_ONBOARDING_IP_MAX: "7",
+      RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "720",
     });
 
     expect(config.rateLimitEnabled).toBe(false);
@@ -76,6 +82,8 @@ describe("loadConfig auth defaults", () => {
     expect(config.rateLimitLoginEmailWindowSeconds).toBe(120);
     expect(config.rateLimitRegisterIpMax).toBe(2);
     expect(config.rateLimitRegisterIpWindowSeconds).toBe(1_800);
+    expect(config.rateLimitSellerOnboardingIpMax).toBe(7);
+    expect(config.rateLimitSellerOnboardingIpWindowSeconds).toBe(720);
   });
 });
 
@@ -114,6 +122,10 @@ describe("loadConfig invalid values", () => {
     { name: "negative login email window", env: { RATE_LIMIT_LOGIN_EMAIL_WINDOW_SECONDS: "-1" } },
     { name: "zero register IP max", env: { RATE_LIMIT_REGISTER_IP_MAX: "0" } },
     { name: "non-numeric register IP window", env: { RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS: "hour" } },
+    { name: "zero seller onboarding IP max", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_MAX: "0" } },
+    { name: "negative seller onboarding IP max", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_MAX: "-2" } },
+    { name: "fractional seller onboarding IP window", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "3600.5" } },
+    { name: "non-numeric seller onboarding IP window", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "hour" } },
     { name: "unparsable rate-limit enabled flag", env: { RATE_LIMIT_ENABLED: "maybe" } },
     { name: "non-1/0 trust proxy shorthand", env: { RATE_LIMIT_TRUST_PROXY: "yes" } },
   ])("rejects $name with APP_CONFIG_INVALID", ({ env }) => {

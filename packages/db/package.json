@@ -28,6 +28,14 @@
     "./users/local": {
       "types": "./src/users/local-repository.ts",
       "default": "./src/users/local-repository.ts"
+    },
+    "./seller": {
+      "types": "./src/seller/repository.ts",
+      "default": "./src/seller/repository.ts"
+    },
+    "./seller/local": {
+      "types": "./src/seller/local-repository.ts",
+      "default": "./src/seller/local-repository.ts"
     }
   },
   "scripts": {

@@ -3,6 +3,7 @@ import type { ApiFailure, HealthResponse } from "@zelora/shared";
 import { loadConfig, type PasswordHasher } from "@zelora/core";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { UserRepository } from "@zelora/db/users";
+import type { SellerRepository } from "@zelora/db/seller";
 import { createApp, type AppDependencies } from "./app";
 import type { Clock } from "./services/clock";
 
@@ -40,12 +41,20 @@ const sessionRepository: AuthSessionRepository = {
   purgeExpired: unimplemented,
 };
 
+const sellerRepository: SellerRepository = {
+  findByUserId: unimplemented,
+  findByProfileSlug: unimplemented,
+  findStoreBySlug: unimplemented,
+  createOnboarding: unimplemented,
+};
+
 function makeApp(): ReturnType<typeof createApp> {
   const config = makeTestConfig();
   const dependencies: AppDependencies = {
     config,
     userRepository,
     sessionRepository,
+    sellerRepository,
     passwordHasher,
     clock,
   };

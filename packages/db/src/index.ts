@@ -20,3 +20,11 @@ export type {
   UserRepository,
   CreateUserInput,
 } from "./users/repository";
+export type {
+  SellerProfileRecord,
+  StoreRecord,
+  SellerRepository,
+  CreateOnboardingInput,
+  OnboardingConflictReason,
+  CreateOnboardingResult,
+} from "./seller/repository";

@@ -192,6 +192,8 @@ describe("auth middleware", () => {
     rateLimitLoginEmailWindowSeconds: 900,
     rateLimitRegisterIpMax: 10,
     rateLimitRegisterIpWindowSeconds: 3_600,
+    rateLimitSellerOnboardingIpMax: 10,
+    rateLimitSellerOnboardingIpWindowSeconds: 3_600,
   };
 
   let clock: FakeClock;

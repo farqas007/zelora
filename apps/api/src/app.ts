@@ -3,12 +3,15 @@ import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { UserRepository } from "@zelora/db/users";
+import type { SellerRepository } from "@zelora/db/seller";
 import { createLogger, type AppConfig, type PasswordHasher } from "@zelora/core";
 import { createErrorHandler, notFoundHandler } from "./middleware/error";
 import { requestLogger } from "./middleware/request-log";
 import { createAuthRoutes } from "./routes/auth";
 import { createHealthRoutes } from "./routes/health";
+import { createSellerRoutes } from "./routes/seller";
 import { AuthService } from "./services/auth";
+import { SellerService } from "./services/seller";
 import type { Clock } from "./services/clock";
 import type { ClientIpResolver } from "./services/client-ip";
 import { MemoryWindowRateLimiter, type RateLimiter } from "./services/rate-limit";
@@ -27,6 +30,7 @@ export interface AppDependencies {
   config: AppConfig;
   userRepository: UserRepository;
   sessionRepository: AuthSessionRepository;
+  sellerRepository: SellerRepository;
   passwordHasher: PasswordHasher;
   clock: Clock;
   rateLimiter?: RateLimiter;
@@ -34,7 +38,7 @@ export interface AppDependencies {
 }
 
 export function createApp(dependencies: AppDependencies): Hono {
-  const { config, userRepository, sessionRepository, passwordHasher, clock } = dependencies;
+  const { config, userRepository, sessionRepository, sellerRepository, passwordHasher, clock } = dependencies;
   const rateLimiter = dependencies.rateLimiter ?? new MemoryWindowRateLimiter(clock);
   const clientIpResolver: ClientIpResolver = dependencies.clientIpResolver ?? {
     resolve: () => undefined,
@@ -66,11 +70,25 @@ export function createApp(dependencies: AppDependencies): Hono {
     rateLimiter,
   });
 
+  const sellerService = new SellerService({ sellerRepository });
+
   app.route(
     "/api/auth",
     createAuthRoutes({
       config,
       authService,
+      userRepository,
+      sessionRepository,
+      clock,
+      rateLimiter,
+      clientIpResolver,
+    }),
+  );
+  app.route(
+    "/api/seller",
+    createSellerRoutes({
+      config,
+      sellerService,
       userRepository,
       sessionRepository,
       clock,

@@ -18,6 +18,8 @@ export interface AppConfig {
   rateLimitLoginEmailWindowSeconds: number;
   rateLimitRegisterIpMax: number;
   rateLimitRegisterIpWindowSeconds: number;
+  rateLimitSellerOnboardingIpMax: number;
+  rateLimitSellerOnboardingIpWindowSeconds: number;
 }
 
 const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
@@ -37,6 +39,8 @@ const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
   rateLimitLoginEmailWindowSeconds: 900,
   rateLimitRegisterIpMax: 10,
   rateLimitRegisterIpWindowSeconds: 3_600,
+  rateLimitSellerOnboardingIpMax: 10,
+  rateLimitSellerOnboardingIpWindowSeconds: 3_600,
 };
 
 function parsePort(value: string | undefined): number {
@@ -198,6 +202,16 @@ export function loadConfig(
       env.RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS,
       DEFAULT_CONFIG.rateLimitRegisterIpWindowSeconds,
       "RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS",
+    ),
+    rateLimitSellerOnboardingIpMax: parsePositiveInteger(
+      env.RATE_LIMIT_SELLER_ONBOARDING_IP_MAX,
+      DEFAULT_CONFIG.rateLimitSellerOnboardingIpMax,
+      "RATE_LIMIT_SELLER_ONBOARDING_IP_MAX",
+    ),
+    rateLimitSellerOnboardingIpWindowSeconds: parsePositiveInteger(
+      env.RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS,
+      DEFAULT_CONFIG.rateLimitSellerOnboardingIpWindowSeconds,
+      "RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS",
     ),
   };
 }

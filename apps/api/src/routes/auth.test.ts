@@ -6,6 +6,7 @@ import type {
   CreateAuthSessionInput,
 } from "@zelora/db/auth";
 import type { UserRecord, UserRepository } from "@zelora/db/users";
+import type { SellerRepository } from "@zelora/db/seller";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
@@ -149,6 +150,21 @@ class FakeAuthSessionRepository implements AuthSessionRepository {
   }
 }
 
+/**
+ * Auth routes never touch the seller repository; this stub fails loudly if
+ * anything surprised us by invoking it.
+ */
+const unimplementedSeller = (): never => {
+  throw new Error("unexpected seller repository call");
+};
+
+const sellerRepository: SellerRepository = {
+  findByUserId: unimplementedSeller,
+  findByProfileSlug: unimplementedSeller,
+  findStoreBySlug: unimplementedSeller,
+  createOnboarding: unimplementedSeller,
+};
+
 describe("auth routes", () => {
   const baseConfig: AppConfig = {
     nodeEnv: "test",
@@ -168,6 +184,8 @@ describe("auth routes", () => {
     rateLimitLoginEmailWindowSeconds: 900,
     rateLimitRegisterIpMax: 10,
     rateLimitRegisterIpWindowSeconds: 3_600,
+    rateLimitSellerOnboardingIpMax: 10,
+    rateLimitSellerOnboardingIpWindowSeconds: 3_600,
   };
 
   let clock: FakeClock;
@@ -185,6 +203,7 @@ describe("auth routes", () => {
       config: baseConfig,
       userRepository,
       sessionRepository,
+      sellerRepository,
       passwordHasher,
       clock,
     });
@@ -763,6 +782,7 @@ describe("auth routes", () => {
         config: rateLimitedConfig(overrides),
         userRepository,
         sessionRepository,
+        sellerRepository,
         passwordHasher,
         clock,
         rateLimiter: limiter,

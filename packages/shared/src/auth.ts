@@ -135,3 +135,14 @@ export type SellerOnboardingEnvelope = ApiEnvelope<{
   sellerProfile: SellerProfileDto;
   store: StoreDto;
 }>;
+export type AuthMeEnvelope = ApiEnvelope<{
+  user: UserDto;
+}>;
+
+export type LogoutEnvelope = ApiEnvelope<{
+  done: true;
+}>;
+
+export type LogoutAllEnvelope = ApiEnvelope<{
+  done: true;
+}>;

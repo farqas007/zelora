@@ -36,7 +36,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     cors({
       origin: config.corsOrigin,
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "Accept", "X-Request-Id"],
+      allowHeaders: ["Content-Type", "Accept", "X-Request-Id", "X-Zelora-CSRF"],
       exposeHeaders: ["X-Request-Id"],
     }),
   );

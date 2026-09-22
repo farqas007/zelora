@@ -180,12 +180,13 @@ describe("auth routes", () => {
     });
   });
 
-  function postJson(path: string, body: unknown, cookie?: string) {
+  function postJson(path: string, body: unknown, cookie?: string, csrfToken?: string) {
     return app.request(path, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         ...(cookie === undefined ? {} : { Cookie: cookie }),
+        ...(csrfToken === undefined ? {} : { "X-Zelora-CSRF": csrfToken }),
       },
       body: JSON.stringify(body),
     });
@@ -201,6 +202,41 @@ describe("auth routes", () => {
       throw new Error("expected a set-cookie header");
     }
     return setCookie.split(";")[0] ?? "";
+  }
+
+  async function registerSession(
+    overrides: Record<string, unknown> = {},
+  ): Promise<{
+    response: Response;
+    cookie: string;
+    csrfToken: string;
+    userId: string;
+  }> {
+    const response = await register(overrides);
+    const body = (await response.json()) as { ok: true; data: AuthUserResponse };
+    return {
+      response,
+      cookie: extractSessionCookie(response),
+      csrfToken: body.data.session.csrfToken,
+      userId: body.data.user.id,
+    };
+  }
+
+  async function loginSession(): Promise<{
+    response: Response;
+    cookie: string;
+    csrfToken: string;
+  }> {
+    const response = await postJson("/api/auth/login", {
+      email: "user@example.com",
+      password: "password123",
+    });
+    const body = (await response.json()) as { ok: true; data: AuthUserResponse };
+    return {
+      response,
+      cookie: extractSessionCookie(response),
+      csrfToken: body.data.session.csrfToken,
+    };
   }
 
   async function expectFailure(
@@ -227,6 +263,13 @@ describe("auth routes", () => {
   }
 
   describe("POST /api/auth/register", () => {
+    it("A: registration works without a CSRF header", async () => {
+      const response = await register();
+
+      expect(response.status).toBe(201);
+      expect(response.headers.get("set-cookie")).toMatch(/^zelora_session=/);
+    });
+
     it("A: returns 201 with ok=true, user, session, and a session cookie", async () => {
       const response = await register();
 
@@ -327,6 +370,16 @@ describe("auth routes", () => {
       expect((await register()).status).toBe(201);
     });
 
+    it("C: login works without a CSRF header", async () => {
+      const response = await postJson("/api/auth/login", {
+        email: "user@example.com",
+        password: "password123",
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.headers.get("set-cookie")).toMatch(/^zelora_session=/);
+    });
+
     it("C: valid login returns 200 with user, session and a session cookie", async () => {
       const response = await postJson("/api/auth/login", {
         email: "user@example.com",
@@ -407,13 +460,57 @@ describe("auth routes", () => {
       await expectFailure(response, "SESSION_EXPIRED", 401);
     });
 
+    it("E: without a CSRF header returns 403 CSRF_FAILED and the session remains", async () => {
+      const { cookie, csrfToken, userId } = await registerSession();
+      const sessionsBefore = sessionRepository.getSessionsForUser(userId).length;
+
+      const response = await postJson("/api/auth/logout", {}, cookie);
+
+      expect(response.status).toBe(403);
+      const rawBody = await response.text();
+      const body = JSON.parse(rawBody) as ApiFailure;
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe("CSRF_FAILED");
+      expect(body.error.message).toBe("CSRF validation failed.");
+      expect(rawBody).not.toContain(csrfToken);
+      expect(sessionRepository.getSessionsForUser(userId)).toHaveLength(
+        sessionsBefore,
+      );
+      expect(response.headers.get("set-cookie")).toBeNull();
+    });
+
+    it("E: with a wrong CSRF header returns 403 CSRF_FAILED and the session remains", async () => {
+      const { cookie, csrfToken, userId } = await registerSession();
+      const sessionsBefore = sessionRepository.getSessionsForUser(userId).length;
+
+      const response = await postJson(
+        "/api/auth/logout",
+        {},
+        cookie,
+        "wrong-token",
+      );
+
+      expect(response.status).toBe(403);
+      const rawBody = await response.text();
+      const body = JSON.parse(rawBody) as ApiFailure;
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe("CSRF_FAILED");
+      expect(body.error.message).toBe("CSRF validation failed.");
+      expect(rawBody).not.toContain(csrfToken);
+      expect(sessionRepository.getSessionsForUser(userId)).toHaveLength(
+        sessionsBefore,
+      );
+    });
+
     it("E: deletes only the current session and clears the cookie", async () => {
       const registerResponse = await register();
       const cookieA = extractSessionCookie(registerResponse);
-      const userId = ((await registerResponse.json()) as {
+      const registerBody = (await registerResponse.json()) as {
         ok: true;
         data: AuthUserResponse;
-      }).data.user.id;
+      };
+      const csrfA = registerBody.data.session.csrfToken;
+      const userId = registerBody.data.user.id;
 
       const loginResponse = await postJson("/api/auth/login", {
         email: "user@example.com",
@@ -422,7 +519,12 @@ describe("auth routes", () => {
       const cookieB = extractSessionCookie(loginResponse);
       expect(sessionRepository.getSessionsForUser(userId)).toHaveLength(2);
 
-      const response = await postJson("/api/auth/logout", {}, cookieA);
+      const response = await postJson(
+        "/api/auth/logout",
+        {},
+        cookieA,
+        csrfA,
+      );
 
       expect(response.status).toBe(200);
       const body = (await response.json()) as { ok: true; data: { done: true } };
@@ -448,13 +550,29 @@ describe("auth routes", () => {
       await expectFailure(response, "SESSION_EXPIRED", 401);
     });
 
+    it("F: without a CSRF header returns 403 and all sessions remain", async () => {
+      const { cookie, csrfToken, userId } = await registerSession();
+      await loginSession();
+      const sessionsBefore = sessionRepository.getSessionsForUser(userId).length;
+      expect(sessionsBefore).toBe(2);
+
+      const response = await postJson("/api/auth/logout-all", {}, cookie);
+
+      expect(response.status).toBe(403);
+      const rawBody = await response.text();
+      const body = JSON.parse(rawBody) as ApiFailure;
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe("CSRF_FAILED");
+      expect(body.error.message).toBe("CSRF validation failed.");
+      expect(rawBody).not.toContain(csrfToken);
+      expect(sessionRepository.getSessionsForUser(userId)).toHaveLength(
+        sessionsBefore,
+      );
+      expect(response.headers.get("set-cookie")).toBeNull();
+    });
+
     it("F: deletes every session for the user and clears the cookie", async () => {
-      const registerResponse = await register();
-      const cookieA = extractSessionCookie(registerResponse);
-      const userId = ((await registerResponse.json()) as {
-        ok: true;
-        data: AuthUserResponse;
-      }).data.user.id;
+      const { cookie: cookieA, csrfToken: csrfA, userId } = await registerSession();
 
       const cookieB = extractSessionCookie(
         await postJson("/api/auth/login", {
@@ -464,7 +582,12 @@ describe("auth routes", () => {
       );
       expect(sessionRepository.getSessionsForUser(userId)).toHaveLength(2);
 
-      const response = await postJson("/api/auth/logout-all", {}, cookieA);
+      const response = await postJson(
+        "/api/auth/logout-all",
+        {},
+        cookieA,
+        csrfA,
+      );
 
       expect(response.status).toBe(200);
       const body = (await response.json()) as { ok: true; data: { done: true } };
@@ -483,6 +606,14 @@ describe("auth routes", () => {
       const response = await app.request("/api/auth/me");
 
       await expectFailure(response, "SESSION_EXPIRED", 401);
+    });
+
+    it("G: works without a CSRF header", async () => {
+      const { cookie } = await registerSession();
+
+      const response = await getWithCookie("/api/auth/me", cookie);
+
+      expect(response.status).toBe(200);
     });
 
     it("G: returns the user DTO without passwordHash and creates no sessions", async () => {

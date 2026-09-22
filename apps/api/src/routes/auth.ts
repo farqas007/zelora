@@ -16,6 +16,7 @@ import type {
 } from "@zelora/shared";
 import type { AppEnv } from "../context";
 import { createAuthMiddleware } from "../middleware/auth";
+import { createCsrfMiddleware } from "../middleware/csrf";
 import type { AuthService } from "../services/auth";
 import { clearSessionCookie, setSessionCookie } from "../services/cookie";
 import type { Clock } from "../services/clock";
@@ -81,6 +82,7 @@ export function createAuthRoutes(dependencies: AuthRoutesDependencies): Hono<App
     clock,
     config,
   });
+  const requireCsrf = createCsrfMiddleware();
 
   app.post("/register", async (c) => {
     const body = await readJsonBody(c);
@@ -100,14 +102,14 @@ export function createAuthRoutes(dependencies: AuthRoutesDependencies): Hono<App
     return c.json<LoginEnvelope>({ ok: true, data });
   });
 
-  app.post("/logout", requireAuth, async (c) => {
+  app.post("/logout", requireAuth, requireCsrf, async (c) => {
     const auth = c.get("auth");
     await sessionRepository.deleteById(auth.session.id);
     clearSessionCookie(config, c);
     return c.json<LogoutEnvelope>({ ok: true, data: { done: true } });
   });
 
-  app.post("/logout-all", requireAuth, async (c) => {
+  app.post("/logout-all", requireAuth, requireCsrf, async (c) => {
     const auth = c.get("auth");
     await sessionRepository.deleteAllForUser(auth.user.id);
     clearSessionCookie(config, c);

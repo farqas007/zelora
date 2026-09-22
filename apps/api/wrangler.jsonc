@@ -8,10 +8,9 @@
       // Raw D1 binding name, exposed to the Worker as `env.DB`.
       "binding": "DB",
       "database_name": "zelora",
-      // PLACEHOLDER ONLY. Set this to the real database_id returned by
-      // `wrangler d1 create zelora` (or `wrangler d1 list`) before running any
-      // Wrangler command that reads this config. Never commit a real id.
-      "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+      // database_id contains the real Cloudflare D1 database ID for the zelora
+      // database. It is configuration/identification data, not a secret.
+      "database_id": "245a64cf-0841-4faf-978c-171c03fd0dc8",
       // Reuses the existing Drizzle migrations (packages/db/migrations),
       // resolved relative to this config file (apps/api).
       "migrations_dir": "../../packages/db/migrations"

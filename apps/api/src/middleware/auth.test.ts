@@ -184,6 +184,14 @@ describe("auth middleware", () => {
     sessionTtlSeconds: 2_592_000,
     sessionCookieSecure: false,
     pbkdf2Iterations: 1_000,
+    rateLimitEnabled: true,
+    rateLimitTrustProxy: false,
+    rateLimitLoginIpMax: 20,
+    rateLimitLoginIpWindowSeconds: 900,
+    rateLimitLoginEmailMax: 10,
+    rateLimitLoginEmailWindowSeconds: 900,
+    rateLimitRegisterIpMax: 10,
+    rateLimitRegisterIpWindowSeconds: 3_600,
   };
 
   let clock: FakeClock;

@@ -10,6 +10,14 @@ describe("loadConfig auth defaults", () => {
     expect(config.sessionTtlSeconds).toBe(2_592_000);
     expect(config.sessionCookieSecure).toBe(false);
     expect(config.pbkdf2Iterations).toBe(210_000);
+    expect(config.rateLimitEnabled).toBe(true);
+    expect(config.rateLimitTrustProxy).toBe(false);
+    expect(config.rateLimitLoginIpMax).toBe(20);
+    expect(config.rateLimitLoginIpWindowSeconds).toBe(900);
+    expect(config.rateLimitLoginEmailMax).toBe(10);
+    expect(config.rateLimitLoginEmailWindowSeconds).toBe(900);
+    expect(config.rateLimitRegisterIpMax).toBe(10);
+    expect(config.rateLimitRegisterIpWindowSeconds).toBe(3_600);
   });
 
   it("defaults the session cookie to Secure in production", () => {
@@ -34,6 +42,40 @@ describe("loadConfig auth defaults", () => {
     expect(config.sessionCookieName).toBe("custom_session");
     expect(config.sessionTtlSeconds).toBe(7200);
     expect(config.pbkdf2Iterations).toBe(100_000);
+  });
+
+  it("applies rate-limit defaults and parses explicit overrides", () => {
+    const defaults = loadConfig({ NODE_ENV: "test" });
+
+    expect(defaults.rateLimitEnabled).toBe(true);
+    expect(defaults.rateLimitTrustProxy).toBe(false);
+    expect(defaults.rateLimitLoginIpMax).toBe(20);
+    expect(defaults.rateLimitLoginIpWindowSeconds).toBe(900);
+    expect(defaults.rateLimitLoginEmailMax).toBe(10);
+    expect(defaults.rateLimitLoginEmailWindowSeconds).toBe(900);
+    expect(defaults.rateLimitRegisterIpMax).toBe(10);
+    expect(defaults.rateLimitRegisterIpWindowSeconds).toBe(3_600);
+
+    const config = loadConfig({
+      NODE_ENV: "test",
+      RATE_LIMIT_ENABLED: "false",
+      RATE_LIMIT_TRUST_PROXY: "true",
+      RATE_LIMIT_LOGIN_IP_MAX: "5",
+      RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "60",
+      RATE_LIMIT_LOGIN_EMAIL_MAX: "3",
+      RATE_LIMIT_LOGIN_EMAIL_WINDOW_SECONDS: "120",
+      RATE_LIMIT_REGISTER_IP_MAX: "2",
+      RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS: "1800",
+    });
+
+    expect(config.rateLimitEnabled).toBe(false);
+    expect(config.rateLimitTrustProxy).toBe(true);
+    expect(config.rateLimitLoginIpMax).toBe(5);
+    expect(config.rateLimitLoginIpWindowSeconds).toBe(60);
+    expect(config.rateLimitLoginEmailMax).toBe(3);
+    expect(config.rateLimitLoginEmailWindowSeconds).toBe(120);
+    expect(config.rateLimitRegisterIpMax).toBe(2);
+    expect(config.rateLimitRegisterIpWindowSeconds).toBe(1_800);
   });
 });
 
@@ -60,6 +102,20 @@ describe("loadConfig invalid values", () => {
     { name: "non-1/0 secure flag shorthand", env: { SESSION_COOKIE_SECURE: "yes" } },
     { name: "whitespace-only cookie name", env: { SESSION_COOKIE_NAME: "   " } },
     { name: "invalid port", env: { PORT: "70000" } },
+    { name: "zero login IP max", env: { RATE_LIMIT_LOGIN_IP_MAX: "0" } },
+    { name: "negative login IP max", env: { RATE_LIMIT_LOGIN_IP_MAX: "-1" } },
+    { name: "fractional login IP max", env: { RATE_LIMIT_LOGIN_IP_MAX: "1.5" } },
+    { name: "non-numeric login IP max", env: { RATE_LIMIT_LOGIN_IP_MAX: "many" } },
+    { name: "zero login IP window", env: { RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "0" } },
+    { name: "negative login IP window", env: { RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "-10" } },
+    { name: "fractional login IP window", env: { RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "900.5" } },
+    { name: "non-numeric login IP window", env: { RATE_LIMIT_LOGIN_IP_WINDOW_SECONDS: "ten" } },
+    { name: "zero login email max", env: { RATE_LIMIT_LOGIN_EMAIL_MAX: "0" } },
+    { name: "negative login email window", env: { RATE_LIMIT_LOGIN_EMAIL_WINDOW_SECONDS: "-1" } },
+    { name: "zero register IP max", env: { RATE_LIMIT_REGISTER_IP_MAX: "0" } },
+    { name: "non-numeric register IP window", env: { RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS: "hour" } },
+    { name: "unparsable rate-limit enabled flag", env: { RATE_LIMIT_ENABLED: "maybe" } },
+    { name: "non-1/0 trust proxy shorthand", env: { RATE_LIMIT_TRUST_PROXY: "yes" } },
   ])("rejects $name with APP_CONFIG_INVALID", ({ env }) => {
     expectConfigRejected(env);
   });

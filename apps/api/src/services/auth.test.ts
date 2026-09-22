@@ -7,6 +7,7 @@ import type {
 } from "@zelora/core";
 import { AUTH_ERROR_CODES, type UserRole, type UserStatus } from "@zelora/shared";
 import type { Clock } from "./clock";
+import type { RateLimitOutcome, RateLimiter } from "./rate-limit";
 import type {
   UserRepository,
   UserRecord,
@@ -172,6 +173,33 @@ async function expectAuthError(
   }
 }
 
+const allowedOutcome: RateLimitOutcome = {
+  allowed: true,
+  remaining: 9,
+  resetAt: new Date("2026-01-01T00:00:00.000Z"),
+};
+
+const blockedOutcome: RateLimitOutcome = {
+  allowed: false,
+  remaining: 0,
+  resetAt: new Date("2026-01-01T00:00:15.000Z"),
+};
+
+function makeRateLimiter(): {
+  limiter: RateLimiter;
+  consume: ReturnType<typeof vi.fn>;
+  reset: ReturnType<typeof vi.fn>;
+  sweep: ReturnType<typeof vi.fn>;
+  clear: ReturnType<typeof vi.fn>;
+} {
+  const consume = vi.fn(async (): Promise<RateLimitOutcome> => allowedOutcome);
+  const reset = vi.fn(async (): Promise<void> => undefined);
+  const sweep = vi.fn(async (): Promise<void> => undefined);
+  const clear = vi.fn((): void => undefined);
+  const limiter: RateLimiter = { consume, reset, sweep, clear };
+  return { limiter, consume, reset, sweep, clear };
+}
+
 describe("AuthService", () => {
   const baseConfig: AppConfig = {
     nodeEnv: "test",
@@ -183,6 +211,14 @@ describe("AuthService", () => {
     sessionTtlSeconds: 2_592_000,
     sessionCookieSecure: false,
     pbkdf2Iterations: 1_000,
+    rateLimitEnabled: true,
+    rateLimitTrustProxy: false,
+    rateLimitLoginIpMax: 20,
+    rateLimitLoginIpWindowSeconds: 900,
+    rateLimitLoginEmailMax: 10,
+    rateLimitLoginEmailWindowSeconds: 900,
+    rateLimitRegisterIpMax: 10,
+    rateLimitRegisterIpWindowSeconds: 3_600,
   };
 
   let clock: FakeClock;
@@ -557,6 +593,225 @@ describe("AuthService", () => {
       const sessionCountAfter =
         sessionRepository.getSessionsForUser(user!.id).length;
       expect(sessionCountAfter).toBe(2);
+    });
+  });
+
+  describe("login email rate limiting", () => {
+    let current: ReturnType<typeof makeRateLimiter>;
+    let limitedService: AuthService;
+
+    beforeEach(async () => {
+      current = makeRateLimiter();
+      limitedService = new AuthService({
+        config: baseConfig,
+        userRepository,
+        sessionRepository,
+        passwordHasher,
+        clock,
+        rateLimiter: current.limiter,
+      });
+      await limitedService.register({
+        email: "user@example.com",
+        password: "password123",
+        name: "Ada",
+      });
+    });
+
+    function rejected(
+      run: () => Promise<unknown>,
+    ): Promise<AppError> {
+      return run().then(
+        () => {
+          throw new Error("expected login to reject");
+        },
+        (error: unknown) => {
+          expect(error).toBeInstanceOf(AppError);
+          return error as AppError;
+        },
+      );
+    }
+
+    it("consumes the email bucket (after normalization) before any user lookup", async () => {
+      const findByEmailSpy = vi.spyOn(userRepository, "findByEmail");
+
+      await limitedService.login({
+        email: "  USER@Example.COM ",
+        password: "password123",
+      });
+
+      expect(current.consume).toHaveBeenCalledWith(
+        "auth:login:email:user@example.com",
+        baseConfig.rateLimitLoginEmailMax,
+        baseConfig.rateLimitLoginEmailWindowSeconds,
+      );
+      const consumeOrder = current.consume.mock.invocationCallOrder[0]!;
+      const lookupOrder = findByEmailSpy.mock.invocationCallOrder[0]!;
+      expect(consumeOrder).toBeLessThan(lookupOrder);
+    });
+
+    it("skips the email limiter when rate limiting is disabled", async () => {
+      const service = new AuthService({
+        config: { ...baseConfig, rateLimitEnabled: false },
+        userRepository,
+        sessionRepository,
+        passwordHasher,
+        clock,
+        rateLimiter: current.limiter,
+      });
+
+      const result = await service.login({
+        email: "user@example.com",
+        password: "password123",
+      });
+
+      expect(result.user.email).toBe("user@example.com");
+      expect(current.consume).not.toHaveBeenCalled();
+    });
+
+    it("over-limit email runs dummy password verification", async () => {
+      current.consume.mockResolvedValueOnce(blockedOutcome);
+      const verifySpy = vi.spyOn(passwordHasher, "verify");
+
+      await expect(
+        limitedService.login({
+          email: "user@example.com",
+          password: "whatever",
+        }),
+      ).rejects.toBeInstanceOf(AppError);
+
+      expect(verifySpy).toHaveBeenCalledTimes(1);
+      expect(verifySpy).toHaveBeenCalledWith("whatever", expect.any(String));
+    });
+
+    it("over-limit email does not call findByEmail", async () => {
+      current.consume.mockResolvedValueOnce(blockedOutcome);
+      const findByEmailSpy = vi.spyOn(userRepository, "findByEmail");
+
+      await expect(
+        limitedService.login({
+          email: "user@example.com",
+          password: "password123",
+        }),
+      ).rejects.toBeInstanceOf(AppError);
+
+      expect(findByEmailSpy).not.toHaveBeenCalled();
+    });
+
+    it("over-limit email returns the generic INVALID_CREDENTIALS 401", async () => {
+      current.consume.mockResolvedValueOnce(blockedOutcome);
+
+      const error = await rejected(() =>
+        limitedService.login({
+          email: "user@example.com",
+          password: "password123",
+        }),
+      );
+
+      expect(error.code).toBe(AUTH_ERROR_CODES.INVALID_CREDENTIALS);
+      expect(error.statusCode).toBe(401);
+      expect(error.message).toBe("Invalid email or password.");
+      expect(error.details).toBeUndefined();
+    });
+
+    it("over-limit email does not expose whether the account exists", async () => {
+      current.consume.mockResolvedValue(blockedOutcome);
+
+      const known = await rejected(() =>
+        limitedService.login({
+          email: "user@example.com",
+          password: "password123",
+        }),
+      );
+      const unknown = await rejected(() =>
+        limitedService.login({
+          email: "nobody@example.com",
+          password: "password123",
+        }),
+      );
+
+      expect(known.code).toBe(unknown.code);
+      expect(known.statusCode).toBe(unknown.statusCode);
+      expect(known.message).toBe(unknown.message);
+      expect(known.details).toBeUndefined();
+      expect(unknown.details).toBeUndefined();
+    });
+
+    it("keys the bucket by the attempted (normalized) email regardless of existence", async () => {
+      await expect(
+        limitedService.login({
+          email: "nobody@example.com",
+          password: "password123",
+        }),
+      ).rejects.toBeInstanceOf(AppError);
+
+      expect(current.consume).toHaveBeenCalledWith(
+        "auth:login:email:nobody@example.com",
+        baseConfig.rateLimitLoginEmailMax,
+        baseConfig.rateLimitLoginEmailWindowSeconds,
+      );
+    });
+
+    it("successful login resets the email bucket", async () => {
+      const result = await limitedService.login({
+        email: "user@example.com",
+        password: "password123",
+      });
+
+      expect(result.user.email).toBe("user@example.com");
+      expect(current.reset).toHaveBeenCalledWith("auth:login:email:user@example.com");
+    });
+
+    it("failed login does not reset the email bucket", async () => {
+      await expect(
+        limitedService.login({
+          email: "user@example.com",
+          password: "wrong-password",
+        }),
+      ).rejects.toBeInstanceOf(AppError);
+
+      expect(current.reset).not.toHaveBeenCalled();
+    });
+
+    it("never leaks the password or rate-limit details to the caller", async () => {
+      current.consume.mockResolvedValueOnce({
+        allowed: true,
+        remaining: 9,
+        resetAt: new Date(),
+      });
+      current.consume.mockResolvedValueOnce(blockedOutcome);
+
+      await expect(
+        limitedService.login({
+          email: "nobody@example.com",
+          password: "hunter2hunter",
+        }),
+      ).rejects.toBeInstanceOf(AppError);
+
+      const consumedArgs = current.consume.mock.calls;
+      expect(JSON.stringify(consumedArgs)).not.toContain("hunter2hunter");
+
+      current.consume.mockClear();
+      current.consume.mockResolvedValue(blockedOutcome);
+      const error = await rejected(() =>
+        limitedService.login({
+          email: "user@example.com",
+          password: "supersecret42",
+        }),
+      );
+      expect(error.message).not.toContain("supersecret42");
+      expect(error.details).toBeUndefined();
+      const blockedArgs = current.consume.mock.calls;
+      expect(JSON.stringify(blockedArgs)).not.toContain("supersecret42");
+    });
+
+    it("registration never consumes the email limiter", async () => {
+      await limitedService.register({
+        email: "another@example.com",
+        password: "password123",
+        name: "Bob",
+      });
+
+      expect(current.consume).not.toHaveBeenCalled();
     });
   });
 

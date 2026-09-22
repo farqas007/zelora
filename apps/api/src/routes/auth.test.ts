@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PBKDF2PasswordHasher, type AppConfig, type PasswordHasher } from "@zelora/core";
 import type {
   AuthSessionRecord,
@@ -9,6 +9,8 @@ import type { UserRecord, UserRepository } from "@zelora/db/users";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
+import type { ClientIpResolver } from "../services/client-ip";
+import { MemoryWindowRateLimiter } from "../services/rate-limit";
 
 class FakeClock implements Clock {
   private currentTime: Date;
@@ -158,6 +160,14 @@ describe("auth routes", () => {
     sessionTtlSeconds: 2_592_000,
     sessionCookieSecure: false,
     pbkdf2Iterations: 1_000,
+    rateLimitEnabled: true,
+    rateLimitTrustProxy: false,
+    rateLimitLoginIpMax: 20,
+    rateLimitLoginIpWindowSeconds: 900,
+    rateLimitLoginEmailMax: 10,
+    rateLimitLoginEmailWindowSeconds: 900,
+    rateLimitRegisterIpMax: 10,
+    rateLimitRegisterIpWindowSeconds: 3_600,
   };
 
   let clock: FakeClock;
@@ -724,6 +734,259 @@ describe("auth routes", () => {
       const body = (await response.json()) as { ok: true; data: { status: string } };
       expect(body.ok).toBe(true);
       expect(body.data.status).toBe("ok");
+    });
+  });
+
+  describe("auth route rate limiting", () => {
+    const headerIpResolver: ClientIpResolver = {
+      resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+    };
+
+    function rateLimitedConfig(overrides: Partial<AppConfig> = {}): AppConfig {
+      return {
+        ...baseConfig,
+        rateLimitLoginIpMax: 2,
+        rateLimitLoginIpWindowSeconds: 900,
+        rateLimitLoginEmailMax: 5,
+        rateLimitLoginEmailWindowSeconds: 900,
+        rateLimitRegisterIpMax: 2,
+        rateLimitRegisterIpWindowSeconds: 3_600,
+        ...overrides,
+      };
+    }
+
+    function makeLimitedApp(
+      overrides: Partial<AppConfig> = {},
+    ): { app: ReturnType<typeof createApp>; limiter: MemoryWindowRateLimiter } {
+      const limiter = new MemoryWindowRateLimiter(clock);
+      const limitedApp = createApp({
+        config: rateLimitedConfig(overrides),
+        userRepository,
+        sessionRepository,
+        passwordHasher,
+        clock,
+        rateLimiter: limiter,
+        clientIpResolver: headerIpResolver,
+      });
+      return { app: limitedApp, limiter };
+    }
+
+    async function postLogin(
+      limitedApp: ReturnType<typeof createApp>,
+      body: Record<string, unknown>,
+      ip?: string,
+    ): Promise<Response> {
+      return await limitedApp.request("/api/auth/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(ip === undefined ? {} : { "X-Test-IP": ip }),
+        },
+        body: JSON.stringify(body),
+      });
+    }
+
+    async function postRegister(
+      limitedApp: ReturnType<typeof createApp>,
+      body: Record<string, unknown>,
+      ip?: string,
+    ): Promise<Response> {
+      return await limitedApp.request("/api/auth/register", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(ip === undefined ? {} : { "X-Test-IP": ip }),
+        },
+        body: JSON.stringify(body),
+      });
+    }
+
+    it("J: multiple login attempts from one IP eventually return 429 with Retry-After", async () => {
+      const { app } = makeLimitedApp({
+        rateLimitLoginIpMax: 3,
+        rateLimitLoginEmailMax: 100,
+      });
+
+      for (let i = 0; i < 3; i += 1) {
+        const response = await postLogin(
+          app,
+          { email: `user${i}@example.com`, password: "password123" },
+          "203.0.113.10",
+        );
+        expect(response.status).toBe(401);
+        expect(response.headers.get("retry-after")).toBeNull();
+      }
+
+      const blocked = await postLogin(
+        app,
+        { email: "user3@example.com", password: "password123" },
+        "203.0.113.10",
+      );
+      expect(blocked.status).toBe(429);
+      expect(blocked.headers.get("retry-after")).toBe("900");
+      const body = (await blocked.json()) as ApiFailure;
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe("RATE_LIMITED");
+      expect(body.error.details).toEqual({ retryAfterSeconds: 900, scope: "ip" });
+    });
+
+    it("J: multiple registrations from one IP eventually return 429", async () => {
+      const { app } = makeLimitedApp();
+
+      expect(
+        (
+          await postRegister(
+            app,
+            { email: "a@example.com", password: "password123", name: "A" },
+            "203.0.113.20",
+          )
+        ).status,
+      ).toBe(201);
+      expect(
+        (
+          await postRegister(
+            app,
+            { email: "b@example.com", password: "password123", name: "B" },
+            "203.0.113.20",
+          )
+        ).status,
+      ).toBe(201);
+
+      const blocked = await postRegister(
+        app,
+        { email: "c@example.com", password: "password123", name: "C" },
+        "203.0.113.20",
+      );
+      expect(blocked.status).toBe(429);
+      expect(blocked.headers.get("retry-after")).toBe("3600");
+      await expect(userRepository.findByEmail("c@example.com")).resolves.toBeNull();
+    });
+
+    it("J: login limits are independent per IP", async () => {
+      const { app } = makeLimitedApp({
+        rateLimitLoginIpMax: 1,
+        rateLimitLoginEmailMax: 100,
+      });
+
+      expect(
+        (
+          await postLogin(
+            app,
+            { email: "u1@example.com", password: "password123" },
+            "203.0.113.30",
+          )
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await postLogin(
+            app,
+            { email: "u1@example.com", password: "password123" },
+            "203.0.113.30",
+          )
+        ).status,
+      ).toBe(429);
+      expect(
+        (
+          await postLogin(
+            app,
+            { email: "u1@example.com", password: "password123" },
+            "198.51.100.30",
+          )
+        ).status,
+      ).toBe(401);
+    });
+
+    it("J: a successful login resets the email limiter", async () => {
+      const { app, limiter } = makeLimitedApp({
+        rateLimitLoginIpMax: 100,
+        rateLimitLoginEmailMax: 3,
+      });
+      expect(
+        (
+          await postRegister(
+            app,
+            { email: "user@example.com", password: "password123", name: "Ada" },
+            "203.0.113.40",
+          )
+        ).status,
+      ).toBe(201);
+
+      expect(
+        (
+          await postLogin(
+            app,
+            { email: "user@example.com", password: "wrong-password-1" },
+            "203.0.113.40",
+          )
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await postLogin(
+            app,
+            { email: "user@example.com", password: "wrong-password-2" },
+            "203.0.113.40",
+          )
+        ).status,
+      ).toBe(401);
+
+      const resetSpy = vi.spyOn(limiter, "reset");
+      const good = await postLogin(
+        app,
+        { email: "user@example.com", password: "password123" },
+        "203.0.113.40",
+      );
+      expect(good.status).toBe(200);
+      expect(resetSpy).toHaveBeenCalledTimes(1);
+      expect(resetSpy).toHaveBeenCalledWith("auth:login:email:user@example.com");
+    });
+
+    it("J: an over-limit email stays a generic 401, never a 429", async () => {
+      const { app } = makeLimitedApp({
+        rateLimitLoginIpMax: 100,
+        rateLimitLoginEmailMax: 2,
+      });
+      expect(
+        (
+          await postRegister(
+            app,
+            { email: "user@example.com", password: "password123", name: "Ada" },
+            "203.0.113.50",
+          )
+        ).status,
+      ).toBe(201);
+
+      expect(
+        (
+          await postLogin(
+            app,
+            { email: "user@example.com", password: "wrong-password-1" },
+            "203.0.113.50",
+          )
+        ).status,
+      ).toBe(401);
+      expect(
+        (
+          await postLogin(
+            app,
+            { email: "user@example.com", password: "wrong-password-2" },
+            "203.0.113.50",
+          )
+        ).status,
+      ).toBe(401);
+
+      const blocked = await postLogin(
+        app,
+        { email: "user@example.com", password: "password123" },
+        "203.0.113.50",
+      );
+      expect(blocked.status).toBe(401);
+      expect(blocked.headers.get("retry-after")).toBeNull();
+      const body = (await blocked.json()) as ApiFailure;
+      expect(body.ok).toBe(false);
+      expect(body.error.code).toBe("INVALID_CREDENTIALS");
+      expect(body.error.details).toBeUndefined();
     });
   });
 });

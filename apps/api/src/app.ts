@@ -10,12 +10,18 @@ import { createAuthRoutes } from "./routes/auth";
 import { createHealthRoutes } from "./routes/health";
 import { AuthService } from "./services/auth";
 import type { Clock } from "./services/clock";
+import type { ClientIpResolver } from "./services/client-ip";
+import { MemoryWindowRateLimiter, type RateLimiter } from "./services/rate-limit";
 
 /**
  * Everything the API composition needs. The concrete repositories, password
  * hasher and clock are supplied by the runtime boundary (Node today,
  * Cloudflare D1 later); this module only wires them together and never
  * instantiates a database implementation itself.
+ *
+ * When a rate limiter or client-IP resolver is omitted, safe local defaults
+ * are used: a {@link MemoryWindowRateLimiter} driven by the injected clock and
+ * a resolver that reports no IP (requests share the `unknown` bucket).
  */
 export interface AppDependencies {
   config: AppConfig;
@@ -23,10 +29,16 @@ export interface AppDependencies {
   sessionRepository: AuthSessionRepository;
   passwordHasher: PasswordHasher;
   clock: Clock;
+  rateLimiter?: RateLimiter;
+  clientIpResolver?: ClientIpResolver;
 }
 
 export function createApp(dependencies: AppDependencies): Hono {
   const { config, userRepository, sessionRepository, passwordHasher, clock } = dependencies;
+  const rateLimiter = dependencies.rateLimiter ?? new MemoryWindowRateLimiter(clock);
+  const clientIpResolver: ClientIpResolver = dependencies.clientIpResolver ?? {
+    resolve: () => undefined,
+  };
   const app = new Hono();
   const logger = createLogger("api");
 
@@ -51,6 +63,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     sessionRepository,
     passwordHasher,
     clock,
+    rateLimiter,
   });
 
   app.route(
@@ -61,6 +74,8 @@ export function createApp(dependencies: AppDependencies): Hono {
       userRepository,
       sessionRepository,
       clock,
+      rateLimiter,
+      clientIpResolver,
     }),
   );
   app.route("/api/health", createHealthRoutes(config));

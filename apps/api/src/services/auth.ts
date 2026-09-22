@@ -16,6 +16,7 @@ import {
 import type { UserRepository } from "@zelora/db/users";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { Clock } from "./clock";
+import type { RateLimiter } from "./rate-limit";
 import {
   normalizeEmail,
   normalizeName,
@@ -67,6 +68,12 @@ export interface AuthServiceDependencies {
   sessionRepository: AuthSessionRepository;
   passwordHasher: PasswordHasher;
   clock: Clock;
+  /**
+   * Optional rate limiter used to throttle login attempts per normalized
+   * email. When omitted (or disabled) the service never touches it, so the
+   * existing login behavior is preserved exactly.
+   */
+  rateLimiter?: RateLimiter;
 }
 
 export class AuthService {
@@ -75,6 +82,7 @@ export class AuthService {
   private readonly sessionRepository: AuthSessionRepository;
   private readonly passwordHasher: PasswordHasher;
   private readonly clock: Clock;
+  private readonly rateLimiter?: RateLimiter;
 
   constructor(dependencies: AuthServiceDependencies) {
     this.config = dependencies.config;
@@ -82,6 +90,7 @@ export class AuthService {
     this.sessionRepository = dependencies.sessionRepository;
     this.passwordHasher = dependencies.passwordHasher;
     this.clock = dependencies.clock;
+    this.rateLimiter = dependencies.rateLimiter;
   }
 
   private async createSession(
@@ -144,6 +153,31 @@ export class AuthService {
     const normalizedRequest = parseLoginRequest(request as unknown);
     const normalizedEmail = normalizeEmail(normalizedRequest.email);
 
+    const emailBucketKey = `auth:login:email:${normalizedEmail}`;
+    const emailLimitActive =
+      this.rateLimiter !== undefined && this.config.rateLimitEnabled;
+    if (emailLimitActive) {
+      const outcome = await this.rateLimiter!.consume(
+        emailBucketKey,
+        this.config.rateLimitLoginEmailMax,
+        this.config.rateLimitLoginEmailWindowSeconds,
+      );
+      if (!outcome.allowed) {
+        // Keep the throttled path indistinguishable from an invalid password:
+        // same PBKDF2 work via the dummy hash, same generic envelope, and no
+        // repository lookup, so a locked-out address never reveals existence.
+        await this.passwordHasher.verify(
+          normalizedRequest.password,
+          await getDummyPasswordHash(this.config.pbkdf2Iterations),
+        );
+        throw new AppError(
+          AUTH_ERROR_CODES.INVALID_CREDENTIALS,
+          "Invalid email or password.",
+          401,
+        );
+      }
+    }
+
     const user = await this.userRepository.findByEmail(normalizedEmail);
 
     if (user === null || user.passwordHash === null) {
@@ -195,6 +229,10 @@ export class AuthService {
     }
 
     const { sessionDto, rawToken } = await this.createSession(user.id);
+
+    if (emailLimitActive) {
+      await this.rateLimiter!.reset(emailBucketKey);
+    }
 
     return {
       user: mapUserToDto(user),

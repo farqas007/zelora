@@ -17,9 +17,12 @@ import type {
 import type { AppEnv } from "../context";
 import { createAuthMiddleware } from "../middleware/auth";
 import { createCsrfMiddleware } from "../middleware/csrf";
+import { createIpRateLimitMiddleware } from "../middleware/rate-limit";
 import type { AuthService } from "../services/auth";
 import { clearSessionCookie, setSessionCookie } from "../services/cookie";
 import type { Clock } from "../services/clock";
+import type { ClientIpResolver } from "../services/client-ip";
+import type { RateLimiter } from "../services/rate-limit";
 
 /**
  * Auth endpoints mounted at `/api/auth`.
@@ -41,6 +44,8 @@ export interface AuthRoutesDependencies {
   userRepository: UserRepository;
   sessionRepository: AuthSessionRepository;
   clock: Clock;
+  rateLimiter: RateLimiter;
+  clientIpResolver: ClientIpResolver;
 }
 
 /**
@@ -73,7 +78,8 @@ function toUserDto(user: UserRecord): UserDto {
 }
 
 export function createAuthRoutes(dependencies: AuthRoutesDependencies): Hono<AppEnv> {
-  const { config, authService, userRepository, sessionRepository, clock } = dependencies;
+  const { config, authService, userRepository, sessionRepository, clock, rateLimiter, clientIpResolver } =
+    dependencies;
   const app = new Hono<AppEnv>();
 
   const requireAuth = createAuthMiddleware({
@@ -84,7 +90,27 @@ export function createAuthRoutes(dependencies: AuthRoutesDependencies): Hono<App
   });
   const requireCsrf = createCsrfMiddleware();
 
-  app.post("/register", async (c) => {
+  const loginRateLimit = createIpRateLimitMiddleware({
+    config,
+    rateLimiter,
+    clientIpResolver,
+    clock,
+    scope: "login",
+    limit: config.rateLimitLoginIpMax,
+    windowSeconds: config.rateLimitLoginIpWindowSeconds,
+  });
+
+  const registerRateLimit = createIpRateLimitMiddleware({
+    config,
+    rateLimiter,
+    clientIpResolver,
+    clock,
+    scope: "register",
+    limit: config.rateLimitRegisterIpMax,
+    windowSeconds: config.rateLimitRegisterIpWindowSeconds,
+  });
+
+  app.post("/register", registerRateLimit, async (c) => {
     const body = await readJsonBody(c);
     const result = await authService.register(body as RegisterRequest);
     setSessionCookie(config, c, result.rawSessionToken);
@@ -93,7 +119,7 @@ export function createAuthRoutes(dependencies: AuthRoutesDependencies): Hono<App
     return c.json<RegisterEnvelope>({ ok: true, data }, 201);
   });
 
-  app.post("/login", async (c) => {
+  app.post("/login", loginRateLimit, async (c) => {
     const body = await readJsonBody(c);
     const result = await authService.login(body as LoginRequest);
     setSessionCookie(config, c, result.rawSessionToken);

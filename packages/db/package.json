@@ -8,6 +8,18 @@
     ".": {
       "types": "./src/index.ts",
       "default": "./src/index.ts"
+    },
+    "./schema/auth": {
+      "types": "./src/schema/auth.ts",
+      "default": "./src/schema/auth.ts"
+    },
+    "./auth": {
+      "types": "./src/auth/repository.ts",
+      "default": "./src/auth/repository.ts"
+    },
+    "./auth/local": {
+      "types": "./src/auth/local-repository.ts",
+      "default": "./src/auth/local-repository.ts"
     }
   },
   "scripts": {
@@ -26,6 +38,7 @@
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
+    "@zelora/core": "workspace:*",
     "drizzle-kit": "^0.31.11",
     "tsx": "^4.23.15",
     "vitest": "^5.0.1"

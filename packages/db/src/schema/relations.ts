@@ -1,5 +1,6 @@
 import { relations } from "drizzle-orm";
 import { addresses } from "./addresses";
+import { authSessions } from "./auth";
 import { categories, inventory, productImages, products, productVariants } from "./catalog";
 import { sellerProfiles, stores, users } from "./identities";
 import { orderAddresses, orderItems, orders } from "./orders";
@@ -12,6 +13,11 @@ export const usersRelations = relations(users, ({ many, one }) => ({
   sellerProfile: one(sellerProfiles, { fields: [users.id], references: [sellerProfiles.userId] }),
   addresses: many(addresses),
   orders: many(orders),
+  sessions: many(authSessions),
+}));
+
+export const authSessionsRelations = relations(authSessions, ({ one }) => ({
+  user: one(users, { fields: [authSessions.userId], references: [users.id] }),
 }));
 
 export const sellerProfilesRelations = relations(sellerProfiles, ({ many, one }) => ({

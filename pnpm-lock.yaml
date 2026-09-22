@@ -254,6 +254,9 @@ importers:
       '@types/better-sqlite3':
         specifier: ^9.6.0
         version: 9.6.0
+      '@zelora/core':
+        specifier: workspace:*
+        version: link:../core
       drizzle-kit:
         specifier: ^0.31.11
         version: 0.31.11

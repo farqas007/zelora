@@ -10,3 +10,8 @@ export { createD1Client, type D1DatabaseLike, type D1PreparedStatementLike } fro
 export { migrateLocal } from "./migrate";
 export { createId, isValidId } from "./ids";
 export type { Timestamps } from "./types";
+export type {
+  AuthSessionRecord,
+  AuthSessionRepository,
+  CreateAuthSessionInput,
+} from "./auth/repository";

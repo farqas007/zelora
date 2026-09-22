@@ -11,9 +11,13 @@
     }
   },
   "scripts": {
+    "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@zelora/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.1"
   }
 }

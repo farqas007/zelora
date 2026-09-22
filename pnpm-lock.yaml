@@ -202,7 +202,7 @@ importers:
         version: 4.23.15
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
+        version: 5.0.1(@types/node@22.20.4)(vite@7.3.6(@types/node@22.20.4))
 
   apps/web:
     dependencies:
@@ -234,6 +234,10 @@ importers:
       '@zelora/shared':
         specifier: workspace:*
         version: link:../shared
+    devDependencies:
+      vitest:
+        specifier: ^5.0.1
+        version: 5.0.1(@types/node@22.20.4)(vite@7.3.6(@types/node@22.20.4))
 
   packages/db:
     dependencies:
@@ -258,7 +262,7 @@ importers:
         version: 4.23.15
       vitest:
         specifier: ^5.0.1
-        version: 5.0.1(@types/node@22.20.4)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
+        version: 5.0.1(@types/node@22.20.4)(vite@7.3.6(@types/node@22.20.4))
 
   packages/shared: {}
 
@@ -2486,7 +2490,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  '@vitest/mocker@5.0.1(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))':
+  '@vitest/mocker@5.0.1(vite@7.3.6(@types/node@22.20.4))':
     dependencies:
       '@jridgewell/trace-mapping': 0.3.31
       '@vitest/spy': 5.0.1
@@ -3018,10 +3022,10 @@ snapshots:
       fsevents: 2.3.3
       tsx: 4.23.15
 
-  vitest@5.0.1(@types/node@22.20.4)(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15)):
+  vitest@5.0.1(@types/node@22.20.4)(vite@7.3.6(@types/node@22.20.4)):
     dependencies:
       '@types/chai': 5.2.3
-      '@vitest/mocker': 5.0.1(vite@7.3.6(@types/node@22.20.4)(tsx@4.23.15))
+      '@vitest/mocker': 5.0.1(vite@7.3.6(@types/node@22.20.4))
       chai: 6.2.2
       es-module-lexer: 2.3.2
       expect-type: 1.4.0

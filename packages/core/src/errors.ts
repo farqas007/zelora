@@ -1,7 +1,7 @@
 import type { ApiErrorBody, ApiFailure } from "@zelora/shared";
 
 /** HTTP status codes the platform can produce. */
-export type HttpStatus = 400 | 401 | 403 | 404 | 409 | 422 | 500;
+export type HttpStatus = 400 | 401 | 403 | 404 | 409 | 422 | 429 | 500;
 
 /**
  * Base class for all intentionally thrown application errors.
@@ -13,13 +13,21 @@ export class AppError extends Error {
   readonly code: string;
   readonly statusCode: HttpStatus;
   readonly details?: Record<string, unknown>;
+  readonly fields?: Record<string, string[]>;
 
-  constructor(code: string, message: string, statusCode: HttpStatus, details?: Record<string, unknown>) {
+  constructor(
+    code: string,
+    message: string,
+    statusCode: HttpStatus,
+    details?: Record<string, unknown>,
+    fields?: Record<string, string[]>,
+  ) {
     super(message);
     this.name = "AppError";
     this.code = code;
     this.statusCode = statusCode;
     this.details = details;
+    this.fields = fields;
   }
 }
 
@@ -53,9 +61,19 @@ export class ConflictError extends AppError {
   }
 }
 
+export class TooManyRequestsError extends AppError {
+  constructor(message = "Too many requests. Please try again later.", details?: Record<string, unknown>) {
+    super("RATE_LIMITED", message, 429, details);
+  }
+}
+
 export class ValidationError extends AppError {
-  constructor(message = "The request is invalid.", details?: Record<string, unknown>) {
-    super("VALIDATION_ERROR", message, 422, details);
+  constructor(
+    message = "The request is invalid.",
+    fields?: Record<string, string[]>,
+    details?: Record<string, unknown>,
+  ) {
+    super("VALIDATION_ERROR", message, 422, details, fields);
   }
 }
 
@@ -72,6 +90,9 @@ export function toApiFailure(error: unknown): ApiFailure {
     const body: ApiErrorBody = { code: error.code, message: error.message };
     if (error.details !== undefined) {
       body.details = error.details;
+    }
+    if (error.fields !== undefined) {
+      body.fields = error.fields;
     }
     return { ok: false, error: body };
   }

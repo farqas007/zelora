@@ -193,6 +193,64 @@ describe("catalog repository: product list", () => {
     expect(page.items[0]!.currency).toBeNull();
   });
 
+  it("reports the cheapest active variant's own compare-at amount", async () => {
+    const product = addProduct({ slug: "compare-at-same-row" });
+    addVariant(product.id, { name: "Cheap", priceAmountCents: 1_800, compareAtAmountCents: 2_200, currency: "GBP" });
+    addVariant(product.id, { name: "Expensive", priceAmountCents: 5_000, compareAtAmountCents: 6_000, currency: "USD" });
+
+    const page = await repo.listActiveProducts({ limit: 10, cursor: null });
+    const item = page.items.find((i) => i.slug === "compare-at-same-row");
+
+    expect(item).toBeDefined();
+    expect(item!.priceAmountCents).toBe(1_800);
+    expect(item!.compareAtAmountCents).toBe(2_200);
+    expect(item!.currency).toBe("GBP");
+  });
+
+  it("never pairs a more expensive variant's compare-at with the cheapest price", async () => {
+    const product = addProduct({ slug: "compare-at-mismatch" });
+    // The cheapest active variant has no compare-at; the more expensive
+    // variant carries one. Independent MIN() aggregation would leak the
+    // expensive variant's compare-at alongside the cheap price.
+    addVariant(product.id, { name: "Cheap", priceAmountCents: 9_999, currency: "USD" });
+    addVariant(product.id, { name: "Premium", priceAmountCents: 19_999, compareAtAmountCents: 24_999, currency: "EUR" });
+
+    const page = await repo.listActiveProducts({ limit: 10, cursor: null });
+    const item = page.items.find((i) => i.slug === "compare-at-mismatch");
+
+    expect(item).toBeDefined();
+    expect(item!.priceAmountCents).toBe(9_999);
+    expect(item!.compareAtAmountCents).toBeNull();
+    expect(item!.currency).toBe("USD");
+  });
+
+  it("derives currency from the cheapest active variant, not an arbitrary row", async () => {
+    const product = addProduct({ slug: "currency-consistency" });
+    addVariant(product.id, { name: "Cheap", priceAmountCents: 3_000, currency: "GBP" });
+    addVariant(product.id, { name: "Expensive", priceAmountCents: 3_001, currency: "USD" });
+
+    const page = await repo.listActiveProducts({ limit: 10, cursor: null });
+    const item = page.items.find((i) => i.slug === "currency-consistency");
+
+    expect(item).toBeDefined();
+    expect(item!.priceAmountCents).toBe(3_000);
+    expect(item!.currency).toBe("GBP");
+  });
+
+  it("resolves same-price variants deterministically when currencies differ", async () => {
+    const product = addProduct({ slug: "tie-break" });
+    addVariant(product.id, { name: "Alpha", createdAt: new Date("2026-01-01T00:00:00.000Z"), priceAmountCents: 5_000, currency: "GBP" });
+    addVariant(product.id, { name: "Beta", createdAt: new Date("2026-01-02T00:00:00.000Z"), priceAmountCents: 5_000, currency: "USD" });
+
+    const page = await repo.listActiveProducts({ limit: 10, cursor: null });
+    const item = page.items.find((i) => i.slug === "tie-break");
+
+    expect(item).toBeDefined();
+    expect(item!.priceAmountCents).toBe(5_000);
+    // Earliest createdAt is the deterministic tie-break for identical prices.
+    expect(item!.currency).toBe("GBP");
+  });
+
   it("filters by an active category while leaving other categories out", async () => {
     const productA = addProduct({ categoryId: category.id, slug: "in-category" });
     addVariant(productA.id, { priceAmountCents: 500, currency: "USD" });

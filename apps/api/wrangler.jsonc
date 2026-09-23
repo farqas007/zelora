@@ -7,6 +7,18 @@
     // Production browser origin for the API's CORS policy. Keep in sync with
     // the deployed frontend (https://zelora-web.farqas007.workers.dev).
     "CORS_ORIGIN": "https://zelora-web.farqas007.workers.dev"
+
+    // Local development (wrangler dev) serves over plain HTTP on localhost,
+    // where browsers drop Secure cookies and auth silently breaks. Run the
+    // Worker locally with an explicit development posture:
+    //
+    //   wrangler dev --var NODE_ENV:development
+    //                --var SESSION_COOKIE_SECURE:false
+    //                --var CORS_ORIGIN:http://localhost:5173
+    //
+    // The Worker defaults NODE_ENV to production (Secure cookies, correct for
+    // the deployed edge) and refuses SESSION_COOKIE_SECURE=true in a
+    // development environment with a clear startup error.
   },
   // Hourly sweep that runs the `scheduled` handler in src/worker.ts, which
   // purges expired auth sessions (see sessionPurgeIntervalSeconds in

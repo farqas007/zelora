@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, lt, min, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or } from "drizzle-orm";
 import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
 import { categories, productImages, products, productVariants, stores } from "../schema";
@@ -203,7 +203,14 @@ export function createD1CatalogRepository(
   };
 }
 
-/** Async twin of the local aggregation — cheapest active variant per product. */
+/**
+ * Async twin of the local aggregation — cheapest active variant per product.
+ *
+ * Returns one *complete variant row* (price, compare-at and currency from the
+ * same row) so a more expensive variant's compare-at or currency can never be
+ * paired with the cheapest variant's price. Ties resolve deterministically by
+ * `(createdAt, id)`, mirroring the local SQLite implementation query-for-query.
+ */
 export async function aggregatedPricesByProduct(
   db: DrizzleD1Database<DatabaseSchema>,
   productIds: string[],
@@ -211,8 +218,8 @@ export async function aggregatedPricesByProduct(
   const rows = await db
     .select({
       productId: productVariants.productId,
-      priceAmountCents: min(productVariants.priceAmountCents),
-      compareAtAmountCents: min(productVariants.compareAtAmountCents),
+      priceAmountCents: productVariants.priceAmountCents,
+      compareAtAmountCents: productVariants.compareAtAmountCents,
       currency: productVariants.currency,
     })
     .from(productVariants)
@@ -222,15 +229,23 @@ export async function aggregatedPricesByProduct(
         eq(productVariants.status, "active"),
       ),
     )
-    .groupBy(productVariants.productId);
+    .orderBy(
+      asc(productVariants.priceAmountCents),
+      asc(productVariants.createdAt),
+      asc(productVariants.id),
+    );
 
   const prices = new Map<string, { priceAmountCents: number; compareAtAmountCents: number | null; currency: string }>();
   for (const row of rows) {
-    prices.set(row.productId, {
-      priceAmountCents: row.priceAmountCents ?? 0,
-      compareAtAmountCents: row.compareAtAmountCents ?? null,
-      currency: row.currency,
-    });
+    // First occurrence is the cheapest active variant: price, compare-at and
+    // currency all come from this one row.
+    if (!prices.has(row.productId)) {
+      prices.set(row.productId, {
+        priceAmountCents: row.priceAmountCents,
+        compareAtAmountCents: row.compareAtAmountCents,
+        currency: row.currency,
+      });
+    }
   }
   return prices;
 }

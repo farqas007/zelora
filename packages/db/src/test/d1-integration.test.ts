@@ -451,4 +451,39 @@ describe("D1 catalog repository (real joins and keyset pagination)", () => {
     expect(await repository.findProductBySlug("d1-draft")).toBeNull();
     expect(await repository.listActiveCategories().then((c) => c.map((row) => row.slug))).toEqual(["category-1"]);
   });
+
+  it("keeps price, compare-at and currency consistent with the cheapest active variant", async () => {
+    const { db } = await setup();
+    const repository = createD1CatalogRepository(db);
+    const { storeId } = await seedStorefront(db, 2);
+
+    const product = await db
+      .insert(schema.products)
+      .values({
+        storeId,
+        name: "D1 Consistent",
+        slug: "d1-consistent",
+        status: "active",
+        createdAt: new Date("2026-03-01T00:00:00.000Z"),
+      })
+      .returning()
+      .get();
+
+    await db.insert(schema.productVariants).values([
+      // Cheapest active variant: no compare-at, GBP.
+      { productId: product.id, name: "Base", sku: "d1-base", priceAmountCents: 7_500, currency: "GBP", status: "active", createdAt: new Date("2026-03-01T00:00:01.000Z") },
+      // More expensive: must never leak its compare-at/currency into the summary.
+      { productId: product.id, name: "Deluxe", sku: "d1-deluxe", priceAmountCents: 12_000, compareAtAmountCents: 15_000, currency: "USD", status: "active", createdAt: new Date("2026-03-01T00:00:02.000Z") },
+      // Draft: excluded from the aggregation entirely.
+      { productId: product.id, name: "Draft", sku: "d1-draft", priceAmountCents: 1_000, currency: "USD", status: "draft", createdAt: new Date("2026-03-01T00:00:03.000Z") },
+    ]);
+
+    const page = await repository.listActiveProducts({ limit: 10, cursor: null });
+    const item = page.items.find((i) => i.slug === "d1-consistent");
+
+    expect(item).toBeDefined();
+    expect(item!.priceAmountCents).toBe(7_500);
+    expect(item!.compareAtAmountCents).toBeNull();
+    expect(item!.currency).toBe("GBP");
+  });
 });

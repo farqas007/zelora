@@ -99,6 +99,27 @@ Environment variables are optional at this phase — defaults are documented in
 `.env.example`. A `.env` loader arrives in a later phase, when the data layer
 is added.
 
+### Local Cloudflare Worker development
+
+`wrangler dev` serves the Worker over plain HTTP on `localhost`, where browsers
+drop `Secure` cookies. The Worker defaults `NODE_ENV` to `production` (the
+deployed posture) and therefore needs an explicit development override to stay
+usable locally:
+
+```sh
+pnpm --filter @zelora/api exec wrangler dev \
+  --var NODE_ENV:development \
+  --var SESSION_COOKIE_SECURE:false \
+  --var CORS_ORIGIN:http://localhost:5173
+```
+
+The Worker validates this at startup: a `Secure` cookie combined with
+`NODE_ENV=development` is rejected with a clear configuration error, and
+`PBKDF2_ITERATIONS` above 100000 (Cloudflare Web Crypto's limit) is refused —
+so a config copied from a Node-tuned local environment can never silently break
+authentication or crash hashing on the edge. Production deployments keep the
+`Secure` cookie and the Workers-compatible iteration cap.
+
 ## Phase 1 scope
 
 - pnpm workspace with shared tooling configuration

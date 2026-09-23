@@ -1,5 +1,5 @@
 import type { Hono } from "hono";
-import { loadConfig, PBKDF2PasswordHasher, type AppConfig } from "@zelora/core";
+import { AppError, loadConfig, PBKDF2PasswordHasher, type AppConfig } from "@zelora/core";
 import { createD1Client, type D1DatabaseLike } from "@zelora/db/d1";
 import { createD1AuthSessionRepository } from "@zelora/db/auth/d1";
 import { createD1UserRepository } from "@zelora/db/users/d1";
@@ -82,6 +82,62 @@ const WORKER_CONFIG_KEYS = [
   "RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS",
 ] as const;
 
+/**
+ * Highest PBKDF2-HMAC iteration count Cloudflare Workers Web Crypto accepts.
+ * Node's runtime supports far more (see `PASSWORD_HASH_MAX_ITERATIONS` in
+ * `@zelora/core`); this boundary is intentionally Worker-specific and keeps
+ * the Node-vs-Worker difference explicit rather than letting a Node-tuned
+ * value crash hash generation on the edge.
+ */
+export const PBKDF2_WORKER_MAX_ITERATIONS = 100_000;
+
+/**
+ * Resolve the Worker's PBKDF2 iteration binding into a Workers-supported
+ * value. Missing/empty falls back to the Workers-safe max; anything else must
+ * be a positive integer that Cloudflare Web Crypto can actually run.
+ */
+function resolveWorkerPbkdf2Iterations(value: string | undefined): string {
+  if (value === undefined || value === "") {
+    return String(PBKDF2_WORKER_MAX_ITERATIONS);
+  }
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1) {
+    throw new AppError(
+      "APP_CONFIG_INVALID",
+      `PBKDF2_ITERATIONS must be a positive integer, received "${value}".`,
+      500,
+    );
+  }
+  if (parsed > PBKDF2_WORKER_MAX_ITERATIONS) {
+    throw new AppError(
+      "APP_CONFIG_INVALID",
+      `PBKDF2_ITERATIONS must not exceed ${PBKDF2_WORKER_MAX_ITERATIONS} on Cloudflare Workers ` +
+        `(Web Crypto rejects higher iteration counts), received "${value}".`,
+      500,
+    );
+  }
+  return value;
+}
+
+/**
+ * A `Secure` session cookie is never sent by a browser over plain-HTTP local
+ * development (Wrangler serves `http://localhost` by default), which silently
+ * breaks authentication. Reject the mismatch loudly at startup instead of
+ * letting a production-tuned config ship into a local session-trap. Production
+ * stays on `Secure` cookies; local dev must opt into the http posture.
+ */
+function assertWorkerSessionCookiePosture(config: AppConfig): void {
+  if (config.nodeEnv === "development" && config.sessionCookieSecure === true) {
+    throw new AppError(
+      "APP_CONFIG_INVALID",
+      `SESSION_COOKIE_SECURE=true is incompatible with plain-HTTP local development. ` +
+        `Run Wrangler with --var NODE_ENV:development and leave SESSION_COOKIE_SECURE ` +
+        `unset (or set it to "false"); production deployments keep the Secure cookie.`,
+      500,
+    );
+  }
+}
+
 export function loadWorkerConfig(env: Env): AppConfig {
   const values: Record<string, string | undefined> = {};
   for (const key of WORKER_CONFIG_KEYS) {
@@ -93,12 +149,12 @@ export function loadWorkerConfig(env: Env): AppConfig {
   // example with `wrangler dev --var NODE_ENV:development`).
   values.NODE_ENV = values.NODE_ENV ?? "production";
   // Cloudflare Workers Web Crypto rejects PBKDF2 iteration counts > 100000.
-  // Never fall back to the unsupported 210000 default in the Worker runtime.
-  // Prefer explicit binding; otherwise use a Workers-supported safe default.
-  if (values.PBKDF2_ITERATIONS === undefined || values.PBKDF2_ITERATIONS === "") {
-    values.PBKDF2_ITERATIONS = "100000";
-  }
-  return loadConfig(values);
+  // Never fall back to the unsupported 210000 default in the Worker runtime,
+  // and reject explicit overrides that exceed the Workers-supported limit.
+  values.PBKDF2_ITERATIONS = resolveWorkerPbkdf2Iterations(values.PBKDF2_ITERATIONS);
+  const config = loadConfig(values);
+  assertWorkerSessionCookiePosture(config);
+  return config;
 }
 
 function createWorkerApp(env: Env): Hono {

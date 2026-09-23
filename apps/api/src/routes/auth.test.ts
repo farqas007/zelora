@@ -7,6 +7,7 @@ import type {
 } from "@zelora/db/auth";
 import type { UserRecord, UserRepository } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
+import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
@@ -163,6 +164,17 @@ const sellerRepository: SellerRepository = {
   findByProfileSlug: unimplementedSeller,
   findStoreBySlug: unimplementedSeller,
   createOnboarding: unimplementedSeller,
+  activateSeller: unimplementedSeller,
+};
+
+/**
+ * Auth route tests never hit the catalog, but `createApp` composes it. Any
+ * accidental invocation would reveal a wiring bug loudly.
+ */
+const inertCatalogRepository: CatalogRepository = {
+  listActiveCategories: unimplementedSeller,
+  listActiveProducts: unimplementedSeller,
+  findProductBySlug: unimplementedSeller,
 };
 
 describe("auth routes", () => {
@@ -186,6 +198,8 @@ describe("auth routes", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    sessionLastUsedThrottleSeconds: 300,
+    sessionPurgeIntervalSeconds: 3_600,
   };
 
   let clock: FakeClock;
@@ -204,6 +218,7 @@ describe("auth routes", () => {
       userRepository,
       sessionRepository,
       sellerRepository,
+      catalogRepository: inertCatalogRepository,
       passwordHasher,
       clock,
     });
@@ -845,6 +860,7 @@ describe("auth routes", () => {
         userRepository,
         sessionRepository,
         sellerRepository,
+        catalogRepository: inertCatalogRepository,
         passwordHasher,
         clock,
         rateLimiter: limiter,

@@ -71,6 +71,12 @@ export type CreateOnboardingResult =
   | { ok: true; sellerProfile: SellerProfileRecord; store: StoreRecord }
   | { ok: false; reason: OnboardingConflictReason };
 
+/** State after a seller profile is activated (status `active`). */
+export interface SellerActivationResult {
+  sellerProfile: SellerProfileRecord;
+  store: StoreRecord;
+}
+
 export interface SellerRepository {
   /** Resolve a seller profile by its owning user id, or `null`. */
   findByUserId(userId: string): Promise<SellerProfileRecord | null>;
@@ -84,4 +90,11 @@ export interface SellerRepository {
    * returned; no orphan profile is ever left behind.
    */
   createOnboarding(input: CreateOnboardingInput): Promise<CreateOnboardingResult>;
+  /**
+   * Activate a seller profile: its status and every store under it flip to
+   * `active`, and the owning user is promoted to the `seller` role. The whole
+   * transition is atomic. Idempotent for an already-active profile (all three
+   * writes become no-ops). Returns `null` when the user has no profile.
+   */
+  activateSeller(userId: string): Promise<SellerActivationResult | null>;
 }

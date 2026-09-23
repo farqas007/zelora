@@ -218,3 +218,66 @@ describe("seller repository onboarding", () => {
     expect(db.select().from(schema.stores).all()).toHaveLength(0);
   });
 });
+
+describe("seller repository activation", () => {
+  it("activates the profile, its store and promotes the user role atomically", async () => {
+    const { db } = createTestDatabase();
+    const userId = insertUser(db);
+    const repo = createLocalSellerRepository(db);
+
+    const onboarding = await repo.createOnboarding(onboardingInput(userId));
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+
+    const activated = await repo.activateSeller(userId);
+
+    expect(activated).not.toBeNull();
+    expect(activated?.sellerProfile.status).toBe("active");
+    expect(activated?.store.status).toBe("active");
+    expect(activated?.store.sellerProfileId).toBe(activated?.sellerProfile.id);
+    expect(activated?.sellerProfile.id).toBe(onboarding.sellerProfile.id);
+
+    expect(await repo.findByUserId(userId)).toMatchObject({ status: "active" });
+    expect(await repo.findStoreBySlug(onboarding.store.slug)).toMatchObject({ status: "active" });
+
+    const user = db.select().from(schema.users).where(eq(schema.users.id, userId)).get();
+    expect(user?.role).toBe("seller");
+  });
+
+  it("is idempotent for an already-active profile", async () => {
+    const { db } = createTestDatabase();
+    const userId = insertUser(db);
+    const repo = createLocalSellerRepository(db);
+
+    await repo.createOnboarding(onboardingInput(userId));
+    const first = await repo.activateSeller(userId);
+    const second = await repo.activateSeller(userId);
+
+    expect(first?.sellerProfile.id).toBe(second?.sellerProfile.id);
+    expect(first?.store.id).toBe(second?.store.id);
+    expect(second?.sellerProfile.status).toBe("active");
+    expect(second?.store.status).toBe("active");
+    const user = db.select().from(schema.users).where(eq(schema.users.id, userId)).get();
+    expect(user?.role).toBe("seller");
+  });
+
+  it("returns null when the user has no seller profile", async () => {
+    const { db } = createTestDatabase();
+    const userId = insertUser(db);
+    const repo = createLocalSellerRepository(db);
+
+    expect(await repo.activateSeller(userId)).toBeNull();
+  });
+
+  it("does not promote a user who has no seller profile", async () => {
+    const { db } = createTestDatabase();
+    const userId = insertUser(db);
+    const repo = createLocalSellerRepository(db);
+
+    await repo.activateSeller(userId);
+
+    const user = db.select().from(schema.users).where(eq(schema.users.id, userId)).get();
+    expect(user?.role).toBe("customer");
+  });
+});

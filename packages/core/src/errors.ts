@@ -98,10 +98,7 @@ export function toApiFailure(error: unknown): ApiFailure {
   }
 
   if (error instanceof Error) {
-    return {
-      ok: false,
-      error: { code: "INTERNAL_ERROR", message: error.message },
-    };
+    return { ok: false, error: { code: "INTERNAL_ERROR", message: "Internal server error." } };
   }
 
   return { ok: false, error: { code: "INTERNAL_ERROR", message: "Unknown error." } };

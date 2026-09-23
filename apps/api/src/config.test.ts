@@ -9,6 +9,8 @@ describe("loadConfig auth defaults", () => {
     expect(config.sessionCookieName).toBe("zelora_session");
     expect(config.sessionTtlSeconds).toBe(2_592_000);
     expect(config.sessionCookieSecure).toBe(false);
+    expect(config.sessionLastUsedThrottleSeconds).toBe(300);
+    expect(config.sessionPurgeIntervalSeconds).toBe(3_600);
     expect(config.pbkdf2Iterations).toBe(210_000);
     expect(config.rateLimitEnabled).toBe(true);
     expect(config.rateLimitTrustProxy).toBe(false);
@@ -44,6 +46,21 @@ describe("loadConfig auth defaults", () => {
     expect(config.sessionCookieName).toBe("custom_session");
     expect(config.sessionTtlSeconds).toBe(7200);
     expect(config.pbkdf2Iterations).toBe(100_000);
+  });
+
+  it("parses session touch-throttle and purge-interval tuning", () => {
+    const defaults = loadConfig({ NODE_ENV: "test" });
+    expect(defaults.sessionLastUsedThrottleSeconds).toBe(300);
+    expect(defaults.sessionPurgeIntervalSeconds).toBe(3_600);
+
+    const config = loadConfig({
+      NODE_ENV: "test",
+      SESSION_LAST_USED_THROTTLE_SECONDS: "45",
+      SESSION_PURGE_INTERVAL_SECONDS: "60",
+    });
+
+    expect(config.sessionLastUsedThrottleSeconds).toBe(45);
+    expect(config.sessionPurgeIntervalSeconds).toBe(60);
   });
 
   it("applies rate-limit defaults and parses explicit overrides", () => {
@@ -126,6 +143,13 @@ describe("loadConfig invalid values", () => {
     { name: "negative seller onboarding IP max", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_MAX: "-2" } },
     { name: "fractional seller onboarding IP window", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "3600.5" } },
     { name: "non-numeric seller onboarding IP window", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "hour" } },
+    { name: "zero session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "0" } },
+    { name: "negative session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "-60" } },
+    { name: "fractional session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "10.5" } },
+    { name: "non-numeric session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "now" } },
+    { name: "zero session purge interval", env: { SESSION_PURGE_INTERVAL_SECONDS: "0" } },
+    { name: "fractional session purge interval", env: { SESSION_PURGE_INTERVAL_SECONDS: "1800.5" } },
+    { name: "non-numeric session purge interval", env: { SESSION_PURGE_INTERVAL_SECONDS: "hourly" } },
     { name: "unparsable rate-limit enabled flag", env: { RATE_LIMIT_ENABLED: "maybe" } },
     { name: "non-1/0 trust proxy shorthand", env: { RATE_LIMIT_TRUST_PROXY: "yes" } },
   ])("rejects $name with APP_CONFIG_INVALID", ({ env }) => {

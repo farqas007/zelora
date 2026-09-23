@@ -13,6 +13,7 @@ import type {
   SellerRepository,
   StoreRecord,
 } from "@zelora/db/seller";
+import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
@@ -238,6 +239,23 @@ class FakeSellerRepository implements SellerRepository {
     this.stores.set(store.id, store);
   }
 
+  async activateSeller(userId: string): Promise<{
+    sellerProfile: SellerProfileRecord;
+    store: StoreRecord;
+  } | null> {
+    const profile = Array.from(this.profiles.values()).find((candidate) => candidate.userId === userId);
+    if (profile === undefined) {
+      return null;
+    }
+    const store = Array.from(this.stores.values()).find((candidate) => candidate.sellerProfileId === profile.id);
+    const sellerProfile: SellerProfileRecord = { ...profile, status: "active" };
+    this.profiles.set(profile.id, sellerProfile);
+    if (store === undefined) {
+      throw new Error("seller profile has no store to activate");
+    }
+    return { sellerProfile, store };
+  }
+
   clear(): void {
     this.profiles.clear();
     this.stores.clear();
@@ -268,10 +286,28 @@ describe("POST /api/seller/onboarding", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    sessionLastUsedThrottleSeconds: 300,
+    sessionPurgeIntervalSeconds: 3_600,
   };
 
   const headerIpResolver: ClientIpResolver = {
     resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+  };
+
+  /**
+   * Seller route tests never hit the catalog, but `createApp` composes it. Any
+   * accidental invocation would reveal a wiring bug loudly.
+   */
+  const inertCatalogRepository: CatalogRepository = {
+    listActiveCategories: () => {
+      throw new Error("unexpected catalog call");
+    },
+    listActiveProducts: () => {
+      throw new Error("unexpected catalog call");
+    },
+    findProductBySlug: () => {
+      throw new Error("unexpected catalog call");
+    },
   };
 
   let clock: FakeClock;
@@ -292,6 +328,7 @@ describe("POST /api/seller/onboarding", () => {
       userRepository,
       sessionRepository,
       sellerRepository,
+      catalogRepository: inertCatalogRepository,
       passwordHasher,
       clock,
       clientIpResolver: headerIpResolver,
@@ -629,6 +666,7 @@ describe("POST /api/seller/onboarding", () => {
         userRepository,
         sessionRepository,
         sellerRepository,
+        catalogRepository: inertCatalogRepository,
         passwordHasher,
         clock,
         rateLimiter: limiter,

@@ -4,13 +4,17 @@ import { secureHeaders } from "hono/secure-headers";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { UserRepository } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
+import type { CatalogRepository } from "@zelora/db/catalog";
 import { createLogger, type AppConfig, type PasswordHasher } from "@zelora/core";
 import { createErrorHandler, notFoundHandler } from "./middleware/error";
 import { requestLogger } from "./middleware/request-log";
 import { createAuthRoutes } from "./routes/auth";
+import { createAdminRoutes } from "./routes/admin";
+import { createCatalogRoutes } from "./routes/catalog";
 import { createHealthRoutes } from "./routes/health";
 import { createSellerRoutes } from "./routes/seller";
 import { AuthService } from "./services/auth";
+import { CatalogService } from "./services/catalog";
 import { SellerService } from "./services/seller";
 import type { Clock } from "./services/clock";
 import type { ClientIpResolver } from "./services/client-ip";
@@ -31,6 +35,7 @@ export interface AppDependencies {
   userRepository: UserRepository;
   sessionRepository: AuthSessionRepository;
   sellerRepository: SellerRepository;
+  catalogRepository: CatalogRepository;
   passwordHasher: PasswordHasher;
   clock: Clock;
   rateLimiter?: RateLimiter;
@@ -38,7 +43,7 @@ export interface AppDependencies {
 }
 
 export function createApp(dependencies: AppDependencies): Hono {
-  const { config, userRepository, sessionRepository, sellerRepository, passwordHasher, clock } = dependencies;
+  const { config, userRepository, sessionRepository, sellerRepository, catalogRepository, passwordHasher, clock } = dependencies;
   const rateLimiter = dependencies.rateLimiter ?? new MemoryWindowRateLimiter(clock);
   const clientIpResolver: ClientIpResolver = dependencies.clientIpResolver ?? {
     resolve: () => undefined,
@@ -72,6 +77,12 @@ export function createApp(dependencies: AppDependencies): Hono {
   });
 
   const sellerService = new SellerService({ sellerRepository });
+  const catalogService = new CatalogService({ catalogRepository });
+
+  app.route(
+    "/api/catalog",
+    createCatalogRoutes({ catalogService }),
+  );
 
   app.route(
     "/api/auth",
@@ -98,6 +109,16 @@ export function createApp(dependencies: AppDependencies): Hono {
     }),
   );
   app.route("/api/health", createHealthRoutes(config));
+  app.route(
+    "/api/admin",
+    createAdminRoutes({
+      config,
+      sellerService,
+      userRepository,
+      sessionRepository,
+      clock,
+    }),
+  );
 
   return app;
 }

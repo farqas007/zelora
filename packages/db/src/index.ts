@@ -27,4 +27,15 @@ export type {
   CreateOnboardingInput,
   OnboardingConflictReason,
   CreateOnboardingResult,
+  SellerActivationResult,
 } from "./seller/repository";
+export type {
+  CatalogCategoryRecord,
+  CatalogStoreRecord,
+  CatalogProductSummaryRecord,
+  CatalogProductListPage,
+  CatalogVariantRecord,
+  CatalogProductImageRecord,
+  CatalogProductDetailRecord,
+  CatalogRepository,
+} from "./catalog/repository";

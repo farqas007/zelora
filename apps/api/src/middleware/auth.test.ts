@@ -194,6 +194,8 @@ describe("auth middleware", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    sessionLastUsedThrottleSeconds: 300,
+    sessionPurgeIntervalSeconds: 3_600,
   };
 
   let clock: FakeClock;
@@ -380,6 +382,34 @@ describe("auth middleware", () => {
     expect(updateLastUsedAt).toHaveBeenCalledWith(session.id, clock.now());
     expect(session.lastUsedAt).toEqual(clock.now());
     expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("T1: skips the lastUsedAt write when the previous touch is inside the throttle window", async () => {
+    const rawToken = generateSessionToken();
+    session.tokenHash = await hashSessionToken(rawToken);
+    const updateLastUsedAt = vi.spyOn(sessionRepository, "updateLastUsedAt");
+
+    const first = await request(`${baseConfig.sessionCookieName}=${rawToken}`);
+    expect(first.status).toBe(200);
+    expect(updateLastUsedAt).toHaveBeenCalledTimes(1);
+
+    const second = await request(`${baseConfig.sessionCookieName}=${rawToken}`);
+    expect(second.status).toBe(200);
+    expect(updateLastUsedAt).toHaveBeenCalledTimes(1);
+  });
+
+  it("T2: rewrites lastUsedAt once the throttle window has elapsed", async () => {
+    const rawToken = generateSessionToken();
+    session.tokenHash = await hashSessionToken(rawToken);
+    session.lastUsedAt = new Date(clock.now().getTime() - 600_000);
+    const updateLastUsedAt = vi.spyOn(sessionRepository, "updateLastUsedAt");
+
+    const response = await request(`${baseConfig.sessionCookieName}=${rawToken}`);
+
+    expect(response.status).toBe(200);
+    expect(updateLastUsedAt).toHaveBeenCalledTimes(1);
+    expect(updateLastUsedAt).toHaveBeenCalledWith(session.id, clock.now());
+    expect(session.lastUsedAt).toEqual(clock.now());
   });
 
   it("G: auth context contains exactly the expected session and user", async () => {

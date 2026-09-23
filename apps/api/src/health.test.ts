@@ -4,6 +4,7 @@ import { loadConfig, type PasswordHasher } from "@zelora/core";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { UserRepository } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
+import type { CatalogRepository } from "@zelora/db/catalog";
 import { createApp, type AppDependencies } from "./app";
 import type { Clock } from "./services/clock";
 
@@ -46,6 +47,13 @@ const sellerRepository: SellerRepository = {
   findByProfileSlug: unimplemented,
   findStoreBySlug: unimplemented,
   createOnboarding: unimplemented,
+  activateSeller: unimplemented,
+};
+
+const catalogRepository: CatalogRepository = {
+  listActiveCategories: unimplemented,
+  listActiveProducts: unimplemented,
+  findProductBySlug: unimplemented,
 };
 
 function makeApp(): ReturnType<typeof createApp> {
@@ -55,6 +63,7 @@ function makeApp(): ReturnType<typeof createApp> {
     userRepository,
     sessionRepository,
     sellerRepository,
+    catalogRepository,
     passwordHasher,
     clock,
   };

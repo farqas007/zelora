@@ -9,6 +9,10 @@ export interface AppConfig {
   sessionCookieName: string;
   sessionTtlSeconds: number;
   sessionCookieSecure: boolean;
+  /** Minimum seconds between writes of a session's `lastUsedAt`. */
+  sessionLastUsedThrottleSeconds: number;
+  /** Seconds between background purges of expired sessions. */
+  sessionPurgeIntervalSeconds: number;
   pbkdf2Iterations: number;
   rateLimitEnabled: boolean;
   rateLimitTrustProxy: boolean;
@@ -30,6 +34,8 @@ const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
   sessionCookieName: "zelora_session",
   sessionTtlSeconds: 2_592_000,
   sessionCookieSecure: false,
+  sessionLastUsedThrottleSeconds: 300,
+  sessionPurgeIntervalSeconds: 3_600,
   pbkdf2Iterations: 210_000,
   rateLimitEnabled: true,
   rateLimitTrustProxy: false,
@@ -157,6 +163,16 @@ export function loadConfig(
       env.SESSION_COOKIE_SECURE,
       nodeEnv === "production",
       "SESSION_COOKIE_SECURE",
+    ),
+    sessionLastUsedThrottleSeconds: parsePositiveInteger(
+      env.SESSION_LAST_USED_THROTTLE_SECONDS,
+      DEFAULT_CONFIG.sessionLastUsedThrottleSeconds,
+      "SESSION_LAST_USED_THROTTLE_SECONDS",
+    ),
+    sessionPurgeIntervalSeconds: parsePositiveInteger(
+      env.SESSION_PURGE_INTERVAL_SECONDS,
+      DEFAULT_CONFIG.sessionPurgeIntervalSeconds,
+      "SESSION_PURGE_INTERVAL_SECONDS",
     ),
     pbkdf2Iterations: parsePositiveInteger(
       env.PBKDF2_ITERATIONS,

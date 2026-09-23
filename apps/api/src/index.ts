@@ -5,6 +5,7 @@ import { createLocalClient, resolveDbPath } from "@zelora/db";
 import { createLocalAuthSessionRepository } from "@zelora/db/auth/local";
 import { createLocalUserRepository } from "@zelora/db/users/local";
 import { createLocalSellerRepository } from "@zelora/db/seller/local";
+import { createLocalCatalogRepository } from "@zelora/db/catalog/local";
 import { createApp } from "./app";
 import { systemClock } from "./services/clock";
 import {
@@ -37,11 +38,15 @@ const clientIpResolver: ClientIpResolver = {
 
 const { db } = createLocalClient(resolveDbPath());
 
+const userRepository = createLocalUserRepository(db);
+const sessionRepository = createLocalAuthSessionRepository(db);
+
 const app = createApp({
   config,
-  userRepository: createLocalUserRepository(db),
-  sessionRepository: createLocalAuthSessionRepository(db),
+  userRepository,
+  sessionRepository,
   sellerRepository: createLocalSellerRepository(db),
+  catalogRepository: createLocalCatalogRepository(db),
   passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
   clock: systemClock,
   clientIpResolver,
@@ -53,6 +58,26 @@ const server = serve(
     logger.info("api listening", { host: info.address, port: info.port });
   },
 );
+
+/**
+ * Background sweep for expired sessions, mirroring the Worker's cron trigger
+ * (`triggers.crons` in wrangler.jsonc). The timer is `.unref()`ed so it never
+ * keeps the process alive on its own; failed runs are logged and retried on
+ * the next tick (purgeExpired is idempotent).
+ */
+const purgeTimer = setInterval(() => {
+  void sessionRepository
+    .purgeExpired()
+    .then((removed) => {
+      if (removed > 0) {
+        logger.info("purged expired sessions", { removed });
+      }
+    })
+    .catch((error) => {
+      logger.error("session purge failed", { error });
+    });
+}, Math.max(1_000, config.sessionPurgeIntervalSeconds * 1_000));
+purgeTimer.unref();
 
 function shutdown(signal: string): void {
   logger.info("shutting down", { signal });

@@ -13,6 +13,10 @@
       "types": "./src/schema/auth.ts",
       "default": "./src/schema/auth.ts"
     },
+    "./ids": {
+      "types": "./src/ids.ts",
+      "default": "./src/ids.ts"
+    },
     "./d1": {
       "types": "./src/d1.ts",
       "default": "./src/d1.ts"
@@ -52,6 +56,18 @@
     "./seller/d1": {
       "types": "./src/seller/d1-repository.ts",
       "default": "./src/seller/d1-repository.ts"
+    },
+    "./catalog": {
+      "types": "./src/catalog/repository.ts",
+      "default": "./src/catalog/repository.ts"
+    },
+    "./catalog/local": {
+      "types": "./src/catalog/local-repository.ts",
+      "default": "./src/catalog/local-repository.ts"
+    },
+    "./catalog/d1": {
+      "types": "./src/catalog/d1-repository.ts",
+      "default": "./src/catalog/d1-repository.ts"
     }
   },
   "scripts": {
@@ -73,6 +89,7 @@
     "@types/better-sqlite3": "^9.6.0",
     "@zelora/core": "workspace:*",
     "drizzle-kit": "^0.31.11",
+    "miniflare": "4.20260730.0",
     "tsx": "^4.23.15",
     "vitest": "^5.0.1"
   }

@@ -1,7 +1,8 @@
 import { eq } from "drizzle-orm";
 import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
-import { sellerProfiles, stores } from "../schema/identities";
+import { createId } from "../ids";
+import { sellerProfiles, stores, users } from "../schema/identities";
 import type {
   OnboardingConflictReason,
   SellerRepository,
@@ -13,8 +14,8 @@ import type {
  * Concrete implementation of {@link SellerRepository} against the Drizzle D1
  * client created by {@link createD1Client}. Mirrors the local better-sqlite3
  * contract: reads resolve to `null` when unknown, and `createOnboarding`
- * creates the seller profile plus its first store atomically, translating
- * UNIQUE constraint hits into the driver-neutral
+ * creates the seller profile plus its first store atomically via D1's native
+ * `batch()`, translating UNIQUE constraint hits into the driver-neutral
  * {@link OnboardingConflictReason} result.
  *
  * Worker-safe: only the Drizzle D1 driver and the seller contract are
@@ -41,37 +42,42 @@ export function createD1SellerRepository(
 
     async createOnboarding(input) {
       try {
-        const result = await db.transaction(async (tx) => {
-          const sellerProfile = await tx
+        // D1 rejects raw `BEGIN` statements, so Drizzle's driver-level
+        // `db.transaction()` fails at runtime. D1's native atomic primitive is
+        // `batch()`: every statement in the batch commits or rolls back as
+        // one unit. Ids are generated client-side (UUIDv7) so the store row
+        // can reference the profile id before either insert runs.
+        const sellerProfileId = createId();
+        const storeId = createId();
+
+        const [sellerProfileRows, storeRows] = await db.batch([
+          db
             .insert(sellerProfiles)
             .values({
+              id: sellerProfileId,
               userId: input.userId,
               slug: input.profileSlug,
               displayName: input.displayName,
             })
-            .returning()
-            .get();
-          if (sellerProfile === undefined) {
-            throw new Error("seller profile insert returned no row");
-          }
-
-          const store = await tx
+            .returning(),
+          db
             .insert(stores)
             .values({
-              sellerProfileId: sellerProfile.id,
+              id: storeId,
+              sellerProfileId,
               name: input.storeName,
               slug: input.storeSlug,
             })
-            .returning()
-            .get();
-          if (store === undefined) {
-            throw new Error("store insert returned no row");
-          }
+            .returning(),
+        ]);
 
-          return { sellerProfile, store };
-        });
+        const sellerProfile = sellerProfileRows[0];
+        const store = storeRows[0];
+        if (sellerProfile === undefined || store === undefined) {
+          throw new Error("seller onboarding insert returned no row");
+        }
 
-        return { ok: true, ...result };
+        return { ok: true, sellerProfile, store };
       } catch (error) {
         const reason = mapD1SellerOnboardingConflict(error);
         if (reason !== null) {
@@ -79,6 +85,42 @@ export function createD1SellerRepository(
         }
         throw error;
       }
+    },
+
+    async activateSeller(userId) {
+      const profile = await db.select().from(sellerProfiles).where(eq(sellerProfiles.userId, userId)).get();
+      if (profile === undefined) {
+        return null;
+      }
+
+      // D1 rejects raw `BEGIN`, so the whole promotion is one `batch()`:
+      // profile, every store and the user's role flip together or not at all.
+      const now = new Date();
+      const [profileRows, storeRows] = await db.batch([
+        db
+          .update(sellerProfiles)
+          .set({ status: "active", updatedAt: now })
+          .where(eq(sellerProfiles.id, profile.id))
+          .returning(),
+        db
+          .update(stores)
+          .set({ status: "active", updatedAt: now })
+          .where(eq(stores.sellerProfileId, profile.id))
+          .returning(),
+        db
+          .update(users)
+          .set({ role: "seller", updatedAt: now })
+          .where(eq(users.id, userId))
+          .returning(),
+      ]);
+
+      const sellerProfile = profileRows[0];
+      const store = storeRows[0];
+      if (sellerProfile === undefined || store === undefined) {
+        throw new Error("seller activation returned no row");
+      }
+
+      return { sellerProfile, store };
     },
   };
 }

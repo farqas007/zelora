@@ -4,8 +4,10 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { App } from "./App";
 import { RedirectIfAuthenticated, RequireAuth } from "./components/AuthGate";
 import { AuthProvider } from "./context/AuthContext";
+import { CatalogPage } from "./pages/Catalog";
 import { DashboardPage } from "./pages/Dashboard";
 import { LoginPage } from "./pages/Login";
+import { ProductDetailPage } from "./pages/ProductDetail";
 import { RegisterPage } from "./pages/Register";
 import { SellerOnboardingPage } from "./pages/SellerOnboarding";
 import "./styles.css";
@@ -53,6 +55,8 @@ createRoot(rootElement).render(
               </RequireAuth>
             }
           />
+          <Route path="/catalog" element={<CatalogPage />} />
+          <Route path="/catalog/products/:slug" element={<ProductDetailPage />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </AuthProvider>

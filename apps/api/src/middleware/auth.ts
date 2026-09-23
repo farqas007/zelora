@@ -94,7 +94,13 @@ export function createAuthMiddleware(
       );
     }
 
-    await sessionRepository.updateLastUsedAt(session.id, clock.now());
+    const now = clock.now();
+    const touchThresholdMs = config.sessionLastUsedThrottleSeconds * 1_000;
+    const lastUsedAt = session.lastUsedAt;
+    if (lastUsedAt === null || now.getTime() - lastUsedAt.getTime() >= touchThresholdMs) {
+      await sessionRepository.updateLastUsedAt(session.id, now);
+      session.lastUsedAt = now;
+    }
     c.set("auth", { session, user });
     await next();
   };

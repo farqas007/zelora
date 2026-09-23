@@ -6,3 +6,4 @@ export {
   type ApiSuccess,
 } from "./envelope";
 export * from "./auth";
+export * from "./catalog";

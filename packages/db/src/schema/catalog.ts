@@ -1,4 +1,4 @@
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import { check, index, integer, sqliteTable, text, unique, uniqueIndex, type AnySQLiteColumn } from "drizzle-orm/sqlite-core";
 import { createdAtColumn, currencyColumn, enumCheck, flagColumn, idColumn, updatedAtColumn } from "./_common";
 import { stores } from "./identities";
@@ -54,6 +54,10 @@ export const products = sqliteTable("products", {
   unique("products_store_id_slug_unique").on(table.storeId, table.slug),
   index("products_store_id_idx").on(table.storeId),
   index("products_category_id_idx").on(table.categoryId),
+  // Public catalog access paths: the storefront filters on `status` and pages
+  // by `(created_at, id)` descending, optionally narrowed to a category.
+  index("products_public_status_created_at_idx").on(table.status, desc(table.createdAt)),
+  index("products_public_status_category_id_idx").on(table.status, table.categoryId),
   check("products_status_check", enumCheck(table.status, PRODUCT_STATUSES)),
 ]);
 
@@ -71,6 +75,9 @@ export const productVariants = sqliteTable("product_variants", {
 }, (table) => [
   unique("product_variants_sku_unique").on(table.sku),
   index("product_variants_product_id_idx").on(table.productId),
+  // The storefront mines the cheapest active variant per product, so the
+  // variant table is scanned by (product, active status).
+  index("product_variants_product_id_status_idx").on(table.productId, table.status),
   check("product_variants_price_non_negative", sql`${table.priceAmountCents} >= 0`),
   check("product_variants_compare_at_non_negative", sql`${table.compareAtAmountCents} is null or ${table.compareAtAmountCents} >= 0`),
   check("product_variants_currency_length", sql`length(${table.currency}) = 3`),

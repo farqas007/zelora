@@ -15,6 +15,13 @@
       "when": 1790081808444,
       "tag": "0001_wandering_lionheart",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790173693868,
+      "tag": "0002_serious_overlord",
+      "breakpoints": true
     }
   ]
 }

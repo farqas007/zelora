@@ -119,6 +119,7 @@ export const AUTH_ERROR_CODES = {
   ACCOUNT_DELETED: "ACCOUNT_DELETED",
   SESSION_EXPIRED: "SESSION_EXPIRED",
   SELLER_PROFILE_EXISTS: "SELLER_PROFILE_EXISTS",
+  SELLER_ACTIVATION_BLOCKED: "SELLER_ACTIVATION_BLOCKED",
   SLUG_IN_USE: "SLUG_IN_USE",
   RATE_LIMITED: "RATE_LIMITED",
   CSRF_FAILED: "CSRF_FAILED",
@@ -131,10 +132,15 @@ export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[keyof typeof AUTH_ERROR_CO
  */
 export type RegisterEnvelope = ApiEnvelope<AuthUserResponse>;
 export type LoginEnvelope = ApiEnvelope<AuthUserResponse>;
-export type SellerOnboardingEnvelope = ApiEnvelope<{
+
+/** Profile plus its store, returned by onboarding and admin activation. */
+export interface SellerOnboardingData {
   sellerProfile: SellerProfileDto;
   store: StoreDto;
-}>;
+}
+export type SellerOnboardingEnvelope = ApiEnvelope<SellerOnboardingData>;
+/** Admin confirms a pending seller: profile and store are now active. */
+export type SellerActivationEnvelope = ApiEnvelope<SellerOnboardingData>;
 export type AuthMeEnvelope = ApiEnvelope<{
   user: UserDto;
 }>;

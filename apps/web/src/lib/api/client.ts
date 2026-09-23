@@ -3,6 +3,10 @@ import type {
   ApiErrorBody,
   AuthCsrfEnvelope,
   AuthMeEnvelope,
+  CatalogCategoryDto,
+  CatalogListProductsRequest,
+  CatalogProductDetailDto,
+  CatalogProductListData,
   HealthResponse,
   LoginEnvelope,
   LoginRequest,
@@ -58,6 +62,9 @@ export interface ZeloraApi {
   logout(): Promise<LogoutEnvelope>;
   logoutAll(): Promise<LogoutAllEnvelope>;
   onboardSeller(input: SellerOnboardingRequest): Promise<SellerOnboardingEnvelope>;
+  listCatalogCategories(): Promise<ApiEnvelope<CatalogCategoryDto[]>>;
+  listCatalogProducts(input: CatalogListProductsRequest): Promise<ApiEnvelope<CatalogProductListData>>;
+  getCatalogProductBySlug(slug: string): Promise<ApiEnvelope<CatalogProductDetailDto>>;
 }
 
 /**
@@ -164,6 +171,30 @@ export function createApiClient(
         body: input,
         csrf: true,
       }),
+    listCatalogCategories: () =>
+      request<ApiEnvelope<CatalogCategoryDto[]>>("/api/catalog/categories", { method: "GET" }),
+    listCatalogProducts: (input) => {
+      const params = new URLSearchParams();
+      if (input.limit !== undefined) {
+        params.set("limit", String(input.limit));
+      }
+      if (input.cursor !== undefined && input.cursor !== "") {
+        params.set("cursor", input.cursor);
+      }
+      if (input.category !== undefined && input.category !== "") {
+        params.set("category", input.category);
+      }
+      const query = params.toString();
+      return request<ApiEnvelope<CatalogProductListData>>(
+        `/api/catalog/products${query === "" ? "" : `?${query}`}`,
+        { method: "GET" },
+      );
+    },
+    getCatalogProductBySlug: (slug) =>
+      request<ApiEnvelope<CatalogProductDetailDto>>(
+        `/api/catalog/products/${encodeURIComponent(slug)}`,
+        { method: "GET" },
+      ),
   };
 }
 

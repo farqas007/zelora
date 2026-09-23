@@ -1,6 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
-import { sellerProfiles, stores } from "../schema/identities";
+import { sellerProfiles, stores, users } from "../schema/identities";
 import type { OnboardingConflictReason, SellerRepository } from "./repository";
 
 /**
@@ -72,6 +72,39 @@ export function createLocalSellerRepository(db: LocalDatabase): SellerRepository
         }
         throw error;
       }
+    },
+
+    async activateSeller(userId) {
+      return db.transaction((tx) => {
+        const profile = tx.select().from(sellerProfiles).where(eq(sellerProfiles.userId, userId)).get();
+        if (profile === undefined) {
+          return null;
+        }
+
+        const sellerProfile = tx
+          .update(sellerProfiles)
+          .set({ status: "active" })
+          .where(eq(sellerProfiles.id, profile.id))
+          .returning()
+          .get();
+        if (sellerProfile === undefined) {
+          throw new Error("seller profile activation returned no row");
+        }
+
+        const store = tx
+          .update(stores)
+          .set({ status: "active" })
+          .where(eq(stores.sellerProfileId, profile.id))
+          .returning()
+          .all()[0];
+        if (store === undefined) {
+          throw new Error("seller profile has no store to activate");
+        }
+
+        tx.update(users).set({ role: "seller" }).where(eq(users.id, userId)).run();
+
+        return { sellerProfile, store };
+      });
     },
   };
 }

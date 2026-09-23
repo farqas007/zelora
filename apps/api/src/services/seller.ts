@@ -4,7 +4,7 @@ import {
   type SellerProfileDto,
   type StoreDto,
 } from "@zelora/shared";
-import { AppError } from "@zelora/core";
+import { AppError, NotFoundError } from "@zelora/core";
 import type { UserRecord } from "@zelora/db/users";
 import type {
   SellerProfileRecord,
@@ -149,6 +149,37 @@ export class SellerService {
     return {
       sellerProfile: mapSellerProfileToDto(result.sellerProfile),
       store: mapStoreToDto(result.store),
+    };
+  }
+
+  /**
+   * Approve a seller account. The profile must exist and must not be
+   * suspended or rejected; activation flips the profile and its stores to
+   * `active` and promotes the owning user to the `seller` role atomically.
+   * Activating an already-active profile is a no-op success (idempotent).
+   * This is an admin-level action; caller authorization lives in the route.
+   */
+  async activateSeller(userId: string): Promise<OnboardingResultData> {
+    const profile = await this.sellerRepository.findByUserId(userId);
+    if (profile === null) {
+      throw new NotFoundError("No seller profile exists for this user.");
+    }
+    if (profile.status === "suspended" || profile.status === "rejected") {
+      throw new AppError(
+        AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
+        "This seller profile cannot be activated.",
+        409,
+      );
+    }
+
+    const activated = await this.sellerRepository.activateSeller(userId);
+    if (activated === null) {
+      throw new NotFoundError("No seller profile exists for this user.");
+    }
+
+    return {
+      sellerProfile: mapSellerProfileToDto(activated.sellerProfile),
+      store: mapStoreToDto(activated.store),
     };
   }
 }

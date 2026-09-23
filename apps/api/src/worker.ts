@@ -4,6 +4,7 @@ import { createD1Client, type D1DatabaseLike } from "@zelora/db/d1";
 import { createD1AuthSessionRepository } from "@zelora/db/auth/d1";
 import { createD1UserRepository } from "@zelora/db/users/d1";
 import { createD1SellerRepository } from "@zelora/db/seller/d1";
+import { createD1CatalogRepository } from "@zelora/db/catalog/d1";
 import { createApp } from "./app";
 import { systemClock } from "./services/clock";
 import { normalizeClientIp, type ClientIpResolver } from "./services/client-ip";
@@ -117,6 +118,7 @@ function createWorkerApp(env: Env): Hono {
     userRepository: createD1UserRepository(db),
     sessionRepository: createD1AuthSessionRepository(db),
     sellerRepository: createD1SellerRepository(db),
+    catalogRepository: createD1CatalogRepository(db),
     passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
     clock: systemClock,
     clientIpResolver,
@@ -126,9 +128,53 @@ function createWorkerApp(env: Env): Hono {
 /** Lazily built app, reused across requests within an isolate. */
 let app: Hono | undefined;
 
+/**
+ * Minimal structural types for the Workers scheduled-handler contract.
+ *
+ * `@cloudflare/workers-types` is deliberately not a dependency of this app
+ * (see `D1DatabaseLike` in `@zelora/db` for the same approach): the fields
+ * below are the only part of the platform API this module touches, so
+ * hand-declaring them keeps the type-check node-only while still matching
+ * what wrangler/workerd actually pass at runtime.
+ */
+export interface ScheduledControllerLike {
+  /** Unix ms at which this invocation was scheduled to run. */
+  scheduledTime: number;
+  /** The cron expression that triggered this invocation. */
+  cron: string;
+}
+
+export interface ExecutionContextLike {
+  /** Extends the lifetime of the scheduled run until the promise settles. */
+  waitUntil(promise: Promise<unknown>): void;
+}
+
+function purgeExpiredSessions(env: Env): Promise<number> {
+  const sessionRepository = createD1AuthSessionRepository(createD1Client(env.DB));
+  return sessionRepository.purgeExpired();
+}
+
 export default {
   fetch(request: Request, env: Env): Response | Promise<Response> {
     app ??= createWorkerApp(env);
     return app.fetch(request, env);
+  },
+
+  /**
+   * Cron entry point (see `triggers.crons` in wrangler.jsonc). Expired
+   * sessions are otherwise only ever deleted lazily when their cookie is
+   * presented again; this sweep keeps the auth_sessions table bounded even
+   * for sessions nobody ever comes back for. `purgeExpired` is a pure
+   * `DELETE ... WHERE expires_at <= now`, so overlapping or retried runs are
+   * safe and idempotent.
+   */
+  scheduled(
+    _event: ScheduledControllerLike,
+    env: Env,
+    ctx: ExecutionContextLike,
+  ): Promise<void> {
+    const purge = purgeExpiredSessions(env);
+    ctx.waitUntil(purge);
+    return purge.then(() => undefined);
   },
 };

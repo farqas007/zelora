@@ -64,10 +64,12 @@ describe("error envelope (ApiErrorBody)", () => {
     }
   });
 
-  it("maps unknown errors to INTERNAL_ERROR with no extra keys", () => {
+  it("maps unknown errors to INTERNAL_ERROR with no leaked message and no extra keys", () => {
     const failure = toApiFailure(new Error("oops"));
     if (!failure.ok) {
       expect(failure.error.code).toBe("INTERNAL_ERROR");
+      expect(failure.error.message).toBe("Internal server error.");
+      expect(failure.error.message).not.toContain("oops");
       expect(failure.error.fields).toBeUndefined();
       expect(failure.error.details).toBeUndefined();
     }
@@ -112,5 +114,7 @@ describe("HTTP 429 support", () => {
     const body = (await response.json()) as ApiFailure;
     expect(body.ok).toBe(false);
     expect(body.error.code).toBe("INTERNAL_ERROR");
+    expect(body.error.message).toBe("Internal server error.");
+    expect(body.error.message).not.toContain("boom");
   });
 });

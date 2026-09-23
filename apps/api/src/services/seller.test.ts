@@ -91,6 +91,23 @@ class FakeSellerRepository implements SellerRepository {
     this.stores.set(store.id, store);
   }
 
+  async activateSeller(userId: string): Promise<{
+    sellerProfile: SellerProfileRecord;
+    store: StoreRecord;
+  } | null> {
+    const profile = Array.from(this.profiles.values()).find((candidate) => candidate.userId === userId);
+    if (profile === undefined) {
+      return null;
+    }
+    const activatedProfile: SellerProfileRecord = { ...profile, status: "active" };
+    const store = Array.from(this.stores.values()).find((candidate) => candidate.sellerProfileId === profile.id);
+    if (store === undefined) {
+      throw new Error("seller profile has no store to activate");
+    }
+    this.profiles.set(profile.id, activatedProfile);
+    return { sellerProfile: activatedProfile, store: { ...store, status: "active" } };
+  }
+
   clear(): void {
     this.profiles.clear();
     this.stores.clear();
@@ -404,6 +421,120 @@ describe("SellerService", () => {
       expect(JSON.stringify(result)).not.toContain("session");
       expect(JSON.stringify(result)).not.toContain("createdAt");
       expect(JSON.stringify(result)).not.toContain("updatedAt");
+    });
+  });
+
+  describe("activateSeller", () => {
+    function seedPendingSeller(userId: string): void {
+      repository.seedProfile({
+        id: "sp-pending",
+        userId,
+        slug: "pending-shop",
+        displayName: "Pending Seller",
+        status: "pending",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-pending",
+        sellerProfileId: "sp-pending",
+        name: "Pending Shop",
+        slug: "pending-shop",
+        description: null,
+        status: "draft",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+
+    it("activates a pending seller: profile, store and DTO projection", async () => {
+      seedPendingSeller("seller-user");
+
+      const result = await service.activateSeller("seller-user");
+
+      expect(result.sellerProfile.status).toBe("active");
+      expect(result.store.status).toBe("active");
+      expect(result.sellerProfile.slug).toBe("pending-shop");
+      expect(Object.keys(result.sellerProfile).sort()).toEqual([
+        "displayName",
+        "id",
+        "slug",
+        "status",
+        "userId",
+      ]);
+      expect(JSON.stringify(result)).not.toContain("passwordHash");
+    });
+
+    it("is idempotent for an already-active profile", async () => {
+      seedPendingSeller("seller-user");
+      repository.seedProfile({
+        id: "sp-active",
+        userId: "active-user",
+        slug: "active-shop",
+        displayName: "Active Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-active",
+        sellerProfileId: "sp-active",
+        name: "Active Shop",
+        slug: "active-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const result = await service.activateSeller("active-user");
+
+      expect(result.sellerProfile.status).toBe("active");
+      expect(result.sellerProfile.id).toBe("sp-active");
+    });
+
+    it("returns NOT_FOUND 404 when the user has no seller profile", async () => {
+      await expectSellerError(
+        () => service.activateSeller("unknown-user"),
+        "NOT_FOUND",
+        404,
+      );
+    });
+
+    it("returns SELLER_ACTIVATION_BLOCKED 409 for a suspended profile", async () => {
+      repository.seedProfile({
+        id: "sp-suspended",
+        userId: "suspended-user",
+        slug: "suspended-shop",
+        displayName: "Suspended Seller",
+        status: "suspended",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await expectSellerError(
+        () => service.activateSeller("suspended-user"),
+        AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
+        409,
+      );
+    });
+
+    it("returns SELLER_ACTIVATION_BLOCKED 409 for a rejected profile", async () => {
+      repository.seedProfile({
+        id: "sp-rejected",
+        userId: "rejected-user",
+        slug: "rejected-shop",
+        displayName: "Rejected Seller",
+        status: "rejected",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await expectSellerError(
+        () => service.activateSeller("rejected-user"),
+        AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
+        409,
+      );
     });
   });
 });

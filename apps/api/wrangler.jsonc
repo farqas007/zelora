@@ -8,6 +8,12 @@
     // the deployed frontend (https://zelora-web.farqas007.workers.dev).
     "CORS_ORIGIN": "https://zelora-web.farqas007.workers.dev"
   },
+  // Hourly sweep that runs the `scheduled` handler in src/worker.ts, which
+  // purges expired auth sessions (see sessionPurgeIntervalSeconds in
+  // packages/core/src/config.ts for the equivalent Node-server cadence).
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
   "d1_databases": [
     {
       // Raw D1 binding name, exposed to the Worker as `env.DB`.

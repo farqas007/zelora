@@ -1,0 +1,16 @@
+{
+  // Deploys apps/web/dist as a free Workers Static Assets Worker on
+  // https://zelora-web.<account>.workers.dev. No Worker script (`main`) is
+  // needed: Wrangler serves the static bundle at the edge and the SPA
+  // fallback below makes React Router deep links work on direct navigation.
+  "$schema": "https://raw.githubusercontent.com/cloudflare/workers-sdk/main/packages/wrangler/config-schema.json",
+  "name": "zelora-web",
+  "compatibility_date": "2025-03-01",
+  "assets": {
+    // Relative to this config file (Wrangler resolves against the config dir).
+    "directory": "./dist",
+    // Serve /index.html for unknown paths so /login, /register, /dashboard
+    // and /seller/onboarding behave on refresh/direct navigation.
+    "not_found_handling": "single-page-application"
+  }
+}

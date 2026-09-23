@@ -18,7 +18,7 @@ export function PageShell({ title, children }: PageShellProps) {
       </a>
       <header className="site-header">
         <Link className="brand" to="/">
-          Zelora
+          <img className="brand-logo" src="/assets/zelora-logo.svg" alt="Zelora" width="132" height="34" />
         </Link>
         <p className="tagline">Multi-vendor marketplace platform</p>
       </header>

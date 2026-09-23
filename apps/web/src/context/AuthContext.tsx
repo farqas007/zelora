@@ -8,7 +8,8 @@ import {
   type ReactNode,
 } from "react";
 import type { LoginRequest, RegisterRequest, UserDto } from "@zelora/shared";
-import { createApiClient, type ZeloraApi } from "../lib/api/client";
+import { AUTH_ERROR_CODES } from "@zelora/shared";
+import { ApiFailureError, createApiClient, type ZeloraApi } from "../lib/api/client";
 import { bootstrapSession } from "../lib/auth/session";
 
 /**
@@ -32,6 +33,15 @@ export interface AuthContextValue {
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
+
+/**
+ * A session that is already expired or could not be verified is effectively
+ * gone, so a sign-out attempt that encounters either still ends in the
+ * signed-out state instead of dead-locking the UI on an irresolvable error.
+ */
+function isAlreadyGone(code: string): boolean {
+  return code === AUTH_ERROR_CODES.SESSION_EXPIRED || code === AUTH_ERROR_CODES.CSRF_FAILED;
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const csrfTokenRef = useRef<string | null>(null);
@@ -90,7 +100,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (input: LoginRequest) => {
       const envelope = await api.login(input);
       if (!envelope.ok) {
-        throw new Error(envelope.error.message);
+        throw new ApiFailureError(envelope.error);
       }
       applyAuthenticated(envelope.data.user, envelope.data.session.csrfToken);
     },
@@ -101,7 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     async (input: RegisterRequest) => {
       const envelope = await api.register(input);
       if (!envelope.ok) {
-        throw new Error(envelope.error.message);
+        throw new ApiFailureError(envelope.error);
       }
       applyAuthenticated(envelope.data.user, envelope.data.session.csrfToken);
     },
@@ -110,18 +120,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const logout = useCallback(async () => {
     const envelope = await api.logout();
-    if (!envelope.ok) {
-      throw new Error(envelope.error.message);
+    if (envelope.ok) {
+      applySignedOut();
+      return;
     }
-    applySignedOut();
+    if (isAlreadyGone(envelope.error.code)) {
+      applySignedOut();
+      return;
+    }
+    throw new ApiFailureError(envelope.error);
   }, [api, applySignedOut]);
 
   const logoutAll = useCallback(async () => {
     const envelope = await api.logoutAll();
-    if (!envelope.ok) {
-      throw new Error(envelope.error.message);
+    if (envelope.ok) {
+      applySignedOut();
+      return;
     }
-    applySignedOut();
+    if (isAlreadyGone(envelope.error.code)) {
+      applySignedOut();
+      return;
+    }
+    throw new ApiFailureError(envelope.error);
   }, [api, applySignedOut]);
 
   const value: AuthContextValue = {

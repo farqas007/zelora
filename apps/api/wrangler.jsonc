@@ -3,6 +3,11 @@
   "name": "zelora-api",
   "main": "src/worker.ts",
   "compatibility_date": "2025-03-01",
+  "vars": {
+    // Production browser origin for the API's CORS policy. Keep in sync with
+    // the deployed frontend (https://zelora-web.farqas007.workers.dev).
+    "CORS_ORIGIN": "https://zelora-web.farqas007.workers.dev"
+  },
   "d1_databases": [
     {
       // Raw D1 binding name, exposed to the Worker as `env.DB`.

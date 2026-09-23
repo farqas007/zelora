@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 40" role="img" aria-label="Zelora">
+  <defs>
+    <linearGradient id="ze-logo-z" x1="8" y1="11" x2="40" y2="37" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#7c3aed"/>
+      <stop offset="0.55" stop-color="#a855f7"/>
+      <stop offset="1" stop-color="#ec4899"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(2 2)">
+    <g fill="none" stroke="url(#ze-logo-z)" stroke-width="7" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M9 12h21"/>
+      <path d="M30 12 18 36"/>
+      <path d="M18 36h21"/>
+    </g>
+    <circle cx="9" cy="12" r="3.6" fill="#5b21b6" stroke="#ffffff" stroke-width="1.3"/>
+    <circle cx="39" cy="36" r="3.6" fill="#ec4899" stroke="#ffffff" stroke-width="1.3"/>
+  </g>
+  <text
+    x="50"
+    y="34"
+    font-family="system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif"
+    font-size="26"
+    font-weight="800"
+    letter-spacing="-0.6"
+    fill="#1a1230"
+  >Zelora<tspan fill="#ec4899">.</tspan></text>
+</svg>

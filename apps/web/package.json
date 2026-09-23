@@ -8,7 +8,8 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "deploy": "pnpm build && pnpm -w exec wrangler deploy --config apps/web/wrangler.jsonc"
   },
   "dependencies": {
     "@zelora/shared": "workspace:*",

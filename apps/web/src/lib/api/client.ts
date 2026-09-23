@@ -1,5 +1,6 @@
 import type {
   ApiEnvelope,
+  ApiErrorBody,
   AuthCsrfEnvelope,
   AuthMeEnvelope,
   HealthResponse,
@@ -72,6 +73,25 @@ export class ApiClientError extends Error {
     super(message, options);
     this.name = "ApiClientError";
     this.status = status;
+  }
+}
+
+/**
+ * A valid {@link ApiFailure} envelope returned by the API. Carries the stable
+ * `code`, per-field `fields`, and `details` alongside the human `message` so
+ * callers can surface structured validation feedback without parsing strings.
+ */
+export class ApiFailureError extends Error {
+  readonly code: string;
+  readonly details: Record<string, unknown> | undefined;
+  readonly fields: Record<string, string[]> | undefined;
+
+  constructor(body: ApiErrorBody) {
+    super(body.message);
+    this.name = "ApiFailureError";
+    this.code = body.code;
+    this.details = body.details;
+    this.fields = body.fields;
   }
 }
 

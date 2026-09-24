@@ -201,6 +201,23 @@ export function createLocalCatalogRepository(db: LocalDatabase): CatalogReposito
         images: images.map((image) => ({ ...image, isPrimary: image.isPrimary === 1 })),
       };
     },
+
+    async findVariantById(id) {
+      return (
+        db
+          .select({
+            id: productVariants.id,
+            name: productVariants.name,
+            sku: productVariants.sku,
+            priceAmountCents: productVariants.priceAmountCents,
+            compareAtAmountCents: productVariants.compareAtAmountCents,
+            currency: productVariants.currency,
+          })
+          .from(productVariants)
+          .where(eq(productVariants.id, id))
+          .get() ?? null
+      );
+    },
   };
 }
 

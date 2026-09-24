@@ -8,6 +8,7 @@ import type {
 import type { AuditLogRepository } from "@zelora/db/audit";
 import type { UserRecord, UserRepository, CreateAdminResult, CreateUserInput } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
+import type { CartRepository } from "@zelora/db/cart";
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
@@ -187,6 +188,28 @@ const inertCatalogRepository: CatalogRepository = {
   listActiveCategories: unimplementedSeller,
   listActiveProducts: unimplementedSeller,
   findProductBySlug: unimplementedSeller,
+  findVariantById: unimplementedSeller,
+};
+
+const inertCartRepository: CartRepository = {
+  getCartByUserId: () => {
+    throw new Error("unexpected cart call");
+  },
+  createCart: () => {
+    throw new Error("unexpected cart call");
+  },
+  addItem: () => {
+    throw new Error("unexpected cart call");
+  },
+  updateItemQuantity: () => {
+    throw new Error("unexpected cart call");
+  },
+  removeItem: () => {
+    throw new Error("unexpected cart call");
+  },
+  clearCart: () => {
+    throw new Error("unexpected cart call");
+  },
 };
 
 describe("auth routes", () => {
@@ -232,6 +255,7 @@ describe("auth routes", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      cartRepository: inertCartRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -875,6 +899,7 @@ describe("auth routes", () => {
         sessionRepository,
         sellerRepository,
         catalogRepository: inertCatalogRepository,
+      cartRepository: inertCartRepository,
         auditLogRepository: inertAuditLogRepository,
         passwordHasher,
         clock,

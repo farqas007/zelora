@@ -2,15 +2,19 @@ import { useEffect, useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import type { CatalogCategoryDto } from "@zelora/shared";
 import { useAuth } from "../context/AuthContext";
+import { useCart } from "../context/CartContext";
 
 /**
  * Storefront chrome: brand, search, account actions and the quick category
  * chips. The nav chips are live links pulled from the public catalog API and
  * hidden entirely while the catalog is empty or unreachable, so a storefront
- * without categories never renders dead navigation.
+ * without categories never renders dead navigation. The cart link carries a
+ * live item-count badge fed by {@link useCart}; the count reflects every
+ * add/update/remove/clear across the marketplace.
  */
 export function MarketHeader() {
   const { api, status, user } = useAuth();
+  const { itemCount } = useCart();
   const navigate = useNavigate();
   const [categories, setCategories] = useState<CatalogCategoryDto[] | null>(null);
 
@@ -88,16 +92,15 @@ export function MarketHeader() {
                 <span className="account-name">{user.name}</span>
               </Link>
             )}
-            <button
-              type="button"
-              className="btn btn-sm cart-button"
-              title="Cart is coming soon"
-              aria-disabled="true"
-              disabled
-            >
+            <Link className="btn btn-sm cart-button" to="/cart">
               <CartIcon />
               <span>Cart</span>
-            </button>
+              {itemCount > 0 && (
+                <span className="cart-count" aria-label={`${itemCount} items in cart`}>
+                  {itemCount > 99 ? "99+" : itemCount}
+                </span>
+              )}
+            </Link>
           </div>
         </div>
       </header>

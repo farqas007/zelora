@@ -1,8 +1,10 @@
 import type {
+  AddCartItemRequest,
   ApiEnvelope,
   ApiErrorBody,
   AuthCsrfEnvelope,
   AuthMeEnvelope,
+  CartEnvelope,
   CatalogCategoryDto,
   CatalogListProductsRequest,
   CatalogProductDetailDto,
@@ -16,6 +18,7 @@ import type {
   RegisterRequest,
   SellerOnboardingEnvelope,
   SellerOnboardingRequest,
+  UpdateCartItemRequest,
 } from "@zelora/shared";
 
 /**
@@ -65,6 +68,11 @@ export interface ZeloraApi {
   listCatalogCategories(): Promise<ApiEnvelope<CatalogCategoryDto[]>>;
   listCatalogProducts(input: CatalogListProductsRequest): Promise<ApiEnvelope<CatalogProductListData>>;
   getCatalogProductBySlug(slug: string): Promise<ApiEnvelope<CatalogProductDetailDto>>;
+  getCart(): Promise<CartEnvelope>;
+  addCartItem(input: AddCartItemRequest): Promise<CartEnvelope>;
+  updateCartItemQuantity(itemId: string, input: UpdateCartItemRequest): Promise<CartEnvelope>;
+  removeCartItem(itemId: string): Promise<CartEnvelope>;
+  clearCart(): Promise<CartEnvelope>;
 }
 
 /**
@@ -108,7 +116,7 @@ export function createApiClient(
   const baseUrl = dependencies.baseUrl ?? API_BASE_URL;
 
   interface RequestOptions {
-    method: "GET" | "POST";
+    method: "GET" | "POST" | "PATCH" | "DELETE";
     body?: unknown;
     /** Send the CSRF header when a token is available. */
     csrf?: boolean;
@@ -195,6 +203,21 @@ export function createApiClient(
         `/api/catalog/products/${encodeURIComponent(slug)}`,
         { method: "GET" },
       ),
+    getCart: () => request<CartEnvelope>("/api/cart", { method: "GET" }),
+    addCartItem: (input) =>
+      request<CartEnvelope>("/api/cart/items", { method: "POST", body: input, csrf: true }),
+    updateCartItemQuantity: (itemId, input) =>
+      request<CartEnvelope>(`/api/cart/items/${encodeURIComponent(itemId)}`, {
+        method: "PATCH",
+        body: input,
+        csrf: true,
+      }),
+    removeCartItem: (itemId) =>
+      request<CartEnvelope>(`/api/cart/items/${encodeURIComponent(itemId)}`, {
+        method: "DELETE",
+        csrf: true,
+      }),
+    clearCart: () => request<CartEnvelope>("/api/cart", { method: "DELETE", csrf: true }),
   };
 }
 

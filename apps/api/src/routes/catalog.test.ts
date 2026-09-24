@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "@zelora/core";
 import { loadConfig } from "@zelora/core";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { CartRepository } from "@zelora/db/cart";
 import type { AuditLogRepository } from "@zelora/db/audit";
 import type { ApiFailure } from "@zelora/shared";
 import { createApp, type AppDependencies } from "../app";
@@ -61,6 +62,10 @@ class FakeCatalogRepository implements CatalogRepository {
   async findProductBySlug(slug: string) {
     return slug === "camper" ? detailFixture : null;
   }
+
+  async findVariantById(_id: string) {
+    return null;
+  }
 }
 
 const inert = (): never => {
@@ -111,6 +116,14 @@ describe("catalog routes", () => {
         create: inert,
         listByAction: inert,
       } satisfies AuditLogRepository,
+      cartRepository: {
+        getCartByUserId: inert,
+        createCart: inert,
+        addItem: inert,
+        updateItemQuantity: inert,
+        removeItem: inert,
+        clearCart: inert,
+      } satisfies CartRepository,
       passwordHasher: { hash: inert, verify: inert },
       clock: new FakeClock(),
     };

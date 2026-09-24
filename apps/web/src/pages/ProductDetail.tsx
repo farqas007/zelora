@@ -1,11 +1,13 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
-import type { CatalogProductDetailDto } from "@zelora/shared";
+import type { CatalogProductDetailDto, CatalogVariantDto } from "@zelora/shared";
 import { LoadingState } from "../components/LoadingState";
 import { MarketFooter } from "../components/MarketFooter";
 import { MarketHeader } from "../components/MarketHeader";
 import { useAuth } from "../context/AuthContext";
+import { useCart } from "../context/CartContext";
 import { ApiFailureError } from "../lib/api/client";
+import { resolveCartFailure } from "../lib/cart/errors";
 import { formatCents } from "../lib/format";
 
 type DetailState =
@@ -14,15 +16,24 @@ type DetailState =
   | { status: "missing" }
   | { status: "error"; message: string };
 
+interface AddToCartFeedback {
+  kind: "success" | "error";
+  text: string;
+}
+
 /**
  * Public product detail page. Reads the product from the catalog API by slug
- * and presents its images, store and sellable variants. A missing or inactive
- * product surfaces as an explicit "not available" state instead of a crash.
+ * and presents its images, store and sellable variants. Each variant row can
+ * add that variant to the cart for an authenticated customer; signed-out
+ * visitors are pointed at the existing sign-in flow instead of bypassing it.
  */
 export function ProductDetailPage() {
-  const { api } = useAuth();
+  const { api, status } = useAuth();
+  const { addItem } = useCart();
   const { slug } = useParams<{ slug: string }>();
   const [state, setState] = useState<DetailState>({ status: "loading" });
+  const [addingVariantId, setAddingVariantId] = useState<string | null>(null);
+  const [addFeedback, setAddFeedback] = useState<AddToCartFeedback | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,6 +70,30 @@ export function ProductDetailPage() {
       cancelled = true;
     };
   }, [api, slug]);
+
+  useEffect(() => {
+    if (addFeedback === null || addFeedback.kind !== "success") {
+      return;
+    }
+    const timer = window.setTimeout(() => setAddFeedback(null), 4000);
+    return () => window.clearTimeout(timer);
+  }, [addFeedback]);
+
+  async function onAddToCart(variant: CatalogVariantDto): Promise<void> {
+    if (status !== "authenticated" || addingVariantId !== null) {
+      return;
+    }
+    setAddingVariantId(variant.id);
+    setAddFeedback(null);
+    try {
+      await addItem(variant.id, 1);
+      setAddFeedback({ kind: "success", text: `${variant.name} added to your cart.` });
+    } catch (cause) {
+      setAddFeedback({ kind: "error", text: resolveCartFailure(cause) });
+    } finally {
+      setAddingVariantId(null);
+    }
+  }
 
   const product = state.status === "ready" ? state.product : null;
 
@@ -126,6 +161,22 @@ export function ProductDetailPage() {
                 <p className="product-detail-description">{product.description}</p>
 
                 <div className="product-variant-list">
+                  {addFeedback !== null && (
+                    <div
+                      className={addFeedback.kind === "success" ? "form-success" : "form-alert"}
+                      role="status"
+                    >
+                      {addFeedback.text}
+                    </div>
+                  )}
+                  {status === "signed-out" && (
+                    <div className="login-required-note" role="status">
+                      <span>Sign in to add items to your cart.</span>
+                      <Link to="/login">Sign in</Link>
+                      <span aria-hidden="true">·</span>
+                      <Link to="/register">Create an account</Link>
+                    </div>
+                  )}
                   {product.variants.length === 0 ? (
                     <p className="muted">No sellable variants at the moment.</p>
                   ) : (
@@ -135,10 +186,30 @@ export function ProductDetailPage() {
                           <strong>{variant.name}</strong>
                           {variant.sku !== null && <span className="muted">SKU {variant.sku}</span>}
                         </div>
-                        <div className="variant-price">
-                          <span>{formatCents(variant.priceAmountCents, variant.currency)}</span>
-                          {variant.compareAtAmountCents !== null && (
-                            <s>{formatCents(variant.compareAtAmountCents, variant.currency)}</s>
+                        <div className="variant-actions">
+                          <div className="variant-price">
+                            <span>{formatCents(variant.priceAmountCents, variant.currency)}</span>
+                            {variant.compareAtAmountCents !== null && (
+                              <s>{formatCents(variant.compareAtAmountCents, variant.currency)}</s>
+                            )}
+                          </div>
+                          {status === "loading" ? (
+                            <button type="button" className="btn btn-sm btn-primary" disabled>
+                              Add to cart
+                            </button>
+                          ) : status === "authenticated" ? (
+                            <button
+                              type="button"
+                              className="btn btn-sm btn-primary"
+                              onClick={() => void onAddToCart(variant)}
+                              disabled={addingVariantId !== null}
+                            >
+                              {addingVariantId === variant.id ? "Adding…" : "Add to cart"}
+                            </button>
+                          ) : (
+                            <Link className="btn btn-sm btn-primary" to="/login">
+                              Sign in to add
+                            </Link>
                           )}
                         </div>
                       </div>

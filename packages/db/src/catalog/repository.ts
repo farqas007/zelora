@@ -99,4 +99,12 @@ export interface CatalogRepository {
 
   /** Resolve one active product by slug, linked store and category included. */
   findProductBySlug(slug: string): Promise<CatalogProductDetailRecord | null>;
+
+  /**
+   * Resolve one variant by id regardless of status. Unlike the storefront
+   * projections this never filters on `status`, because it backs
+   * referential checks (a cart must reference a real variant) rather than
+   * public display. Returns `null` when the variant does not exist.
+   */
+  findVariantById(id: string): Promise<CatalogVariantRecord | null>;
 }

@@ -78,6 +78,10 @@ class FakeCatalogRepository implements CatalogRepository {
     return slug === summary.slug ? detail : null;
   }
 
+  async findVariantById(_id: string) {
+    return null;
+  }
+
   setPage(page: CatalogProductListPage): void {
     this.page = page;
   }

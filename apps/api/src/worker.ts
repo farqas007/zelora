@@ -5,6 +5,7 @@ import { createD1AuthSessionRepository } from "@zelora/db/auth/d1";
 import { createD1UserRepository } from "@zelora/db/users/d1";
 import { createD1SellerRepository } from "@zelora/db/seller/d1";
 import { createD1CatalogRepository } from "@zelora/db/catalog/d1";
+import { createD1CartRepository } from "@zelora/db/cart/d1";
 import { createD1AuditLogRepository } from "@zelora/db/audit/d1";
 import { createApp } from "./app";
 import { systemClock } from "./services/clock";
@@ -183,6 +184,7 @@ function createWorkerApp(env: Env): Hono {
     sessionRepository: createD1AuthSessionRepository(db),
     sellerRepository: createD1SellerRepository(db),
     catalogRepository: createD1CatalogRepository(db),
+    cartRepository: createD1CartRepository(db),
     auditLogRepository: createD1AuditLogRepository(db),
     passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
     clock: systemClock,

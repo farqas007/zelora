@@ -3,11 +3,13 @@ import { Miniflare } from "miniflare";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { eq } from "drizzle-orm";
 import { createD1Client } from "../d1";
 import { createD1UserRepository } from "../users/d1-repository";
 import { createD1AuthSessionRepository } from "../auth/d1-repository";
 import { createD1SellerRepository } from "../seller/d1-repository";
 import { createD1CatalogRepository } from "../catalog/d1-repository";
+import { createD1CartRepository } from "../cart/d1-repository";
 import { createId } from "../ids";
 import * as schema from "../schema";
 import type { DatabaseSchema } from "../client";
@@ -80,6 +82,8 @@ async function resetD1(database: D1Binding): Promise<void> {
 const REVERSE_DEPENDENCY_ORDER = [
   "audit_logs",
   "auth_sessions",
+  "cart_items",
+  "carts",
   "order_items",
   "order_addresses",
   "orders",
@@ -118,7 +122,7 @@ describe("D1 runtime with committed migrations", () => {
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all<{ name: string }>();
     const names = tables.results.map((row: { name: string }) => row.name);
-    for (const expected of ["users", "seller_profiles", "stores", "categories", "products", "product_variants", "inventory", "orders", "order_items", "audit_logs"]) {
+    for (const expected of ["users", "seller_profiles", "stores", "categories", "products", "product_variants", "inventory", "orders", "order_items", "audit_logs", "carts", "cart_items"]) {
       expect(names).toContain(expected);
     }
 
@@ -535,5 +539,149 @@ describe("D1 catalog repository (real joins and keyset pagination)", () => {
     expect(item!.priceAmountCents).toBe(7_500);
     expect(item!.compareAtAmountCents).toBeNull();
     expect(item!.currency).toBe("GBP");
+  });
+});
+
+describe("D1 cart repository (unique conflicts + cascade)", () => {
+  /**
+   * A user with an active store and one sellable variant plus a fresh cart,
+   * so item inserts have a real cart and variant to reference.
+   */
+  async function seedCart(
+    db: DrizzleD1Database<DatabaseSchema>,
+    seed: number,
+  ): Promise<{ userId: string; cartId: string; variantId: string }> {
+    const users = createD1UserRepository(db);
+    const sellers = createD1SellerRepository(db);
+    const carts = createD1CartRepository(db);
+
+    const user = await users.create({
+      email: `cart-${seed}@example.test`,
+      name: `Cart User ${seed}`,
+      passwordHash: tokenHash(70 + seed),
+    });
+    const onboarding = await sellers.createOnboarding({
+      userId: user.id,
+      profileSlug: `cart-profile-${seed}`,
+      displayName: `Cart ${seed}`,
+      storeName: `Cart Store ${seed}`,
+      storeSlug: `cart-store-${seed}`,
+    });
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+    await sellers.activateSeller(user.id);
+
+    const product = await db
+      .insert(schema.products)
+      .values({ storeId: onboarding.store.id, name: `Cart Product ${seed}`, slug: `cart-product-${seed}`, status: "active" })
+      .returning()
+      .get();
+    const variant = await db
+      .insert(schema.productVariants)
+      .values({ productId: product.id, name: `Variant ${seed}`, sku: `cart-variant-${seed}`, priceAmountCents: 1_000, currency: "USD", status: "active" })
+      .returning()
+      .get();
+
+    const created = await carts.createCart(user.id);
+    if (!created.ok) {
+      throw new Error("expected a successful cart creation");
+    }
+    return { userId: user.id, cartId: created.cart.id, variantId: variant.id };
+  }
+
+  it("creates a cart lazily and resolves it with items in order", async () => {
+    const { db } = await setup();
+    const carts = createD1CartRepository(db);
+    const { userId, cartId, variantId } = await seedCart(db, 1);
+
+    const resolved = await carts.getCartByUserId(userId);
+    expect(resolved?.cart.id).toBe(cartId);
+    expect(resolved?.items).toEqual([]);
+
+    const catalog = createD1CatalogRepository(db);
+    expect(await catalog.findVariantById(variantId)).toMatchObject({ id: variantId, priceAmountCents: 1_000 });
+    expect(await catalog.findVariantById(createId())).toBeNull();
+
+    const added = await carts.addItem({ cartId, variantId, quantity: 2 });
+    expect(added.ok).toBe(true);
+    if (!added.ok) return;
+    expect(added.item.quantity).toBe(2);
+
+    const withItem = await carts.getCartByUserId(userId);
+    expect(withItem?.items.map((i) => i.variantId)).toEqual([variantId]);
+    expect(await carts.getCartByUserId(createId())).toBeNull();
+  });
+
+  it("maps real D1 UNIQUE conflicts for carts and cart items", async () => {
+    const { db } = await setup();
+    const carts = createD1CartRepository(db);
+    const { userId, cartId, variantId } = await seedCart(db, 2);
+
+    const duplicate = await carts.createCart(userId);
+    expect(duplicate).toEqual({ ok: false, reason: "CART_EXISTS" });
+
+    const first = await carts.addItem({ cartId, variantId, quantity: 1 });
+    expect(first.ok).toBe(true);
+
+    const duplicateItem = await carts.addItem({ cartId, variantId, quantity: 7 });
+    expect(duplicateItem).toEqual({ ok: false, reason: "CART_ITEM_EXISTS" });
+    expect((await carts.getCartByUserId(userId))?.items[0]?.quantity).toBe(1);
+  });
+
+  it("updates, removes and clears items scoped to the owning cart", async () => {
+    const { db } = await setup();
+    const users = createD1UserRepository(db);
+    const carts = createD1CartRepository(db);
+    const { cartId } = await seedCart(db, 3);
+
+    const interloper = await users.create({ email: "cart-interloper@example.test", name: "Interloper", passwordHash: tokenHash(79) });
+    const other = await carts.createCart(interloper.id);
+    if (!other.ok) {
+      throw new Error("expected a successful cart creation");
+    }
+
+    const item = await carts.addItem({ cartId, variantId: (await db.select().from(schema.productVariants).get())!.id, quantity: 1 });
+    if (!item.ok) {
+      throw new Error("expected a successful item insert");
+    }
+
+    // Scoped to the owning cart: the interloper's cart id is a miss.
+    expect(await carts.updateItemQuantity(other.cart.id, item.item.id, 9)).toBeNull();
+    expect(await carts.removeItem(other.cart.id, item.item.id)).toBe(false);
+
+    const updated = await carts.updateItemQuantity(cartId, item.item.id, 4);
+    expect(updated?.quantity).toBe(4);
+
+    expect(await carts.removeItem(cartId, item.item.id)).toBe(true);
+    await carts.addItem({ cartId, variantId: item.item.variantId, quantity: 3 });
+
+    expect(await carts.clearCart(cartId)).toBe(1);
+    expect((await carts.getCartByUserId(interloper.id))).not.toBeNull();
+  });
+
+  it("cascades a user delete through the cart and its items", async () => {
+    const { db } = await setup();
+    const users = createD1UserRepository(db);
+    const carts = createD1CartRepository(db);
+    // The seedCart owner holds a seller profile (RESTRICT on delete), so the
+    // cascade consumer is a separate plain customer.
+    const { variantId } = await seedCart(db, 4);
+
+    const customer = await users.create({
+      email: "cart-cascade@example.test",
+      name: "Cascade Customer",
+      passwordHash: tokenHash(80),
+    });
+    const created = await carts.createCart(customer.id);
+    if (!created.ok) {
+      throw new Error("expected a successful cart creation");
+    }
+    await carts.addItem({ cartId: created.cart.id, variantId, quantity: 1 });
+
+    await db.delete(schema.users).where(eq(schema.users.id, customer.id));
+
+    expect(await carts.getCartByUserId(customer.id)).toBeNull();
+    expect(await db.select().from(schema.cartItems).all()).toHaveLength(0);
   });
 });

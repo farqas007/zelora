@@ -1,6 +1,7 @@
 import { relations } from "drizzle-orm";
 import { addresses } from "./addresses";
 import { authSessions } from "./auth";
+import { cartItems, carts } from "./cart";
 import { categories, inventory, productImages, products, productVariants } from "./catalog";
 import { sellerProfiles, stores, users } from "./identities";
 import { orderAddresses, orderItems, orders } from "./orders";
@@ -14,6 +15,7 @@ export const usersRelations = relations(users, ({ many, one }) => ({
   addresses: many(addresses),
   orders: many(orders),
   sessions: many(authSessions),
+  carts: many(carts),
 }));
 
 export const authSessionsRelations = relations(authSessions, ({ one }) => ({
@@ -44,9 +46,20 @@ export const productsRelations = relations(products, ({ many, one }) => ({
   variants: many(productVariants),
 }));
 
-export const productVariantsRelations = relations(productVariants, ({ one }) => ({
+export const productVariantsRelations = relations(productVariants, ({ many, one }) => ({
   product: one(products, { fields: [productVariants.productId], references: [products.id] }),
   inventory: one(inventory, { fields: [productVariants.id], references: [inventory.variantId] }),
+  cartItems: many(cartItems),
+}));
+
+export const cartsRelations = relations(carts, ({ many, one }) => ({
+  user: one(users, { fields: [carts.userId], references: [users.id] }),
+  items: many(cartItems),
+}));
+
+export const cartItemsRelations = relations(cartItems, ({ one }) => ({
+  cart: one(carts, { fields: [cartItems.cartId], references: [carts.id] }),
+  variant: one(productVariants, { fields: [cartItems.variantId], references: [productVariants.id] }),
 }));
 
 export const inventoryRelations = relations(inventory, ({ one }) => ({

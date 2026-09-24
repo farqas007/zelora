@@ -200,6 +200,22 @@ export function createD1CatalogRepository(
         images: images.map((image) => ({ ...image, isPrimary: image.isPrimary === 1 })),
       };
     },
+
+    async findVariantById(id) {
+      const row = await db
+        .select({
+          id: productVariants.id,
+          name: productVariants.name,
+          sku: productVariants.sku,
+          priceAmountCents: productVariants.priceAmountCents,
+          compareAtAmountCents: productVariants.compareAtAmountCents,
+          currency: productVariants.currency,
+        })
+        .from(productVariants)
+        .where(eq(productVariants.id, id))
+        .get();
+      return row ?? null;
+    },
   };
 }
 

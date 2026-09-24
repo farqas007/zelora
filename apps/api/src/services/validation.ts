@@ -1,11 +1,14 @@
 import { ValidationError } from "@zelora/core";
 import {
   AUTH_LIMITS,
+  CART_ITEM_QUANTITY_LIMITS,
   EMAIL_PATTERN,
   SLUG_PATTERN,
+  type AddCartItemRequest,
   type LoginRequest,
   type RegisterRequest,
   type SellerOnboardingRequest,
+  type UpdateCartItemRequest,
 } from "@zelora/shared";
 
 /**
@@ -224,4 +227,79 @@ export function parseSellerOnboardingRequest(body: unknown): SellerOnboardingReq
     storeName: storeName as string,
     storeSlug: storeSlug as string,
   };
+}
+
+/**
+ * Upper bound on a variant id. UUIDv7 ids are 36 characters; this cap only
+ * protects the DB/API from absurd string payloads.
+ */
+const VARIANT_ID_MAX_LENGTH = 64;
+
+/** Collect an integer field within `[min, max]`; problems are added to `fields`. */
+function collectQuantity(
+  fields: FieldErrors,
+  record: Record<string, unknown>,
+  field: string,
+): number | null {
+  const raw = record[field];
+  if (raw === undefined || raw === null) {
+    addFieldError(fields, field, "Quantity is required.");
+    return null;
+  }
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw)) {
+    addFieldError(fields, field, "Quantity must be a whole number.");
+    return null;
+  }
+  if (raw < CART_ITEM_QUANTITY_LIMITS.min || raw > CART_ITEM_QUANTITY_LIMITS.max) {
+    addFieldError(fields, field, `Quantity must be between ${CART_ITEM_QUANTITY_LIMITS.min} and ${CART_ITEM_QUANTITY_LIMITS.max}.`);
+    return null;
+  }
+  return raw;
+}
+
+/**
+ * Parse and validate an add-cart-item request body. `variantId` is required
+ * and length-capped; `quantity` must be an integer within
+ * {@link CART_ITEM_QUANTITY_LIMITS}. Uses JSON-native numbers: a string
+ * `"3"` is rejected (the web client always sends a real number). Field
+ * problems are collected into a single {@link ValidationError}.
+ */
+export function parseAddCartItemRequest(body: unknown): AddCartItemRequest {
+  const record = asObjectBody(body);
+  const fields: FieldErrors = {};
+
+  const variantId = collectField(fields, record, "variantId", "Variant id", (value) => value, (value) => {
+    if (value.length === 0) {
+      return ["Variant id is required."];
+    }
+    if (value.length > VARIANT_ID_MAX_LENGTH) {
+      return [`Variant id must be at most ${VARIANT_ID_MAX_LENGTH} characters.`];
+    }
+    return [];
+  });
+  const quantity = collectQuantity(fields, record, "quantity");
+
+  if (Object.keys(fields).length > 0) {
+    throw new ValidationError("The request is invalid.", fields);
+  }
+
+  return { variantId: variantId as string, quantity: quantity as number };
+}
+
+/**
+ * Parse and validate an update-cart-item request body. Only `quantity` is
+ * accepted (an item's variant never changes; a mismatch means removing and
+ * re-adding). Same integer-domain rules as {@link parseAddCartItemRequest}.
+ */
+export function parseUpdateCartItemRequest(body: unknown): UpdateCartItemRequest {
+  const record = asObjectBody(body);
+  const fields: FieldErrors = {};
+
+  const quantity = collectQuantity(fields, record, "quantity");
+
+  if (Object.keys(fields).length > 0) {
+    throw new ValidationError("The request is invalid.", fields);
+  }
+
+  return { quantity: quantity as number };
 }

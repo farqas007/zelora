@@ -80,6 +80,18 @@
     "./audit/d1": {
       "types": "./src/audit/d1-repository.ts",
       "default": "./src/audit/d1-repository.ts"
+    },
+    "./cart": {
+      "types": "./src/cart/repository.ts",
+      "default": "./src/cart/repository.ts"
+    },
+    "./cart/local": {
+      "types": "./src/cart/local-repository.ts",
+      "default": "./src/cart/local-repository.ts"
+    },
+    "./cart/d1": {
+      "types": "./src/cart/d1-repository.ts",
+      "default": "./src/cart/d1-repository.ts"
     }
   },
   "scripts": {

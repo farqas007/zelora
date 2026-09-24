@@ -11,6 +11,7 @@ import type {
   StoreRecord,
 } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { CartRepository } from "@zelora/db/cart";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
@@ -326,6 +327,34 @@ describe("POST /api/seller/onboarding", () => {
     findProductBySlug: () => {
       throw new Error("unexpected catalog call");
     },
+    findVariantById: () => {
+      throw new Error("unexpected catalog call");
+    },
+  };
+
+  /**
+   * Cart routes are composed by `createApp` but never reached by seller route
+   * tests. Any accidental invocation would reveal a wiring bug loudly.
+   */
+  const inertCartRepository: CartRepository = {
+    getCartByUserId: () => {
+      throw new Error("unexpected cart call");
+    },
+    createCart: () => {
+      throw new Error("unexpected cart call");
+    },
+    addItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    updateItemQuantity: () => {
+      throw new Error("unexpected cart call");
+    },
+    removeItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    clearCart: () => {
+      throw new Error("unexpected cart call");
+    },
   };
 
   const inertAuditLogRepository: AuditLogRepository = {
@@ -356,6 +385,7 @@ describe("POST /api/seller/onboarding", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      cartRepository: inertCartRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -695,6 +725,7 @@ describe("POST /api/seller/onboarding", () => {
         sessionRepository,
         sellerRepository,
         catalogRepository: inertCatalogRepository,
+        cartRepository: inertCartRepository,
         auditLogRepository: inertAuditLogRepository,
         passwordHasher,
         clock,

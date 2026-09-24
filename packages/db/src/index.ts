@@ -50,3 +50,12 @@ export type {
   AuditLogRepository,
   CreateAuditLogInput,
 } from "./audit/repository";
+export type {
+  CartRecord,
+  CartItemRecord,
+  CartWithItemsRecord,
+  AddCartItemInput,
+  CreateCartResult,
+  AddCartItemResult,
+  CartRepository,
+} from "./cart/repository";

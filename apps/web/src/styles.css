@@ -1663,6 +1663,50 @@ a.category-chip {
   background: var(--accent-soft);
 }
 
+/* --- Store storefront --- */
+
+.storefront-main {
+  width: min(72rem, 100%);
+}
+
+.storefront-main .loading-state {
+  margin-top: 3rem;
+}
+
+.store-head {
+  margin: 0 0 1.75rem;
+  padding-bottom: 1.25rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.store-eyebrow {
+  margin: 0 0 0.35rem;
+  font-size: 0.8rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.store-head h1 {
+  margin: 0 0 0.5rem;
+}
+
+.store-description {
+  margin: 0 0 1rem;
+  max-width: 42rem;
+  color: var(--muted);
+  font-size: var(--text-md);
+}
+
+.storefront-empty {
+  margin-top: 1rem;
+}
+
+.storefront-empty .btn {
+  margin-top: 0.5rem;
+}
+
 /* --- Product cards --- */
 
 .product-card {

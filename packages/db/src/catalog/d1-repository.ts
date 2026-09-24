@@ -4,6 +4,7 @@ import type { DatabaseSchema } from "../client";
 import { categories, productImages, products, productVariants, stores } from "../schema";
 import type {
   CatalogCategoryRecord,
+  CatalogProductListPage,
   CatalogProductSummaryRecord,
   CatalogRepository,
 } from "./repository";
@@ -38,92 +39,7 @@ export function createD1CatalogRepository(
     },
 
     async listActiveProducts({ limit, cursor, categorySlug }) {
-      const start = cursor === null ? null : decodeCatalogCursor(cursor);
-      if (cursor !== null && start === null) {
-        return { items: [], nextCursor: null };
-      }
-
-      const rows = await db
-        .select({
-          id: products.id,
-          slug: products.slug,
-          name: products.name,
-          description: products.description,
-          createdAt: products.createdAt,
-          storeId: stores.id,
-          storeSlug: stores.slug,
-          storeName: stores.name,
-          categoryId: categories.id,
-          categorySlug: categories.slug,
-          categoryName: categories.name,
-          imageUrl: productImages.url,
-          imageAltText: productImages.altText,
-        })
-        .from(products)
-        .innerJoin(stores, eq(stores.id, products.storeId))
-        .leftJoin(categories, eq(categories.id, products.categoryId))
-        .leftJoin(
-          productImages,
-          and(
-            eq(productImages.productId, products.id),
-            eq(productImages.isPrimary, 1),
-          ),
-        )
-        .where(
-          and(
-            eq(products.status, "active"),
-            eq(stores.status, "active"),
-            or(isNull(products.categoryId), eq(categories.status, "active")),
-            categorySlug === undefined ? undefined : eq(categories.slug, categorySlug),
-            start === null
-              ? undefined
-              : or(
-                  lt(products.createdAt, start.createdAt),
-                  and(
-                    eq(products.createdAt, start.createdAt),
-                    lt(products.id, start.id),
-                  ),
-                ),
-          ),
-        )
-        .orderBy(desc(products.createdAt), desc(products.id))
-        .limit(limit + 1);
-
-      const pageRows = rows.slice(0, limit);
-      const hasMore = rows.length > limit;
-
-      if (pageRows.length === 0) {
-        return { items: [], nextCursor: null };
-      }
-
-      const prices = await aggregatedPricesByProduct(db, pageRows.map((row) => row.id));
-
-      const items: CatalogProductSummaryRecord[] = pageRows.map((row) => {
-        const price = prices.get(row.id);
-        return {
-          id: row.id,
-          slug: row.slug,
-          name: row.name,
-          description: row.description,
-          store: { id: row.storeId, slug: row.storeSlug, name: row.storeName },
-          category:
-            row.categoryId === null ? null : { id: row.categoryId, slug: row.categorySlug!, name: row.categoryName! },
-          priceAmountCents: price?.priceAmountCents ?? null,
-          compareAtAmountCents: price?.compareAtAmountCents ?? null,
-          currency: price?.currency ?? null,
-          image: row.imageUrl === null ? null : { url: row.imageUrl, altText: row.imageAltText },
-          createdAt: row.createdAt,
-        };
-      });
-
-      const last = pageRows[pageRows.length - 1];
-      return {
-        items,
-        nextCursor:
-          hasMore && last !== undefined
-            ? encodeCatalogCursor({ createdAt: last.createdAt, id: last.id })
-            : null,
-      };
+      return loadProductPage(db, { limit, cursor, categorySlug });
     },
 
     async findProductBySlug(slug) {
@@ -216,6 +132,136 @@ export function createD1CatalogRepository(
         .get();
       return row ?? null;
     },
+
+    async findActiveStoreBySlug(slug) {
+      const row = await db
+        .select({
+          id: stores.id,
+          slug: stores.slug,
+          name: stores.name,
+          description: stores.description,
+        })
+        .from(stores)
+        .where(and(eq(stores.slug, slug), eq(stores.status, "active")))
+        .get();
+      return row ?? null;
+    },
+
+    async listStoreProducts({ storeSlug, limit, cursor }) {
+      return loadProductPage(db, { limit, cursor, storeSlug });
+    },
+  };
+}
+
+/**
+ * Options that narrow the product index page. Both the marketplace index and
+ * the per-store storefront page share this query shape; `categorySlug` and
+ * `storeSlug` are optional filters applied on top of the base visibility.
+ */
+interface ProductPageQuery {
+  limit: number;
+  cursor: string | null;
+  categorySlug?: string;
+  storeSlug?: string;
+}
+
+/**
+ * Async twin of the local `loadProductPage`: keyset-paginated product index
+ * rows with the same visibility (active product + active store + active
+ * category when set + any explicit filter), ordering and in-memory price
+ * aggregation. The only differences from the local implementation are the
+ * awaited driver calls.
+ */
+async function loadProductPage(
+  db: DrizzleD1Database<DatabaseSchema>,
+  query: ProductPageQuery,
+): Promise<CatalogProductListPage> {
+  const start = query.cursor === null ? null : decodeCatalogCursor(query.cursor);
+  if (query.cursor !== null && start === null) {
+    return { items: [], nextCursor: null };
+  }
+
+  const rows = await db
+    .select({
+      id: products.id,
+      slug: products.slug,
+      name: products.name,
+      description: products.description,
+      createdAt: products.createdAt,
+      storeId: stores.id,
+      storeSlug: stores.slug,
+      storeName: stores.name,
+      categoryId: categories.id,
+      categorySlug: categories.slug,
+      categoryName: categories.name,
+      imageUrl: productImages.url,
+      imageAltText: productImages.altText,
+    })
+    .from(products)
+    .innerJoin(stores, eq(stores.id, products.storeId))
+    .leftJoin(categories, eq(categories.id, products.categoryId))
+    .leftJoin(
+      productImages,
+      and(
+        eq(productImages.productId, products.id),
+        eq(productImages.isPrimary, 1),
+      ),
+    )
+    .where(
+      and(
+        eq(products.status, "active"),
+        eq(stores.status, "active"),
+        or(isNull(products.categoryId), eq(categories.status, "active")),
+        query.categorySlug === undefined ? undefined : eq(categories.slug, query.categorySlug),
+        query.storeSlug === undefined ? undefined : eq(stores.slug, query.storeSlug),
+        start === null
+          ? undefined
+          : or(
+              lt(products.createdAt, start.createdAt),
+              and(
+                eq(products.createdAt, start.createdAt),
+                lt(products.id, start.id),
+              ),
+            ),
+      ),
+    )
+    .orderBy(desc(products.createdAt), desc(products.id))
+    .limit(query.limit + 1);
+
+  const pageRows = rows.slice(0, query.limit);
+  const hasMore = rows.length > query.limit;
+
+  if (pageRows.length === 0) {
+    return { items: [], nextCursor: null };
+  }
+
+  const prices = await aggregatedPricesByProduct(db, pageRows.map((row) => row.id));
+
+  const items: CatalogProductSummaryRecord[] = pageRows.map((row) => {
+    const price = prices.get(row.id);
+    return {
+      id: row.id,
+      slug: row.slug,
+      name: row.name,
+      description: row.description,
+      store: { id: row.storeId, slug: row.storeSlug, name: row.storeName },
+      category:
+        row.categoryId === null ? null : { id: row.categoryId, slug: row.categorySlug!, name: row.categoryName! },
+      priceAmountCents: price?.priceAmountCents ?? null,
+      compareAtAmountCents: price?.compareAtAmountCents ?? null,
+      currency: price?.currency ?? null,
+      image: row.imageUrl === null ? null : { url: row.imageUrl, altText: row.imageAltText },
+      createdAt: row.createdAt,
+    };
+  });
+
+  const last = pageRows[pageRows.length - 1];
+  return {
+    items,
+    nextCursor:
+      hasMore && last !== undefined
+        ? encodeCatalogCursor({ createdAt: last.createdAt, id: last.id })
+        : null,
   };
 }
 

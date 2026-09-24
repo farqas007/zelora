@@ -5,6 +5,7 @@ import type {
   CatalogProductListPage,
   CatalogProductSummaryRecord,
   CatalogRepository,
+  CatalogStorefrontRecord,
 } from "@zelora/db/catalog";
 import { CatalogService, CATALOG_PAGE_LIMITS } from "./catalog";
 
@@ -63,7 +64,18 @@ class FakeCatalogRepository implements CatalogRepository {
     cursor: string | null;
     categorySlug?: string;
   }> = [];
+  storeProductsCalls: Array<{
+    storeSlug: string;
+    limit: number;
+    cursor: string | null;
+  }> = [];
   private page: CatalogProductListPage = { items: [summary], nextCursor: null };
+  private storefrontStore: CatalogStorefrontRecord | null = {
+    id: "store-1",
+    slug: "shop",
+    name: "Shop",
+    description: "A cozy shop",
+  };
 
   async listActiveCategories() {
     return [{ id: "cat-1", slug: "campers", name: "Campers" }];
@@ -80,6 +92,15 @@ class FakeCatalogRepository implements CatalogRepository {
 
   async findVariantById(_id: string) {
     return null;
+  }
+
+  async findActiveStoreBySlug(slug: string) {
+    return slug === this.storefrontStore?.slug ? this.storefrontStore : null;
+  }
+
+  async listStoreProducts(opts: { storeSlug: string; limit: number; cursor: string | null }) {
+    this.storeProductsCalls.push(opts);
+    return this.page;
   }
 
   setPage(page: CatalogProductListPage): void {
@@ -185,5 +206,62 @@ describe("CatalogService", () => {
     const notFound = error as NotFoundError;
     expect(notFound.statusCode).toBe(404);
     expect(notFound.code).toBe("NOT_FOUND");
+  });
+
+  it("resolves a storefront with the public-safe store projection", async () => {
+    const result = await service.getStorefront("shop", undefined);
+
+    expect(Object.keys(result.store).sort()).toEqual(["description", "id", "name", "slug"]);
+    expect(result.store).toEqual({
+      id: "store-1",
+      slug: "shop",
+      name: "Shop",
+      description: "A cozy shop",
+    });
+    expect(result.products.items).toHaveLength(1);
+    expect(Object.keys(result.products.items[0]!).sort()).toEqual([
+      "category",
+      "compareAtAmountCents",
+      "currency",
+      "description",
+      "id",
+      "image",
+      "name",
+      "priceAmountCents",
+      "slug",
+      "store",
+    ]);
+  });
+
+  it("applies the default limit and an explicit cursor to the storefront page", async () => {
+    await service.getStorefront("shop", undefined);
+    await service.getStorefront("shop", { limit: "5", cursor: "1767312000000:x" });
+
+    expect(repository.storeProductsCalls).toEqual([
+      { storeSlug: "shop", limit: CATALOG_PAGE_LIMITS.default, cursor: null },
+      { storeSlug: "shop", limit: 5, cursor: "1767312000000:x" },
+    ]);
+  });
+
+  it("raises a 404 for an unknown or non-active store without listing products", async () => {
+    const error = await service.getStorefront("missing", undefined).catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(NotFoundError);
+    const notFound = error as NotFoundError;
+    expect(notFound.statusCode).toBe(404);
+    expect(notFound.code).toBe("NOT_FOUND");
+    expect(notFound.message).toBe("This store is not available.");
+    expect(repository.storeProductsCalls).toHaveLength(0);
+  });
+
+  it("rejects a malformed storefront limit with a 422 field error", async () => {
+    const error = await service
+      .getStorefront("shop", { limit: "0" })
+      .catch((thrown: unknown) => thrown);
+
+    expect(error).toBeInstanceOf(ValidationError);
+    expect((error as ValidationError).statusCode).toBe(422);
+    expect((error as ValidationError).fields?.limit).toBeDefined();
+    expect(repository.storeProductsCalls).toHaveLength(0);
   });
 });

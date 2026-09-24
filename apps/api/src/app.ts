@@ -16,6 +16,7 @@ import { createCartRoutes } from "./routes/cart";
 import { createCatalogRoutes } from "./routes/catalog";
 import { createHealthRoutes } from "./routes/health";
 import { createSellerRoutes } from "./routes/seller";
+import { createStorefrontRoutes } from "./routes/storefront";
 import { AdminService } from "./services/admin";
 import { AuthService } from "./services/auth";
 import { CartService } from "./services/cart";
@@ -98,6 +99,11 @@ export function createApp(dependencies: AppDependencies): Hono {
   app.route(
     "/api/catalog",
     createCatalogRoutes({ catalogService }),
+  );
+
+  app.route(
+    "/api",
+    createStorefrontRoutes({ catalogService }),
   );
 
   app.route(

@@ -38,6 +38,7 @@ export type {
 export type {
   CatalogCategoryRecord,
   CatalogStoreRecord,
+  CatalogStorefrontRecord,
   CatalogProductSummaryRecord,
   CatalogProductListPage,
   CatalogVariantRecord,

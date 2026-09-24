@@ -337,6 +337,98 @@ describe("catalog repository: product detail", () => {
   });
 });
 
+describe("catalog repository: store storefront", () => {
+  it("resolves an active store by slug with only the public projection", async () => {
+    const result = await repo.findActiveStoreBySlug("active-store");
+
+    expect(result).toEqual({
+      id: store.id,
+      slug: "active-store",
+      name: "Active Store",
+      description: null,
+    });
+    // sellerProfileId, status and ownership columns never escape.
+    expect(Object.keys(result!).sort()).toEqual(["description", "id", "name", "slug"]);
+  });
+
+  it("refuses the storefront for unknown or non-active stores", async () => {
+    for (const status of ["draft", "inactive", "closed"] as const) {
+      const offline = seedStore(db, { slug: `offline-${status}`, status, name: `Offline ${status}` });
+      expect(await repo.findActiveStoreBySlug(offline.slug)).toBeNull();
+    }
+    expect(await repo.findActiveStoreBySlug("missing")).toBeNull();
+  });
+
+  it("lists only that store's published products with price, category and store", async () => {
+    const product = addProduct({ slug: "mine", description: "Mine", categoryId: category.id });
+    addVariant(product.id, { priceAmountCents: 750, currency: "USD" });
+    addProduct({ slug: "draft-of-mine", status: "draft" });
+    addProduct({ slug: "archived-of-mine", status: "archived" });
+    const other = seedStore(db, { slug: "other-store", name: "Other Store", status: "active" });
+    addProduct({ storeId: other.id, slug: "theirs" });
+
+    const page = await repo.listStoreProducts({ storeSlug: "active-store", limit: 10, cursor: null });
+
+    expect(page.items.map((i) => i.slug)).toEqual(["mine"]);
+    expect(page.items[0]!.description).toBe("Mine");
+    expect(page.items[0]!.priceAmountCents).toBe(750);
+    expect(page.items[0]!.currency).toBe("USD");
+    expect(page.items[0]!.store).toEqual({ id: store.id, slug: "active-store", name: "Active Store" });
+    expect(page.items[0]!.category).toEqual({ id: category.id, slug: category.slug, name: category.name });
+  });
+
+  it("hides store products that sit in an inactive category", async () => {
+    const inactiveCategory = seedCategory(db, { slug: "offline-cat", status: "inactive" });
+    addProduct({ slug: "in-offline-category", categoryId: inactiveCategory.id });
+    // Uncategorised products of the store remain visible.
+    const bare = addProduct({ slug: "bare-of-mine" });
+    addVariant(bare.id, { priceAmountCents: 999, currency: "GBP" });
+
+    const page = await repo.listStoreProducts({ storeSlug: "active-store", limit: 10, cursor: null });
+
+    expect(page.items.map((i) => i.slug)).toEqual(["bare-of-mine"]);
+    expect(page.items[0]!.category).toBeNull();
+    expect(page.items[0]!.currency).toBe("GBP");
+  });
+
+  it("paginates a storefront newest-first with a keyset cursor", async () => {
+    const first = addProduct({ slug: "sf-first", createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    const second = addProduct({ slug: "sf-second", createdAt: new Date("2026-01-02T00:00:00.000Z") });
+    const third = addProduct({ slug: "sf-third", createdAt: new Date("2026-01-03T00:00:00.000Z") });
+    for (const id of [first.id, second.id, third.id]) {
+      addVariant(id, { priceAmountCents: 100, currency: "USD" });
+    }
+
+    const page = await repo.listStoreProducts({ storeSlug: "active-store", limit: 2, cursor: null });
+    expect(page.items.map((i) => i.slug)).toEqual(["sf-third", "sf-second"]);
+    expect(page.nextCursor).not.toBeNull();
+
+    const secondPage = await repo.listStoreProducts({
+      storeSlug: "active-store",
+      limit: 2,
+      cursor: page.nextCursor,
+    });
+    expect(secondPage.items.map((i) => i.slug)).toEqual(["sf-first"]);
+    expect(secondPage.nextCursor).toBeNull();
+  });
+
+  it("pins storefront cursor ordering with the id tiebreak for same-millisecond inserts", async () => {
+    const createdAt = new Date("2026-02-01T00:00:00.000Z");
+    addProduct({ slug: "sf-a", createdAt, id: "00000000-0000-7000-8000-0000000000aa" });
+    addProduct({ slug: "sf-b", createdAt, id: "00000000-0000-7000-8000-0000000000bb" });
+
+    const page = await repo.listStoreProducts({ storeSlug: "active-store", limit: 1, cursor: null });
+
+    expect(page.items.map((i) => i.slug)).toEqual(["sf-b"]);
+    expect(page.nextCursor).toBe(encodeCatalogCursor({ createdAt, id: "00000000-0000-7000-8000-0000000000bb" }));
+  });
+
+  it("returns an empty page for a malformed cursor", async () => {
+    const page = await repo.listStoreProducts({ storeSlug: "active-store", limit: 10, cursor: "not-a-cursor" });
+    expect(page).toEqual({ items: [], nextCursor: null });
+  });
+});
+
 function addVariant(productId: string, overrides: Partial<typeof schema.productVariants.$inferInsert> = {}) {
   seq += 1;
   return db

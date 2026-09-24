@@ -65,6 +65,8 @@ const catalogRepository: CatalogRepository = {
   listActiveProducts: unimplemented,
   findProductBySlug: unimplemented,
   findVariantById: unimplemented,
+  findActiveStoreBySlug: unimplemented,
+  listStoreProducts: unimplemented,
 };
 
 const cartRepository: CartRepository = {

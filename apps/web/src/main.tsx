@@ -12,6 +12,7 @@ import { LoginPage } from "./pages/Login";
 import { ProductDetailPage } from "./pages/ProductDetail";
 import { RegisterPage } from "./pages/Register";
 import { SellerOnboardingPage } from "./pages/SellerOnboarding";
+import { StorefrontPage } from "./pages/Storefront";
 import "./styles.css";
 
 const rootElement = document.getElementById("root");
@@ -61,6 +62,7 @@ createRoot(rootElement).render(
             <Route path="/cart" element={<CartPage />} />
             <Route path="/catalog" element={<CatalogPage />} />
             <Route path="/catalog/products/:slug" element={<ProductDetailPage />} />
+            <Route path="/store/:slug" element={<StorefrontPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </CartProvider>

@@ -189,6 +189,8 @@ const inertCatalogRepository: CatalogRepository = {
   listActiveProducts: unimplementedSeller,
   findProductBySlug: unimplementedSeller,
   findVariantById: unimplementedSeller,
+  findActiveStoreBySlug: unimplementedSeller,
+  listStoreProducts: unimplementedSeller,
 };
 
 const inertCartRepository: CartRepository = {

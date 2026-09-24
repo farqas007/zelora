@@ -342,6 +342,12 @@ const inertCatalogRepository: CatalogRepository = {
   findVariantById: () => {
     throw new Error("unexpected catalog call");
   },
+  findActiveStoreBySlug: () => {
+    throw new Error("unexpected catalog call");
+  },
+  listStoreProducts: () => {
+    throw new Error("unexpected catalog call");
+  },
 };
 
 /**

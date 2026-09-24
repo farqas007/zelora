@@ -18,6 +18,8 @@ import type {
   RegisterRequest,
   SellerOnboardingEnvelope,
   SellerOnboardingRequest,
+  StorefrontEnvelope,
+  StorefrontRequest,
   UpdateCartItemRequest,
 } from "@zelora/shared";
 
@@ -68,6 +70,7 @@ export interface ZeloraApi {
   listCatalogCategories(): Promise<ApiEnvelope<CatalogCategoryDto[]>>;
   listCatalogProducts(input: CatalogListProductsRequest): Promise<ApiEnvelope<CatalogProductListData>>;
   getCatalogProductBySlug(slug: string): Promise<ApiEnvelope<CatalogProductDetailDto>>;
+  getStorefront(slug: string, input: StorefrontRequest): Promise<StorefrontEnvelope>;
   getCart(): Promise<CartEnvelope>;
   addCartItem(input: AddCartItemRequest): Promise<CartEnvelope>;
   updateCartItemQuantity(itemId: string, input: UpdateCartItemRequest): Promise<CartEnvelope>;
@@ -203,6 +206,20 @@ export function createApiClient(
         `/api/catalog/products/${encodeURIComponent(slug)}`,
         { method: "GET" },
       ),
+    getStorefront: (slug, input) => {
+      const params = new URLSearchParams();
+      if (input.limit !== undefined) {
+        params.set("limit", String(input.limit));
+      }
+      if (input.cursor !== undefined && input.cursor !== "") {
+        params.set("cursor", input.cursor);
+      }
+      const query = params.toString();
+      return request<StorefrontEnvelope>(
+        `/api/stores/${encodeURIComponent(slug)}${query === "" ? "" : `?${query}`}`,
+        { method: "GET" },
+      );
+    },
     getCart: () => request<CartEnvelope>("/api/cart", { method: "GET" }),
     addCartItem: (input) =>
       request<CartEnvelope>("/api/cart/items", { method: "POST", body: input, csrf: true }),

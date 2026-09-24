@@ -50,6 +50,17 @@ export interface CatalogProductListPage {
   nextCursor: string | null;
 }
 
+/**
+ * Public storefront projection of a single active store. Deliberately minimal:
+ * only identity + description, never seller-profile or ownership columns.
+ */
+export interface CatalogStorefrontRecord {
+  id: string;
+  slug: string;
+  name: string;
+  description: string | null;
+}
+
 /** Active variant projection for the product detail page. */
 export interface CatalogVariantRecord {
   id: string;
@@ -107,4 +118,24 @@ export interface CatalogRepository {
    * public display. Returns `null` when the variant does not exist.
    */
   findVariantById(id: string): Promise<CatalogVariantRecord | null>;
+
+  /**
+   * Resolve one active store by slug for its public storefront. Returns
+   * `null` when the slug is unknown or the store is not currently `active`
+   * (draft/inactive/closed stores have no public page).
+   */
+  findActiveStoreBySlug(slug: string): Promise<CatalogStorefrontRecord | null>;
+
+  /**
+   * Keyset-paginated index of one store's published products. Mirrors
+   * {@link listActiveProducts} — product/store/category `active` visibility,
+   * the same `(createdAt, id)` descending order and cursor semantics — but
+   * scoped to `storeSlug`, so a storefront only ever surfaces that store's own
+   * live listings.
+   */
+  listStoreProducts(opts: {
+    storeSlug: string;
+    limit: number;
+    cursor: string | null;
+  }): Promise<CatalogProductListPage>;
 }

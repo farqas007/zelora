@@ -8,4 +8,5 @@ export {
 export * from "./auth";
 export * from "./catalog";
 export * from "./cart";
+export * from "./storefront";
 export * from "./admin";

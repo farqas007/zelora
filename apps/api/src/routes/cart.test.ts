@@ -256,6 +256,14 @@ class FakeCatalogRepository implements CatalogRepository {
   async findVariantById(id: string): Promise<CatalogVariantRecord | null> {
     return this.variants.get(id) ?? null;
   }
+
+  async findActiveStoreBySlug() {
+    return null;
+  }
+
+  async listStoreProducts() {
+    return { items: [], nextCursor: null };
+  }
 }
 
 const inert = (): never => {

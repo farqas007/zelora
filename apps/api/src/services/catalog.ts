@@ -3,6 +3,7 @@ import type {
   CatalogCategoryDto,
   CatalogProductDetailDto,
   CatalogProductSummaryDto,
+  StorefrontDto,
 } from "@zelora/shared";
 import type {
   CatalogProductSummaryRecord,
@@ -99,6 +100,39 @@ export class CatalogService {
       throw new NotFoundError("This product is not available.");
     }
     return detail;
+  }
+
+  /**
+   * Public storefront for one active store: the store's identity plus one
+   * keyset page of its published products. Unknown or non-active stores raise
+   * a 404 {@link NotFoundError} so clients can never learn whether a draft,
+   * inactive or closed store exists. The store projection is minimal by
+   * construction — the repository never hands back seller-profile or
+   * ownership columns for this read.
+   */
+  async getStorefront(
+    slug: string,
+    params: ListProductsParams | undefined,
+  ): Promise<StorefrontDto> {
+    const store = await this.catalogRepository.findActiveStoreBySlug(slug);
+    if (store === null) {
+      throw new NotFoundError("This store is not available.");
+    }
+    const { limit } = parseListParams(params);
+    const page = await this.catalogRepository.listStoreProducts({
+      storeSlug: store.slug,
+      limit,
+      cursor: params?.cursor ?? null,
+    });
+    return {
+      store: {
+        id: store.id,
+        slug: store.slug,
+        name: store.name,
+        description: store.description,
+      },
+      products: { items: page.items.map(mapSummaryToDto), nextCursor: page.nextCursor },
+    };
   }
 }
 

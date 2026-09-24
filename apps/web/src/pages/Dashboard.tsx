@@ -62,9 +62,11 @@ export function DashboardPage() {
                 <Link to="/seller/products/new">Create a product</Link>
               </li>
             )}
-            <li>
-              <Link to="/seller/onboarding">Seller onboarding</Link>
-            </li>
+            {user.role === "customer" && (
+              <li>
+                <Link to="/seller/onboarding">Seller onboarding</Link>
+              </li>
+            )}
             <li>
               <Link to="/">Back to home</Link>
             </li>

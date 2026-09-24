@@ -1,4 +1,4 @@
-import { AUTH_LIMITS, EMAIL_PATTERN } from "@zelora/shared";
+import { AUTH_LIMITS, EMAIL_PATTERN, SLUG_PATTERN } from "@zelora/shared";
 
 /**
  * Client-side auth validation mirroring the API's shared rules.
@@ -94,6 +94,95 @@ export function validateRegister(
   }
   if (confirmPassword !== password) {
     fields.confirmPassword = ["Passwords do not match."];
+  }
+  return fields;
+}
+
+/**
+ * Validate a slug against {@link AUTH_LIMITS} and {@link SLUG_PATTERN}, the
+ * same rule the API applies (trimmed and lowercased like the server's
+ * `normalizeSlug`). Used for both the seller profile slug and the store slug.
+ */
+export function validateSlugValue(slug: string): string[] {
+  const value = slug.trim().toLowerCase();
+  if (value.length === 0) {
+    return ["Slug is required."];
+  }
+  if (
+    value.length < AUTH_LIMITS.slugMinLength ||
+    value.length > AUTH_LIMITS.slugMaxLength
+  ) {
+    return [
+      `Slug must be between ${AUTH_LIMITS.slugMinLength} and ${AUTH_LIMITS.slugMaxLength} characters.`,
+    ];
+  }
+  if (!SLUG_PATTERN.test(value)) {
+    return ["Slug must use lowercase letters, numbers and single hyphens."];
+  }
+  return [];
+}
+
+/** Validate a seller's public display name against {@link AUTH_LIMITS}. */
+export function validateDisplayNameValue(displayName: string): string[] {
+  const value = displayName.trim();
+  if (value.length === 0) {
+    return ["Display name is required."];
+  }
+  if (
+    value.length < AUTH_LIMITS.displayNameMinLength ||
+    value.length > AUTH_LIMITS.displayNameMaxLength
+  ) {
+    return [
+      `Display name must be between ${AUTH_LIMITS.displayNameMinLength} and ${AUTH_LIMITS.displayNameMaxLength} characters.`,
+    ];
+  }
+  return [];
+}
+
+/** Validate a store name against {@link AUTH_LIMITS}. */
+export function validateStoreNameValue(storeName: string): string[] {
+  const value = storeName.trim();
+  if (value.length === 0) {
+    return ["Store name is required."];
+  }
+  if (
+    value.length < AUTH_LIMITS.storeNameMinLength ||
+    value.length > AUTH_LIMITS.storeNameMaxLength
+  ) {
+    return [
+      `Store name must be between ${AUTH_LIMITS.storeNameMinLength} and ${AUTH_LIMITS.storeNameMaxLength} characters.`,
+    ];
+  }
+  return [];
+}
+
+/**
+ * Validate the four seller-onboarding fields the API expects. Slugs are
+ * normalized (trim + lowercase) exactly like the server, so the checked value
+ * matches what is submitted.
+ */
+export function validateSellerOnboarding(
+  slug: string,
+  displayName: string,
+  storeName: string,
+  storeSlug: string,
+): FieldErrors {
+  const fields: FieldErrors = {};
+  const slugErrors = validateSlugValue(slug);
+  if (slugErrors.length > 0) {
+    fields.slug = slugErrors;
+  }
+  const displayNameErrors = validateDisplayNameValue(displayName);
+  if (displayNameErrors.length > 0) {
+    fields.displayName = displayNameErrors;
+  }
+  const storeNameErrors = validateStoreNameValue(storeName);
+  if (storeNameErrors.length > 0) {
+    fields.storeName = storeNameErrors;
+  }
+  const storeSlugErrors = validateSlugValue(storeSlug);
+  if (storeSlugErrors.length > 0) {
+    fields.storeSlug = storeSlugErrors;
   }
   return fields;
 }

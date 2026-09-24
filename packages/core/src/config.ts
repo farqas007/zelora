@@ -25,6 +25,8 @@ export interface AppConfig {
   rateLimitRegisterIpWindowSeconds: number;
   rateLimitSellerOnboardingIpMax: number;
   rateLimitSellerOnboardingIpWindowSeconds: number;
+  rateLimitProductCreateIpMax: number;
+  rateLimitProductCreateIpWindowSeconds: number;
   /**
    * Secret gating the initial-admin bootstrap endpoint, or `null` when the
    * endpoint is disabled. When set, it must be at least
@@ -55,6 +57,8 @@ const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
   rateLimitRegisterIpWindowSeconds: 3_600,
   rateLimitSellerOnboardingIpMax: 10,
   rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+  rateLimitProductCreateIpMax: 30,
+  rateLimitProductCreateIpWindowSeconds: 3_600,
   /** Admin bootstrap is opt-in: disabled unless a secret is provided. */
   adminBootstrapSecret: null,
 };
@@ -259,6 +263,16 @@ export function loadConfig(
       env.RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS,
       DEFAULT_CONFIG.rateLimitSellerOnboardingIpWindowSeconds,
       "RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS",
+    ),
+    rateLimitProductCreateIpMax: parsePositiveInteger(
+      env.RATE_LIMIT_PRODUCT_CREATE_IP_MAX,
+      DEFAULT_CONFIG.rateLimitProductCreateIpMax,
+      "RATE_LIMIT_PRODUCT_CREATE_IP_MAX",
+    ),
+    rateLimitProductCreateIpWindowSeconds: parsePositiveInteger(
+      env.RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS,
+      DEFAULT_CONFIG.rateLimitProductCreateIpWindowSeconds,
+      "RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS",
     ),
     adminBootstrapSecret: parseAdminBootstrapSecret(env.ADMIN_BOOTSTRAP_SECRET),
   };

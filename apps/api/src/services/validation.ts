@@ -1,10 +1,14 @@
 import { ValidationError } from "@zelora/core";
+import { isValidId } from "@zelora/db/ids";
 import {
   AUTH_LIMITS,
   CART_ITEM_QUANTITY_LIMITS,
   EMAIL_PATTERN,
+  PRODUCT_LIMITS,
+  PRODUCT_SLUG_PATTERN,
   SLUG_PATTERN,
   type AddCartItemRequest,
+  type CreateProductRequest,
   type LoginRequest,
   type RegisterRequest,
   type SellerOnboardingRequest,
@@ -116,6 +120,32 @@ export function validateStoreName(storeName: string): string[] {
     return [
       `Store name must be between ${AUTH_LIMITS.storeNameMinLength} and ${AUTH_LIMITS.storeNameMaxLength} characters.`,
     ];
+  }
+  return [];
+}
+
+/** Validate a (previously trimmed) product name against {@link PRODUCT_LIMITS}. */
+export function validateProductName(name: string): string[] {
+  if (name.length < PRODUCT_LIMITS.nameMinLength || name.length > PRODUCT_LIMITS.nameMaxLength) {
+    return [
+      `Product name must be between ${PRODUCT_LIMITS.nameMinLength} and ${PRODUCT_LIMITS.nameMaxLength} characters.`,
+    ];
+  }
+  return [];
+}
+
+/**
+ * Validate a (previously normalized) product slug against
+ * {@link PRODUCT_LIMITS} and {@link PRODUCT_SLUG_PATTERN}.
+ */
+export function validateProductSlug(slug: string): string[] {
+  if (slug.length < PRODUCT_LIMITS.slugMinLength || slug.length > PRODUCT_LIMITS.slugMaxLength) {
+    return [
+      `Product slug must be between ${PRODUCT_LIMITS.slugMinLength} and ${PRODUCT_LIMITS.slugMaxLength} characters.`,
+    ];
+  }
+  if (!PRODUCT_SLUG_PATTERN.test(slug)) {
+    return ["Product slug is invalid."];
   }
   return [];
 }
@@ -302,4 +332,75 @@ export function parseUpdateCartItemRequest(body: unknown): UpdateCartItemRequest
   }
 
   return { quantity: quantity as number };
+}
+
+/**
+ * Collect an optional string field. Missing (`undefined`/`null`) is allowed;
+ * anything present must be a string that passes `validate`. Problems are added
+ * to `fields` and `undefined` is returned for that field.
+ */
+function collectOptionalString(
+  fields: FieldErrors,
+  record: Record<string, unknown>,
+  field: string,
+  validate: (value: string) => string[],
+): string | undefined {
+  const raw = record[field];
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (typeof raw !== "string") {
+    addFieldError(fields, field, `${field} must be a string.`);
+    return undefined;
+  }
+  for (const message of validate(raw)) {
+    addFieldError(fields, field, message);
+  }
+  return raw;
+}
+
+/**
+ * Parse and validate a seller product-creation request body. `name` and
+ * `slug` are required; both are normalized (trim; slug also lowercased) and
+ * checked against {@link PRODUCT_LIMITS} and {@link PRODUCT_SLUG_PATTERN}.
+ * `description` is optional and length-capped; `categoryId` is optional and
+ * must be a canonical UUIDv7 when present. Ownership fields (`storeId`,
+ * `sellerProfileId`, `userId`, `status`) are ignored: the API resolves the
+ * store from the authenticated session. Field problems are collected into a
+ * single {@link ValidationError}.
+ */
+export function parseCreateProductRequest(body: unknown): CreateProductRequest {
+  const record = asObjectBody(body);
+  const fields: FieldErrors = {};
+
+  const name = collectField(fields, record, "name", "Product name", normalizeName, validateProductName);
+  const slug = collectField(fields, record, "slug", "Product slug", normalizeSlug, validateProductSlug);
+  const description = collectOptionalString(fields, record, "description", (value) => {
+    if (value.length > PRODUCT_LIMITS.descriptionMaxLength) {
+      return [`Description must be at most ${PRODUCT_LIMITS.descriptionMaxLength} characters.`];
+    }
+    return [];
+  });
+  const categoryId = collectOptionalString(fields, record, "categoryId", (value) => {
+    if (!isValidId(value)) {
+      return ["categoryId must be a valid product category id."];
+    }
+    return [];
+  });
+
+  if (Object.keys(fields).length > 0) {
+    throw new ValidationError("The request is invalid.", fields);
+  }
+
+  const result: CreateProductRequest = {
+    name: name as string,
+    slug: slug as string,
+  };
+  if (description !== undefined) {
+    result.description = description;
+  }
+  if (categoryId !== undefined) {
+    result.categoryId = categoryId;
+  }
+  return result;
 }

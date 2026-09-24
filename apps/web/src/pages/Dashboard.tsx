@@ -57,6 +57,11 @@ export function DashboardPage() {
           )}
 
           <ul className="dashboard-actions">
+            {user.role === "seller" && (
+              <li>
+                <Link to="/seller/products/new">Create a product</Link>
+              </li>
+            )}
             <li>
               <Link to="/seller/onboarding">Seller onboarding</Link>
             </li>

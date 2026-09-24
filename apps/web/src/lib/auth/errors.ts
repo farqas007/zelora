@@ -1,4 +1,4 @@
-import { AUTH_ERROR_CODES } from "@zelora/shared";
+import { AUTH_ERROR_CODES, SELLER_PRODUCT_ERROR_CODES } from "@zelora/shared";
 import { ApiClientError, ApiFailureError } from "../api/client";
 
 /**
@@ -26,6 +26,11 @@ export function describeAuthCode(code: string, fallback: string): string {
     case AUTH_ERROR_CODES.ACCOUNT_SUSPENDED:
     case AUTH_ERROR_CODES.ACCOUNT_DELETED:
       return fallback;
+    case SELLER_PRODUCT_ERROR_CODES.SELLER_NOT_APPROVED:
+    case SELLER_PRODUCT_ERROR_CODES.PRODUCT_SLUG_IN_USE:
+      return fallback;
+    case SELLER_PRODUCT_ERROR_CODES.CATEGORY_NOT_FOUND:
+      return "The selected category is no longer available.";
     case AUTH_ERROR_CODES.RATE_LIMITED:
       return "Too many attempts. Please wait a moment and try again.";
     case AUTH_ERROR_CODES.CSRF_FAILED:

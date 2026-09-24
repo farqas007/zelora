@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "@zelora/core";
 import { loadConfig } from "@zelora/core";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { ProductRepository } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
 import type { AuditLogRepository } from "@zelora/db/audit";
 import type { ApiFailure } from "@zelora/shared";
@@ -115,11 +116,16 @@ describe("catalog routes", () => {
         findByUserId: inert,
         findByProfileSlug: inert,
         findStoreBySlug: inert,
+        findStoreBySellerProfileId: inert,
         createOnboarding: inert,
         activateSeller: inert,
         listPendingProfiles: inert,
         rejectSeller: inert,
       },
+      productRepository: {
+        findByStoreAndSlug: inert,
+        createProduct: inert,
+      } satisfies ProductRepository,
       auditLogRepository: {
         create: inert,
         listByAction: inert,

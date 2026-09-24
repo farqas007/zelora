@@ -9,6 +9,8 @@ import type {
   CatalogListProductsRequest,
   CatalogProductDetailDto,
   CatalogProductListData,
+  CreateProductEnvelope,
+  CreateProductRequest,
   HealthResponse,
   LoginEnvelope,
   LoginRequest,
@@ -67,6 +69,7 @@ export interface ZeloraApi {
   logout(): Promise<LogoutEnvelope>;
   logoutAll(): Promise<LogoutAllEnvelope>;
   onboardSeller(input: SellerOnboardingRequest): Promise<SellerOnboardingEnvelope>;
+  createProduct(input: CreateProductRequest): Promise<CreateProductEnvelope>;
   listCatalogCategories(): Promise<ApiEnvelope<CatalogCategoryDto[]>>;
   listCatalogProducts(input: CatalogListProductsRequest): Promise<ApiEnvelope<CatalogProductListData>>;
   getCatalogProductBySlug(slug: string): Promise<ApiEnvelope<CatalogProductDetailDto>>;
@@ -178,6 +181,12 @@ export function createApiClient(
       request<LogoutAllEnvelope>("/api/auth/logout-all", { method: "POST", csrf: true }),
     onboardSeller: (input: SellerOnboardingRequest) =>
       request<SellerOnboardingEnvelope>("/api/seller/onboarding", {
+        method: "POST",
+        body: input,
+        csrf: true,
+      }),
+    createProduct: (input: CreateProductRequest) =>
+      request<CreateProductEnvelope>("/api/seller/products", {
         method: "POST",
         body: input,
         csrf: true,

@@ -6,6 +6,7 @@ import type { AuditLogRepository } from "@zelora/db/audit";
 import type { UserRepository } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { ProductRepository } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
 import { createLogger, type AppConfig, type PasswordHasher } from "@zelora/core";
 import { createErrorHandler, notFoundHandler } from "./middleware/error";
@@ -42,6 +43,7 @@ export interface AppDependencies {
   sessionRepository: AuthSessionRepository;
   sellerRepository: SellerRepository;
   catalogRepository: CatalogRepository;
+  productRepository: ProductRepository;
   cartRepository: CartRepository;
   auditLogRepository: AuditLogRepository;
   passwordHasher: PasswordHasher;
@@ -51,7 +53,7 @@ export interface AppDependencies {
 }
 
 export function createApp(dependencies: AppDependencies): Hono {
-  const { config, userRepository, sessionRepository, sellerRepository, catalogRepository, cartRepository, auditLogRepository, passwordHasher, clock } = dependencies;
+  const { config, userRepository, sessionRepository, sellerRepository, catalogRepository, productRepository, cartRepository, auditLogRepository, passwordHasher, clock } = dependencies;
   const rateLimiter = dependencies.rateLimiter ?? new MemoryWindowRateLimiter(clock);
   const clientIpResolver: ClientIpResolver = dependencies.clientIpResolver ?? {
     resolve: () => undefined,
@@ -84,7 +86,11 @@ export function createApp(dependencies: AppDependencies): Hono {
     rateLimiter,
   });
 
-  const sellerService = new SellerService({ sellerRepository });
+  const sellerService = new SellerService({
+    sellerRepository,
+    productRepository,
+    catalogRepository,
+  });
   const catalogService = new CatalogService({ catalogRepository });
   const cartService = new CartService({ cartRepository, catalogRepository });
   const adminService = new AdminService({

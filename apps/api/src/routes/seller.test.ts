@@ -11,6 +11,7 @@ import type {
   StoreRecord,
 } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { ProductRepository, ProductRecord, CreateProductInput } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
@@ -187,6 +188,10 @@ class FakeSellerRepository implements SellerRepository {
     return Array.from(this.stores.values()).find((store) => store.slug === slug) ?? null;
   }
 
+  async findStoreBySellerProfileId(sellerProfileId: string): Promise<StoreRecord | null> {
+    return Array.from(this.stores.values()).find((store) => store.sellerProfileId === sellerProfileId) ?? null;
+  }
+
   async createOnboarding(input: CreateOnboardingInput): Promise<
     | { ok: true; sellerProfile: SellerProfileRecord; store: StoreRecord }
     | { ok: false; reason: OnboardingConflictReason }
@@ -283,6 +288,90 @@ class FakeSellerRepository implements SellerRepository {
   }
 }
 
+/** Working product-repository fake: slug uniqueness enforced per store. */
+class FakeProductRepository implements ProductRepository {
+  private products: Map<string, ProductRecord> = new Map();
+  private nextId = 1;
+
+  createCalls: CreateProductInput[] = [];
+  forceCreateConflict: boolean = false;
+
+  async findByStoreAndSlug(storeId: string, slug: string): Promise<ProductRecord | null> {
+    return (
+      Array.from(this.products.values()).find(
+        (product) => product.storeId === storeId && product.slug === slug,
+      ) ?? null
+    );
+  }
+
+  async createProduct(input: CreateProductInput): Promise<
+    { ok: true; product: ProductRecord } | { ok: false; reason: "PRODUCT_SLUG_IN_USE" }
+  > {
+    this.createCalls.push(input);
+    if (this.forceCreateConflict) {
+      return { ok: false, reason: "PRODUCT_SLUG_IN_USE" };
+    }
+    const existing = await this.findByStoreAndSlug(input.storeId, input.slug);
+    if (existing !== null) {
+      return { ok: false, reason: "PRODUCT_SLUG_IN_USE" };
+    }
+    const now = new Date();
+    const product: ProductRecord = {
+      id: `product-${this.nextId++}`,
+      storeId: input.storeId,
+      slug: input.slug,
+      name: input.name,
+      description: input.description,
+      categoryId: input.categoryId,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.products.set(product.id, product);
+    return { ok: true, product };
+  }
+
+  clear(): void {
+    this.products.clear();
+    this.nextId = 1;
+    this.createCalls = [];
+    this.forceCreateConflict = false;
+  }
+}
+
+/** Working catalog fake: only the active-category list is used by products. */
+class FakeCatalogRepository implements CatalogRepository {
+  categories: Array<{ id: string; slug: string; name: string }> = [];
+
+  async listActiveCategories() {
+    return this.categories;
+  }
+
+  async listActiveProducts() {
+    return { items: [], nextCursor: null };
+  }
+
+  async findProductBySlug() {
+    return null;
+  }
+
+  async findVariantById() {
+    return null;
+  }
+
+  async findActiveStoreBySlug() {
+    return null;
+  }
+
+  async listStoreProducts() {
+    return { items: [], nextCursor: null };
+  }
+
+  clear(): void {
+    this.categories = [];
+  }
+}
+
 describe("POST /api/seller/onboarding", () => {
   const baseConfig: AppConfig = {
     nodeEnv: "test",
@@ -304,6 +393,8 @@ describe("POST /api/seller/onboarding", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    rateLimitProductCreateIpMax: 30,
+    rateLimitProductCreateIpWindowSeconds: 3_600,
         sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -363,6 +454,15 @@ describe("POST /api/seller/onboarding", () => {
     },
   };
 
+  const inertProductRepository: ProductRepository = {
+    findByStoreAndSlug: () => {
+      throw new Error("unexpected product call");
+    },
+    createProduct: () => {
+      throw new Error("unexpected product call");
+    },
+  };
+
   const inertAuditLogRepository: AuditLogRepository = {
     create: () => {
       throw new Error("unexpected audit log call");
@@ -391,6 +491,7 @@ describe("POST /api/seller/onboarding", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
@@ -731,6 +832,7 @@ describe("POST /api/seller/onboarding", () => {
         sessionRepository,
         sellerRepository,
         catalogRepository: inertCatalogRepository,
+        productRepository: inertProductRepository,
         cartRepository: inertCartRepository,
         auditLogRepository: inertAuditLogRepository,
         passwordHasher,
@@ -803,5 +905,545 @@ describe("POST /api/seller/onboarding", () => {
         expect(response.status).toBe(201);
       }
     });
+  });
+});
+
+describe("POST /api/seller/products", () => {
+  const baseConfig: AppConfig = {
+    nodeEnv: "test",
+    host: "127.0.0.1",
+    port: 3001,
+    appVersion: "0.1.0",
+    corsOrigin: "http://localhost:5173",
+    sessionCookieName: "zelora_session",
+    sessionTtlSeconds: 2_592_000,
+    sessionCookieSecure: false,
+    pbkdf2Iterations: 1_000,
+    rateLimitEnabled: true,
+    rateLimitTrustProxy: false,
+    rateLimitLoginIpMax: 20,
+    rateLimitLoginIpWindowSeconds: 900,
+    rateLimitLoginEmailMax: 10,
+    rateLimitLoginEmailWindowSeconds: 900,
+    rateLimitRegisterIpMax: 10,
+    rateLimitRegisterIpWindowSeconds: 3_600,
+    rateLimitSellerOnboardingIpMax: 10,
+    rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    rateLimitProductCreateIpMax: 2,
+    rateLimitProductCreateIpWindowSeconds: 3_600,
+    sessionLastUsedThrottleSeconds: 300,
+    sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
+  };
+
+  const headerIpResolver: ClientIpResolver = {
+    resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+  };
+
+  const inertAuditLogRepository: AuditLogRepository = {
+    create: () => {
+      throw new Error("unexpected audit log call");
+    },
+    listByAction: () => {
+      throw new Error("unexpected audit log call");
+    },
+  };
+
+  const inertCartRepository: CartRepository = {
+    getCartByUserId: () => {
+      throw new Error("unexpected cart call");
+    },
+    createCart: () => {
+      throw new Error("unexpected cart call");
+    },
+    addItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    updateItemQuantity: () => {
+      throw new Error("unexpected cart call");
+    },
+    removeItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    clearCart: () => {
+      throw new Error("unexpected cart call");
+    },
+  };
+
+  let clock: FakeClock;
+  let userRepository: FakeUserRepository;
+  let sessionRepository: FakeAuthSessionRepository;
+  let sellerRepository: FakeSellerRepository;
+  let productRepository: FakeProductRepository;
+  let catalogRepository: FakeCatalogRepository;
+  let passwordHasher: PasswordHasher;
+  let app: ReturnType<typeof createApp>;
+
+  beforeEach(() => {
+    clock = new FakeClock();
+    userRepository = new FakeUserRepository();
+    sessionRepository = new FakeAuthSessionRepository();
+    sellerRepository = new FakeSellerRepository();
+    productRepository = new FakeProductRepository();
+    catalogRepository = new FakeCatalogRepository();
+    catalogRepository.categories = [{ id: "01955f00-0000-7000-8000-000000000001", slug: "electronics", name: "Electronics" }];
+    passwordHasher = new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations);
+    app = createApp({
+      config: baseConfig,
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      clientIpResolver: headerIpResolver,
+    });
+  });
+
+  function postJson(
+    path: string,
+    body: unknown,
+    cookie?: string,
+    csrfToken?: string,
+    api: ReturnType<typeof createApp> = app,
+  ) {
+    return api.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(cookie === undefined ? {} : { Cookie: cookie }),
+        ...(csrfToken === undefined ? {} : { "X-Zelora-CSRF": csrfToken }),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function extractSessionCookie(response: Response): string {
+    const setCookie = response.headers.get("set-cookie");
+    if (setCookie === null) {
+      throw new Error("expected a set-cookie header");
+    }
+    return setCookie.split(";")[0] ?? "";
+  }
+
+  async function registerUser(
+    email = "seller@example.com",
+  ): Promise<{ cookie: string; csrfToken: string; userId: string }> {
+    const response = await postJson("/api/auth/register", {
+      email,
+      password: "password123",
+      name: "Ada Lovelace",
+    });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: AuthUserResponse };
+    return {
+      cookie: extractSessionCookie(response),
+      csrfToken: body.data.session.csrfToken,
+      userId: body.data.user.id,
+    };
+  }
+
+  /** Register a customer session, then promote it into an approved seller. */
+  async function registerApprovedSeller(): Promise<{
+    cookie: string;
+    csrfToken: string;
+    userId: string;
+  }> {
+    const session = await registerUser();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, role: "seller" });
+    const now = new Date();
+    sellerRepository.seedProfile({
+      id: "sp-approved",
+      userId: session.userId,
+      slug: "approved-shop",
+      displayName: "Approved Seller",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: "st-approved",
+      sellerProfileId: "sp-approved",
+      name: "Approved Shop",
+      slug: "approved-shop",
+      description: null,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return session;
+  }
+
+  async function expectCreateFailure(
+    response: Response,
+    code: string,
+    status: number,
+  ): Promise<ApiFailure> {
+    expect(response.status).toBe(status);
+    const body = (await response.json()) as ApiFailure;
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe(code);
+    return body;
+  }
+
+  const validBody = {
+    name: "Vintage Camera",
+    slug: "vintage-camera",
+    description: "A lovely film camera.",
+    categoryId: "01955f00-0000-7000-8000-000000000001",
+  };
+
+  it("A: unauthenticated request returns 401", async () => {
+    const response = await postJson("/api/seller/products", validBody);
+
+    await expectCreateFailure(response, "SESSION_EXPIRED", 401);
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("A: a non-seller role passes auth but is rejected 403 FORBIDDEN", async () => {
+    const session = await registerUser();
+
+    const body = await expectCreateFailure(
+      (await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken)),
+      "FORBIDDEN",
+      403,
+    );
+    expect(body.error.message).toBe("You do not have permission to perform this action.");
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("A: missing CSRF returns 403 CSRF_FAILED", async () => {
+    const session = await registerApprovedSeller();
+
+    await expectCreateFailure(
+      await postJson("/api/seller/products", validBody, session.cookie),
+      "CSRF_FAILED",
+      403,
+    );
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("B: a seller role with a pending profile is 403 SELLER_NOT_APPROVED", async () => {
+    const session = await registerUser();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, role: "seller" });
+    const now = new Date();
+    sellerRepository.seedProfile({
+      id: "sp-pending",
+      userId: session.userId,
+      slug: "pending-shop",
+      displayName: "Pending Seller",
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: "st-pending",
+      sellerProfileId: "sp-pending",
+      name: "Pending Shop",
+      slug: "pending-shop",
+      description: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expectCreateFailure(
+      await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken),
+      "SELLER_NOT_APPROVED",
+      403,
+    );
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("B: an approved seller creates a draft product in their own store", async () => {
+    const session = await registerApprovedSeller();
+
+    const response = await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken);
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as {
+      ok: true;
+      data: {
+        id: string;
+        storeId: string;
+        slug: string;
+        name: string;
+        description: string | null;
+        categoryId: string | null;
+        status: string;
+        createdAt: string;
+      };
+    };
+    expect(body.ok).toBe(true);
+    expect(body.data.storeId).toBe("st-approved");
+    expect(body.data.slug).toBe("vintage-camera");
+    expect(body.data.name).toBe("Vintage Camera");
+    expect(body.data.description).toBe("A lovely film camera.");
+    expect(body.data.categoryId).toBe("01955f00-0000-7000-8000-000000000001");
+    expect(body.data.status).toBe("draft");
+    expect(Number.isNaN(Date.parse(body.data.createdAt))).toBe(false);
+    expect(productRepository.createCalls).toHaveLength(1);
+    expect(productRepository.createCalls[0]?.storeId).toBe("st-approved");
+  });
+
+  it("B: the response envelope leaks no sensitive column names", async () => {
+    const session = await registerApprovedSeller();
+
+    const response = await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken);
+    const raw = await response.text();
+    expect(raw).not.toContain("passwordHash");
+    expect(raw).not.toContain("csrfToken");
+    expect(raw).not.toContain("seller_profile_id");
+    expect(raw).not.toContain("user_id");
+  });
+
+  it("B: spoofed ownership fields in the body are ignored", async () => {
+    const session = await registerApprovedSeller();
+
+    const response = await postJson(
+      "/api/seller/products",
+      {
+        ...validBody,
+        storeId: "st-someone-else",
+        sellerProfileId: "sp-someone-else",
+        userId: "someone-else",
+        status: "active",
+      },
+      session.cookie,
+      session.csrfToken,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: { storeId: string; status: string } };
+    expect(body.data.storeId).toBe("st-approved");
+    expect(body.data.status).toBe("draft");
+  });
+
+  it("B: a category that is not active returns 404 CATEGORY_NOT_FOUND", async () => {
+    const session = await registerApprovedSeller();
+    catalogRepository.categories = [];
+
+    const body = await expectCreateFailure(
+      await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken),
+      "CATEGORY_NOT_FOUND",
+      404,
+    );
+    expect(body.error.message).toBe("The selected category does not exist or is not active.");
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("B: a product without a category may still be created", async () => {
+    const session = await registerApprovedSeller();
+
+    const response = await postJson(
+      "/api/seller/products",
+      { name: "Bare Listing", slug: "bare-listing" },
+      session.cookie,
+      session.csrfToken,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: { categoryId: string | null } };
+    expect(body.data.categoryId).toBeNull();
+  });
+
+  it("C: a duplicate slug in the store returns 409 PRODUCT_SLUG_IN_USE", async () => {
+    const session = await registerApprovedSeller();
+
+    const first = await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken);
+    expect(first.status).toBe(201);
+
+    const second = await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken);
+
+    const body = await expectCreateFailure(second, "PRODUCT_SLUG_IN_USE", 409);
+    expect(body.error.message).toBe("A product with this slug already exists in your store.");
+  });
+
+  it("C: a race-triggered insert conflict still returns 409 PRODUCT_SLUG_IN_USE", async () => {
+    const session = await registerApprovedSeller();
+    productRepository.forceCreateConflict = true;
+
+    await expectCreateFailure(
+      await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken),
+      "PRODUCT_SLUG_IN_USE",
+      409,
+    );
+  });
+
+  it("D: invalid input returns 422 with per-field errors and creates nothing", async () => {
+    const session = await registerApprovedSeller();
+
+    const response = await postJson(
+      "/api/seller/products",
+      { name: "", slug: "INVALID SLUG!", description: "x".repeat(2001), categoryId: "not-a-uuid" },
+      session.cookie,
+      session.csrfToken,
+    );
+
+    const body = await expectCreateFailure(response, "VALIDATION_ERROR", 422);
+    expect(body.error.fields?.name).toBeDefined();
+    expect(body.error.fields?.slug).toBeDefined();
+    expect(body.error.fields?.description).toBeDefined();
+    expect(body.error.fields?.categoryId).toBeDefined();
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("D: malformed JSON fails validation and creates nothing", async () => {
+    const session = await registerApprovedSeller();
+
+    const response = await app.request("/api/seller/products", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: session.cookie,
+        "X-Zelora-CSRF": session.csrfToken,
+      },
+      body: "not-json",
+    });
+
+    const body = await expectCreateFailure(response, "VALIDATION_ERROR", 422);
+    expect(body.error.fields?.body).toBeDefined();
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("E: a suspended account cannot create products", async () => {
+    const session = await registerApprovedSeller();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, status: "suspended" });
+
+    await expectCreateFailure(
+      await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken),
+      "ACCOUNT_SUSPENDED",
+      403,
+    );
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("E: a deleted account cannot create products", async () => {
+    const session = await registerApprovedSeller();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, status: "deleted" });
+
+    await expectCreateFailure(
+      await postJson("/api/seller/products", validBody, session.cookie, session.csrfToken),
+      "ACCOUNT_DELETED",
+      403,
+    );
+    expect(productRepository.createCalls).toHaveLength(0);
+  });
+
+  it("I: over-limit IP returns 429 RATE_LIMITED with Retry-After", async () => {
+    const limiter = new MemoryWindowRateLimiter(clock);
+    const limitedApp = createApp({
+      config: { ...baseConfig, rateLimitProductCreateIpMax: 2 },
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      rateLimiter: limiter,
+      clientIpResolver: {
+        resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+      },
+    });
+
+    const session = await registerApprovedSeller();
+    for (let i = 0; i < 2; i += 1) {
+      const response = await limitedApp.request("/api/seller/products", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: session.cookie,
+          "X-Zelora-CSRF": session.csrfToken,
+          "X-Test-IP": "203.0.113.66",
+        },
+        body: JSON.stringify({ ...validBody, slug: `camera-${i}` }),
+      });
+      expect(response.status).toBe(201);
+    }
+
+    const blocked = await limitedApp.request("/api/seller/products", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: session.cookie,
+        "X-Zelora-CSRF": session.csrfToken,
+        "X-Test-IP": "203.0.113.66",
+      },
+      body: JSON.stringify({ ...validBody, slug: "camera-2" }),
+    });
+
+    expect(blocked.status).toBe(429);
+    expect(blocked.headers.get("retry-after")).toBe("3600");
+    const body = (await blocked.json()) as ApiFailure;
+    expect(body.error.code).toBe("RATE_LIMITED");
+    expect(body.error.details).toEqual({ retryAfterSeconds: 3600, scope: "ip" });
+  });
+
+  it("I: a different IP is unaffected by the product-create limit", async () => {
+    const limiter = new MemoryWindowRateLimiter(clock);
+    const limitedApp = createApp({
+      config: { ...baseConfig, rateLimitProductCreateIpMax: 2 },
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      rateLimiter: limiter,
+      clientIpResolver: {
+        resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+      },
+    });
+
+    const session = await registerApprovedSeller();
+    for (let i = 0; i < 2; i += 1) {
+      const response = await limitedApp.request("/api/seller/products", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: session.cookie,
+          "X-Zelora-CSRF": session.csrfToken,
+          "X-Test-IP": "203.0.113.67",
+        },
+        body: JSON.stringify({ ...validBody, slug: `camera-${i}` }),
+      });
+      expect(response.status).toBe(201);
+    }
+    const onLimit = await limitedApp.request("/api/seller/products", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: session.cookie,
+        "X-Zelora-CSRF": session.csrfToken,
+        "X-Test-IP": "203.0.113.67",
+      },
+      body: JSON.stringify({ ...validBody, slug: "camera-2" }),
+    });
+    expect(onLimit.status).toBe(429);
+
+    const otherIp = await limitedApp.request("/api/seller/products", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: session.cookie,
+        "X-Zelora-CSRF": session.csrfToken,
+        "X-Test-IP": "198.51.100.67",
+      },
+      body: JSON.stringify({ ...validBody, slug: "camera-2" }),
+    });
+    expect(otherIp.status).toBe(201);
   });
 });

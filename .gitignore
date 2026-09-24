@@ -5,6 +5,7 @@ coverage/
 *.tsbuildinfo
 *.db
 .data/
+.wrangler/
 .env
 .env.*
 !.env.example

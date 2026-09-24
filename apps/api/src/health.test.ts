@@ -6,6 +6,7 @@ import type { AuditLogRepository } from "@zelora/db/audit";
 import type { UserRepository } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { ProductRepository } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
 import { createApp, type AppDependencies } from "./app";
 import type { Clock } from "./services/clock";
@@ -49,6 +50,7 @@ const sellerRepository: SellerRepository = {
   findByUserId: unimplemented,
   findByProfileSlug: unimplemented,
   findStoreBySlug: unimplemented,
+  findStoreBySellerProfileId: unimplemented,
   createOnboarding: unimplemented,
   activateSeller: unimplemented,
   listPendingProfiles: unimplemented,
@@ -78,6 +80,11 @@ const cartRepository: CartRepository = {
   clearCart: unimplemented,
 };
 
+const productRepository: ProductRepository = {
+  findByStoreAndSlug: unimplemented,
+  createProduct: unimplemented,
+};
+
 function makeApp(): ReturnType<typeof createApp> {
   const config = makeTestConfig();
   const dependencies: AppDependencies = {
@@ -86,6 +93,7 @@ function makeApp(): ReturnType<typeof createApp> {
     sessionRepository,
     sellerRepository,
     catalogRepository,
+    productRepository,
     cartRepository,
     auditLogRepository,
     passwordHasher,

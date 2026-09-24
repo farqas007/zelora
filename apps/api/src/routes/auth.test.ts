@@ -10,6 +10,7 @@ import type { UserRecord, UserRepository, CreateAdminResult, CreateUserInput } f
 import type { SellerRepository } from "@zelora/db/seller";
 import type { CartRepository } from "@zelora/db/cart";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { ProductRepository } from "@zelora/db/products";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
@@ -169,6 +170,7 @@ const sellerRepository: SellerRepository = {
   findByUserId: unimplementedSeller,
   findByProfileSlug: unimplementedSeller,
   findStoreBySlug: unimplementedSeller,
+  findStoreBySellerProfileId: unimplementedSeller,
   createOnboarding: unimplementedSeller,
   activateSeller: unimplementedSeller,
   listPendingProfiles: unimplementedSeller,
@@ -191,6 +193,16 @@ const inertCatalogRepository: CatalogRepository = {
   findVariantById: unimplementedSeller,
   findActiveStoreBySlug: unimplementedSeller,
   listStoreProducts: unimplementedSeller,
+};
+
+/**
+ * Auth route tests never touch the product repository, but `createApp`
+ * composes the seller service with it. Any accidental invocation would reveal
+ * a wiring bug loudly.
+ */
+const inertProductRepository: ProductRepository = {
+  findByStoreAndSlug: unimplementedSeller,
+  createProduct: unimplementedSeller,
 };
 
 const inertCartRepository: CartRepository = {
@@ -235,6 +247,8 @@ describe("auth routes", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    rateLimitProductCreateIpMax: 30,
+    rateLimitProductCreateIpWindowSeconds: 3_600,
         sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -257,6 +271,7 @@ describe("auth routes", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
@@ -901,6 +916,7 @@ describe("auth routes", () => {
         sessionRepository,
         sellerRepository,
         catalogRepository: inertCatalogRepository,
+        productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
         auditLogRepository: inertAuditLogRepository,
         passwordHasher,

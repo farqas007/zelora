@@ -15,6 +15,7 @@ import type {
   StoreRecord,
 } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { ProductRepository } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
 import { createId } from "@zelora/db";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
@@ -205,6 +206,10 @@ class FakeSellerRepository implements SellerRepository {
     return Array.from(this.stores.values()).find((store) => store.slug === slug) ?? null;
   }
 
+  async findStoreBySellerProfileId(sellerProfileId: string): Promise<StoreRecord | null> {
+    return Array.from(this.stores.values()).find((store) => store.sellerProfileId === sellerProfileId) ?? null;
+  }
+
   async createOnboarding(): Promise<
     | { ok: true; sellerProfile: SellerProfileRecord; store: StoreRecord }
     | { ok: false; reason: "SELLER_PROFILE_EXISTS" | "PROFILE_SLUG_IN_USE" | "STORE_SLUG_IN_USE" }
@@ -300,6 +305,8 @@ const baseConfig: AppConfig = {
   rateLimitRegisterIpWindowSeconds: 3_600,
   rateLimitSellerOnboardingIpMax: 10,
   rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+  rateLimitProductCreateIpMax: 30,
+  rateLimitProductCreateIpWindowSeconds: 3_600,
   sessionLastUsedThrottleSeconds: 300,
   sessionPurgeIntervalSeconds: 3_600,
   adminBootstrapSecret: null,
@@ -375,6 +382,19 @@ const inertCartRepository: CartRepository = {
   },
 };
 
+/**
+ * Product creation is composed by `createApp` but never reached by admin route
+ * tests. Any accidental invocation would reveal a wiring bug loudly.
+ */
+const inertProductRepository: ProductRepository = {
+  findByStoreAndSlug: () => {
+    throw new Error("unexpected product call");
+  },
+  createProduct: () => {
+    throw new Error("unexpected product call");
+  },
+};
+
 describe("POST /api/admin/sellers/:userId/activate", () => {
 
   let clock: FakeClock;
@@ -398,6 +418,7 @@ describe("POST /api/admin/sellers/:userId/activate", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
       auditLogRepository,
       passwordHasher,
@@ -587,6 +608,7 @@ describe("POST /api/admin/bootstrap", () => {
       sessionRepository: new FakeAuthSessionRepository(),
       sellerRepository: new FakeSellerRepository(),
       catalogRepository: inertCatalogRepository,
+      productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
       auditLogRepository,
       passwordHasher,
@@ -613,6 +635,7 @@ describe("POST /api/admin/bootstrap", () => {
       sessionRepository: new FakeAuthSessionRepository(),
       sellerRepository: new FakeSellerRepository(),
       catalogRepository: inertCatalogRepository,
+      productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
       auditLogRepository,
       passwordHasher: new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations),
@@ -747,6 +770,7 @@ describe("GET /api/admin/sellers/pending", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
       auditLogRepository,
       passwordHasher: new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations),
@@ -935,6 +959,7 @@ describe("POST /api/admin/sellers/:userId/reject", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
       auditLogRepository,
       passwordHasher: new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations),

@@ -47,6 +47,13 @@ export type {
   CatalogRepository,
 } from "./catalog/repository";
 export type {
+  ProductRecord,
+  CreateProductInput,
+  CreateProductConflictReason,
+  CreateProductResult,
+  ProductRepository,
+} from "./products/repository";
+export type {
   AuditLogRecord,
   AuditLogRepository,
   CreateAuditLogInput,

@@ -6,6 +6,7 @@ import { createLocalAuthSessionRepository } from "@zelora/db/auth/local";
 import { createLocalUserRepository } from "@zelora/db/users/local";
 import { createLocalSellerRepository } from "@zelora/db/seller/local";
 import { createLocalCatalogRepository } from "@zelora/db/catalog/local";
+import { createLocalProductRepository } from "@zelora/db/products/local";
 import { createLocalCartRepository } from "@zelora/db/cart/local";
 import { createLocalAuditLogRepository } from "@zelora/db/audit/local";
 import { createApp } from "./app";
@@ -49,6 +50,7 @@ const app = createApp({
   sessionRepository,
   sellerRepository: createLocalSellerRepository(db),
   catalogRepository: createLocalCatalogRepository(db),
+  productRepository: createLocalProductRepository(db),
   cartRepository: createLocalCartRepository(db),
   auditLogRepository: createLocalAuditLogRepository(db),
   passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),

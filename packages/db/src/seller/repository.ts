@@ -116,6 +116,13 @@ export interface SellerRepository {
   /** Resolve a store by its unique slug, or `null`. */
   findStoreBySlug(slug: string): Promise<StoreRecord | null>;
   /**
+   * Resolve a store owned by the given seller profile, or `null`. The first
+   * onboarding store is the one a seller starts with; product creation uses
+   * this to derive "the seller's own store" server-side without ever trusting
+   * a client-supplied store id.
+   */
+  findStoreBySellerProfileId(sellerProfileId: string): Promise<StoreRecord | null>;
+  /**
    * Atomically create the seller profile and its initial store. When a UNIQUE
    * constraint is hit the whole operation rolls back and a conflict reason is
    * returned; no orphan profile is ever left behind.

@@ -42,6 +42,11 @@ export function createD1SellerRepository(
       return row ?? null;
     },
 
+    async findStoreBySellerProfileId(sellerProfileId) {
+      const row = await db.select().from(stores).where(eq(stores.sellerProfileId, sellerProfileId)).get();
+      return row ?? null;
+    },
+
     async createOnboarding(input) {
       try {
         // D1 rejects raw `BEGIN` statements, so Drizzle's driver-level

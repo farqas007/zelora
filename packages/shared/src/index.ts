@@ -10,3 +10,4 @@ export * from "./catalog";
 export * from "./cart";
 export * from "./storefront";
 export * from "./admin";
+export * from "./products";

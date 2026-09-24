@@ -34,6 +34,10 @@ export function createLocalSellerRepository(db: LocalDatabase): SellerRepository
       return db.select().from(stores).where(eq(stores.slug, slug)).get() ?? null;
     },
 
+    async findStoreBySellerProfileId(sellerProfileId) {
+      return db.select().from(stores).where(eq(stores.sellerProfileId, sellerProfileId)).get() ?? null;
+    },
+
     async createOnboarding(input) {
       try {
         const result = db.transaction((tx) => {

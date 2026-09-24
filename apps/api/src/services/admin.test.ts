@@ -50,6 +50,8 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    rateLimitProductCreateIpMax: 30,
+    rateLimitProductCreateIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: BOOTSTRAP_SECRET,
@@ -147,6 +149,10 @@ class FakeSellerRepository implements SellerRepository {
 
   async findStoreBySlug(slug: string): Promise<StoreRecord | null> {
     return Array.from(this.stores.values()).find((store) => store.slug === slug) ?? null;
+  }
+
+  async findStoreBySellerProfileId(sellerProfileId: string): Promise<StoreRecord | null> {
+    return Array.from(this.stores.values()).find((store) => store.sellerProfileId === sellerProfileId) ?? null;
   }
 
   async createOnboarding(): Promise<never> {

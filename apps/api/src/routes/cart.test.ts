@@ -5,6 +5,7 @@ import type { AuditLogRepository } from "@zelora/db/audit";
 import type { UserRecord, UserRepository, CreateAdminResult, CreateUserInput } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
 import type { CatalogRepository, CatalogVariantRecord } from "@zelora/db/catalog";
+import type { ProductRepository } from "@zelora/db/products";
 import type {
   AddCartItemInput,
   AddCartItemResult,
@@ -291,6 +292,8 @@ describe("cart routes", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    rateLimitProductCreateIpMax: 30,
+    rateLimitProductCreateIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -315,12 +318,17 @@ describe("cart routes", () => {
         findByUserId: inert,
         findByProfileSlug: inert,
         findStoreBySlug: inert,
+        findStoreBySellerProfileId: inert,
         createOnboarding: inert,
         activateSeller: inert,
         listPendingProfiles: inert,
         rejectSeller: inert,
       } satisfies SellerRepository,
       catalogRepository,
+      productRepository: {
+        findByStoreAndSlug: inert,
+        createProduct: inert,
+      } satisfies ProductRepository,
       cartRepository,
       auditLogRepository: {
         create: inert,

@@ -56,6 +56,8 @@ describe("loadConfig auth defaults", () => {
     expect(config.rateLimitRegisterIpWindowSeconds).toBe(3_600);
     expect(config.rateLimitSellerOnboardingIpMax).toBe(10);
     expect(config.rateLimitSellerOnboardingIpWindowSeconds).toBe(3_600);
+    expect(config.rateLimitProductCreateIpMax).toBe(30);
+    expect(config.rateLimitProductCreateIpWindowSeconds).toBe(3_600);
   });
 
   it("defaults the session cookie to Secure in production", () => {
@@ -110,6 +112,8 @@ describe("loadConfig auth defaults", () => {
     expect(defaults.rateLimitRegisterIpWindowSeconds).toBe(3_600);
     expect(defaults.rateLimitSellerOnboardingIpMax).toBe(10);
     expect(defaults.rateLimitSellerOnboardingIpWindowSeconds).toBe(3_600);
+    expect(defaults.rateLimitProductCreateIpMax).toBe(30);
+    expect(defaults.rateLimitProductCreateIpWindowSeconds).toBe(3_600);
 
     const config = loadConfig({
       NODE_ENV: "test",
@@ -123,6 +127,8 @@ describe("loadConfig auth defaults", () => {
       RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS: "1800",
       RATE_LIMIT_SELLER_ONBOARDING_IP_MAX: "7",
       RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "720",
+      RATE_LIMIT_PRODUCT_CREATE_IP_MAX: "12",
+      RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS: "1800",
     });
 
     expect(config.rateLimitEnabled).toBe(false);
@@ -135,6 +141,8 @@ describe("loadConfig auth defaults", () => {
     expect(config.rateLimitRegisterIpWindowSeconds).toBe(1_800);
     expect(config.rateLimitSellerOnboardingIpMax).toBe(7);
     expect(config.rateLimitSellerOnboardingIpWindowSeconds).toBe(720);
+    expect(config.rateLimitProductCreateIpMax).toBe(12);
+    expect(config.rateLimitProductCreateIpWindowSeconds).toBe(1_800);
   });
 });
 
@@ -177,6 +185,10 @@ describe("loadConfig invalid values", () => {
     { name: "negative seller onboarding IP max", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_MAX: "-2" } },
     { name: "fractional seller onboarding IP window", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "3600.5" } },
     { name: "non-numeric seller onboarding IP window", env: { RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "hour" } },
+    { name: "zero product create IP max", env: { RATE_LIMIT_PRODUCT_CREATE_IP_MAX: "0" } },
+    { name: "negative product create IP max", env: { RATE_LIMIT_PRODUCT_CREATE_IP_MAX: "-3" } },
+    { name: "fractional product create IP window", env: { RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS: "1800.5" } },
+    { name: "non-numeric product create IP window", env: { RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS: "hour" } },
     { name: "zero session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "0" } },
     { name: "negative session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "-60" } },
     { name: "fractional session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "10.5" } },

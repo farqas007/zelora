@@ -8,6 +8,13 @@ import type {
   SellerRepository,
   StoreRecord,
 } from "@zelora/db/seller";
+import type { CatalogCategoryRecord, CatalogRepository } from "@zelora/db/catalog";
+import type {
+  CreateProductInput,
+  CreateProductResult,
+  ProductRecord,
+  ProductRepository,
+} from "@zelora/db/products";
 import { AUTH_ERROR_CODES } from "@zelora/shared";
 import { SellerService } from "./seller";
 
@@ -35,6 +42,10 @@ class FakeSellerRepository implements SellerRepository {
 
   async findStoreBySlug(slug: string): Promise<StoreRecord | null> {
     return Array.from(this.stores.values()).find((store) => store.slug === slug) ?? null;
+  }
+
+  async findStoreBySellerProfileId(sellerProfileId: string): Promise<StoreRecord | null> {
+    return Array.from(this.stores.values()).find((store) => store.sellerProfileId === sellerProfileId) ?? null;
   }
 
   async createOnboarding(input: CreateOnboardingInput): Promise<
@@ -132,6 +143,80 @@ class FakeSellerRepository implements SellerRepository {
   }
 }
 
+/**
+ * Minimal product-repository fake exercising the seller create logic. Products
+ * live in a map keyed by id; slug uniqueness is enforced per store exactly like
+ * the real repository's `(store_id, slug)` constraint.
+ */
+class FakeProductRepository implements ProductRepository {
+  private products: Map<string, ProductRecord> = new Map();
+  private nextId = 1;
+
+  forceCreateConflict: boolean = false;
+
+  async findByStoreAndSlug(storeId: string, slug: string): Promise<ProductRecord | null> {
+    return (
+      Array.from(this.products.values()).find(
+        (product) => product.storeId === storeId && product.slug === slug,
+      ) ?? null
+    );
+  }
+
+  async createProduct(input: CreateProductInput): Promise<CreateProductResult> {
+    if (this.forceCreateConflict) {
+      return { ok: false, reason: "PRODUCT_SLUG_IN_USE" };
+    }
+    const existing = await this.findByStoreAndSlug(input.storeId, input.slug);
+    if (existing !== null) {
+      return { ok: false, reason: "PRODUCT_SLUG_IN_USE" };
+    }
+    const now = new Date();
+    const product: ProductRecord = {
+      id: `pr-${this.nextId}`,
+      storeId: input.storeId,
+      slug: input.slug,
+      name: input.name,
+      description: input.description,
+      categoryId: input.categoryId,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.nextId += 1;
+    this.products.set(product.id, product);
+    return { ok: true, product };
+  }
+}
+
+/** Minimal catalog-repository fake: only the active-category list is used. */
+class FakeCatalogRepository implements CatalogRepository {
+  categories: CatalogCategoryRecord[] = [];
+
+  async listActiveCategories(): Promise<CatalogCategoryRecord[]> {
+    return this.categories;
+  }
+
+  async listActiveProducts(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+
+  async findProductBySlug(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+
+  async findVariantById(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+
+  async findActiveStoreBySlug(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+
+  async listStoreProducts(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+}
+
 function makeUser(overrides: Partial<UserRecord> = {}): UserRecord {
   const now = new Date();
   return {
@@ -174,11 +259,19 @@ async function expectSellerError(
 
 describe("SellerService", () => {
   let repository: FakeSellerRepository;
+  let products: FakeProductRepository;
+  let catalog: FakeCatalogRepository;
   let service: SellerService;
 
   beforeEach(() => {
     repository = new FakeSellerRepository();
-    service = new SellerService({ sellerRepository: repository });
+    products = new FakeProductRepository();
+    catalog = new FakeCatalogRepository();
+    service = new SellerService({
+      sellerRepository: repository,
+      productRepository: products,
+      catalogRepository: catalog,
+    });
   });
 
   describe("onboard", () => {
@@ -553,6 +646,345 @@ describe("SellerService", () => {
         () => service.activateSeller("rejected-user"),
         AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
         409,
+      );
+    });
+  });
+
+  describe("createProduct", () => {
+    /**
+     * Seed an approved seller: an `active` role user, an `active` profile and
+     * an `active` store, plus one active category the product can reference.
+     */
+    function seedApprovedSeller(): void {
+      repository.seedProfile({
+        id: "sp-approved",
+        userId: "user-authenticated",
+        slug: "approved-shop",
+        displayName: "Approved Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-approved",
+        sellerProfileId: "sp-approved",
+        name: "Approved Shop",
+        slug: "approved-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      catalog.categories = [
+        { id: "01955f00-0000-7000-8000-000000000001", slug: "electronics", name: "Electronics" },
+      ];
+    }
+
+    const validBody = {
+      name: "Vintage Camera",
+      slug: "  Vintage-Camera ",
+      description: "A lovely film camera.",
+      categoryId: "01955f00-0000-7000-8000-000000000001",
+    };
+
+    it("creates a product in the authenticated seller's own store", async () => {
+      seedApprovedSeller();
+
+      const product = await service.createProduct(makeUser({ role: "seller" }), validBody);
+
+      expect(product.id).toBeTruthy();
+      expect(product.storeId).toBe("st-approved");
+      expect(product.slug).toBe("vintage-camera");
+      expect(product.name).toBe("Vintage Camera");
+      expect(product.description).toBe("A lovely film camera.");
+      expect(product.categoryId).toBe("01955f00-0000-7000-8000-000000000001");
+      expect(product.status).toBe("draft");
+      expect(product.createdAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    });
+
+    it("maps a missing description and omitted category to null", async () => {
+      seedApprovedSeller();
+
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Bare Listing",
+        slug: "bare-listing",
+      });
+
+      expect(product.description).toBeNull();
+      expect(product.categoryId).toBeNull();
+    });
+
+    it("uses the authenticated user id and ignores spoofed ownership fields", async () => {
+      seedApprovedSeller();
+
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        ...validBody,
+        storeId: "st-someone-else",
+        sellerProfileId: "sp-someone-else",
+        userId: "someone-else",
+        status: "active",
+      });
+
+      expect(product.storeId).toBe("st-approved");
+    });
+
+    it("rejects a customer role before any repository lookup", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "customer" }), validBody),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+    });
+
+    it("rejects an admin role", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "admin" }), validBody),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+    });
+
+    it("rejects a suspended account before looking up the profile", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller", status: "suspended" }), validBody),
+        AUTH_ERROR_CODES.ACCOUNT_SUSPENDED,
+        403,
+      );
+    });
+
+    it("rejects a deleted account before looking up the profile", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller", status: "deleted" }), validBody),
+        AUTH_ERROR_CODES.ACCOUNT_DELETED,
+        403,
+      );
+    });
+
+    it("rejects a missing seller profile as SELLER_NOT_APPROVED", async () => {
+      repository.seedProfile({
+        id: "sp-approved",
+        userId: "seller-user",
+        slug: "approved-shop",
+        displayName: "Approved Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-approved",
+        sellerProfileId: "sp-approved",
+        name: "Approved Shop",
+        slug: "approved-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller", id: "another-user" }), validBody),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+    });
+
+    it("rejects a pending seller profile as SELLER_NOT_APPROVED", async () => {
+      repository.seedProfile({
+        id: "sp-pending",
+        userId: "seller-user",
+        slug: "pending-shop",
+        displayName: "Pending Seller",
+        status: "pending",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-pending",
+        sellerProfileId: "sp-pending",
+        name: "Pending Shop",
+        slug: "pending-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller" }), validBody),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+    });
+
+    it("rejects an absent store as SELLER_NOT_APPROVED", async () => {
+      repository.seedProfile({
+        id: "sp-approved",
+        userId: "seller-user",
+        slug: "approved-shop",
+        displayName: "Approved Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller" }), validBody),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+    });
+
+    it("rejects a non-active store as SELLER_NOT_APPROVED", async () => {
+      repository.seedProfile({
+        id: "sp-approved",
+        userId: "seller-user",
+        slug: "approved-shop",
+        displayName: "Approved Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-draft",
+        sellerProfileId: "sp-approved",
+        name: "Draft Shop",
+        slug: "draft-shop",
+        description: null,
+        status: "draft",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller" }), validBody),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+    });
+
+    it("rejects an unknown or inactive category as CATEGORY_NOT_FOUND", async () => {
+      seedApprovedSeller();
+      catalog.categories = [
+        { id: "cat-other", slug: "other", name: "Other" },
+      ];
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller" }), validBody),
+        "CATEGORY_NOT_FOUND",
+        404,
+      );
+    });
+
+    it("allows a product without a category even when the catalog is empty", async () => {
+      seedApprovedSeller();
+      catalog.categories = [];
+
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Uncategorized",
+        slug: "uncategorized",
+      });
+
+      expect(product.categoryId).toBeNull();
+    });
+
+    it("reports a duplicate slug within the store as PRODUCT_SLUG_IN_USE 409", async () => {
+      seedApprovedSeller();
+      await service.createProduct(makeUser({ role: "seller" }), {
+        name: "First",
+        slug: "same-slug",
+      });
+
+      await expectSellerError(
+        () =>
+          service.createProduct(makeUser({ role: "seller" }), {
+            name: "Second",
+            slug: "same-slug",
+          }),
+        "PRODUCT_SLUG_IN_USE",
+        409,
+      );
+    });
+
+    it("allows the same slug in a different store", async () => {
+      seedApprovedSeller();
+      await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Mine",
+        slug: "shared-slug",
+      });
+
+      repository.seedProfile({
+        id: "sp-other",
+        userId: "other-seller",
+        slug: "other-shop",
+        displayName: "Other Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-other",
+        sellerProfileId: "sp-other",
+        name: "Other Shop",
+        slug: "other-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      const product = await service.createProduct(
+        makeUser({ role: "seller", id: "other-seller" }),
+        { name: "Theirs", slug: "shared-slug" },
+      );
+      expect(product.storeId).toBe("st-other");
+    });
+
+    it("maps a race-triggered create conflict to PRODUCT_SLUG_IN_USE 409", async () => {
+      seedApprovedSeller();
+      products.forceCreateConflict = true;
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller" }), validBody),
+        "PRODUCT_SLUG_IN_USE",
+        409,
+      );
+    });
+
+    it("rejects an invalid name", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller" }), { ...validBody, name: "   " }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+
+    it("rejects an invalid product slug", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller" }), { ...validBody, slug: "Not Lowercase!" }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+
+    it("rejects a non-object body", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () => service.createProduct(makeUser({ role: "seller" }), null),
+        "VALIDATION_ERROR",
+        422,
       );
     });
   });

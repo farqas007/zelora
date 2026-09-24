@@ -1,4 +1,5 @@
-import { check, index, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { check, index, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
 import { createdAtColumn, enumCheck, idColumn, updatedAtColumn } from "./_common";
 import { SELLER_PROFILE_STATUSES, STORE_STATUSES, USER_ROLES, USER_STATUSES } from "./enums";
 
@@ -25,6 +26,14 @@ export const users = sqliteTable("users", {
   updatedAt: updatedAtColumn(),
 }, (table) => [
   unique("users_email_unique").on(table.email),
+  /**
+   * The platform's "exactly one administrator" invariant, enforced by the
+   * database itself: at most one row may carry the `admin` role. This is the
+   * race-condition backstop for the secret-gated bootstrap — two concurrent
+   * bootstraps with different emails can never both promote a user, because
+   * the second `admin` insert is rejected by this partial index.
+   */
+  uniqueIndex("users_single_admin_unique").on(table.role).where(sql`${table.role} = 'admin'`),
   check("users_role_check", enumCheck(table.role, USER_ROLES)),
   check("users_status_check", enumCheck(table.status, USER_STATUSES)),
 ]);

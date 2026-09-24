@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { AppConfig } from "@zelora/core";
 import { loadConfig } from "@zelora/core";
 import type { CatalogRepository } from "@zelora/db/catalog";
+import type { AuditLogRepository } from "@zelora/db/audit";
 import type { ApiFailure } from "@zelora/shared";
 import { createApp, type AppDependencies } from "../app";
 import type { Clock } from "../services/clock";
@@ -85,6 +86,7 @@ describe("catalog routes", () => {
       catalogRepository,
       userRepository: {
         create: inert,
+        createAdmin: inert,
         findByEmail: inert,
         findById: inert,
       },
@@ -102,7 +104,13 @@ describe("catalog routes", () => {
         findStoreBySlug: inert,
         createOnboarding: inert,
         activateSeller: inert,
+        listPendingProfiles: inert,
+        rejectSeller: inert,
       },
+      auditLogRepository: {
+        create: inert,
+        listByAction: inert,
+      } satisfies AuditLogRepository,
       passwordHasher: { hash: inert, verify: inert },
       clock: new FakeClock(),
     };

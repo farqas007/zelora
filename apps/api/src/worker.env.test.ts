@@ -16,4 +16,15 @@ describe("worker env configuration", () => {
     const config = loadWorkerConfig({ DB: {}, PBKDF2_ITERATIONS: "31000" } as Env);
     expect(config.pbkdf2Iterations).toBe(31000);
   });
+
+  it("keeps the admin bootstrap secret disabled when the binding is unset", () => {
+    const config = loadWorkerConfig({ DB: {} } as Env);
+    expect(config.adminBootstrapSecret).toBeNull();
+  });
+
+  it("surfaces the admin bootstrap secret binding when provided", () => {
+    const secret = "b".repeat(40);
+    const config = loadWorkerConfig({ DB: {}, ADMIN_BOOTSTRAP_SECRET: secret } as Env);
+    expect(config.adminBootstrapSecret).toBe(secret);
+  });
 });

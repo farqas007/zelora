@@ -6,6 +6,7 @@ import { createLocalAuthSessionRepository } from "@zelora/db/auth/local";
 import { createLocalUserRepository } from "@zelora/db/users/local";
 import { createLocalSellerRepository } from "@zelora/db/seller/local";
 import { createLocalCatalogRepository } from "@zelora/db/catalog/local";
+import { createLocalAuditLogRepository } from "@zelora/db/audit/local";
 import { createApp } from "./app";
 import { systemClock } from "./services/clock";
 import {
@@ -47,6 +48,7 @@ const app = createApp({
   sessionRepository,
   sellerRepository: createLocalSellerRepository(db),
   catalogRepository: createLocalCatalogRepository(db),
+  auditLogRepository: createLocalAuditLogRepository(db),
   passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
   clock: systemClock,
   clientIpResolver,

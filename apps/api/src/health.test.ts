@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ApiFailure, HealthResponse } from "@zelora/shared";
 import { loadConfig, type PasswordHasher } from "@zelora/core";
 import type { AuthSessionRepository } from "@zelora/db/auth";
+import type { AuditLogRepository } from "@zelora/db/audit";
 import type { UserRepository } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
@@ -29,6 +30,7 @@ const passwordHasher: PasswordHasher = {
 
 const userRepository: UserRepository = {
   create: unimplemented,
+  createAdmin: unimplemented,
   findByEmail: unimplemented,
   findById: unimplemented,
 };
@@ -48,6 +50,13 @@ const sellerRepository: SellerRepository = {
   findStoreBySlug: unimplemented,
   createOnboarding: unimplemented,
   activateSeller: unimplemented,
+  listPendingProfiles: unimplemented,
+  rejectSeller: unimplemented,
+};
+
+const auditLogRepository: AuditLogRepository = {
+  create: unimplemented,
+  listByAction: unimplemented,
 };
 
 const catalogRepository: CatalogRepository = {
@@ -64,6 +73,7 @@ function makeApp(): ReturnType<typeof createApp> {
     sessionRepository,
     sellerRepository,
     catalogRepository,
+    auditLogRepository,
     passwordHasher,
     clock,
   };

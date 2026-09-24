@@ -108,6 +108,21 @@ class FakeSellerRepository implements SellerRepository {
     return { sellerProfile: activatedProfile, store: { ...store, status: "active" } };
   }
 
+  async listPendingProfiles(): Promise<{ items: never[]; nextCursor: null }> {
+    throw new Error("pending list is not exercised by seller service tests");
+  }
+
+  async rejectSeller(userId: string): Promise<SellerProfileRecord | null> {
+    const profile = Array.from(this.profiles.values()).find(
+      (candidate) => candidate.userId === userId && candidate.status === "pending",
+    );
+    if (profile === undefined) {
+      return null;
+    }
+    this.profiles.set(profile.id, { ...profile, status: "rejected" });
+    return this.profiles.get(profile.id) ?? null;
+  }
+
   clear(): void {
     this.profiles.clear();
     this.stores.clear();
@@ -454,6 +469,7 @@ describe("SellerService", () => {
 
       expect(result.sellerProfile.status).toBe("active");
       expect(result.store.status).toBe("active");
+      expect(result.transitioned).toBe(true);
       expect(result.sellerProfile.slug).toBe("pending-shop");
       expect(Object.keys(result.sellerProfile).sort()).toEqual([
         "displayName",
@@ -491,6 +507,9 @@ describe("SellerService", () => {
 
       expect(result.sellerProfile.status).toBe("active");
       expect(result.sellerProfile.id).toBe("sp-active");
+      // No `pending → active` transition happened, so callers must not treat
+      // this as a real activation (the admin layer uses this to skip audit).
+      expect(result.transitioned).toBe(false);
     });
 
     it("returns NOT_FOUND 404 when the user has no seller profile", async () => {

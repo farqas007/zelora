@@ -78,6 +78,7 @@ async function resetD1(database: D1Binding): Promise<void> {
  * referencing table is gone.
  */
 const REVERSE_DEPENDENCY_ORDER = [
+  "audit_logs",
   "auth_sessions",
   "order_items",
   "order_addresses",
@@ -117,7 +118,7 @@ describe("D1 runtime with committed migrations", () => {
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all<{ name: string }>();
     const names = tables.results.map((row: { name: string }) => row.name);
-    for (const expected of ["users", "seller_profiles", "stores", "categories", "products", "product_variants", "inventory", "orders", "order_items"]) {
+    for (const expected of ["users", "seller_profiles", "stores", "categories", "products", "product_variants", "inventory", "orders", "order_items", "audit_logs"]) {
       expect(names).toContain(expected);
     }
 
@@ -150,6 +151,55 @@ describe("D1 user repository", () => {
 
     expect(await users.findByEmail("missing@example.test")).toBeNull();
     expect(await users.findById(createId())).toBeNull();
+  });
+
+  it("enforces the exactly-one-admin invariant via createAdmin", async () => {
+    const { db } = await setup();
+    const users = createD1UserRepository(db);
+
+    // With no admin yet, a duplicate email maps deterministically to EMAIL_IN_USE.
+    await users.create({ email: "customer@example.test", name: "Customer", passwordHash: tokenHash(33) });
+    const customerBlocked = await users.createAdmin({
+      email: "customer@example.test",
+      name: "Impostor",
+      passwordHash: tokenHash(34),
+      role: "admin",
+    });
+    expect(customerBlocked).toEqual({ ok: false, reason: "EMAIL_IN_USE" });
+
+    const first = await users.createAdmin({
+      email: "root@example.test",
+      name: "Root",
+      passwordHash: tokenHash(30),
+      role: "admin",
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.user.role).toBe("admin");
+
+    // A different-new-email bootstrap loses the single-admin slot cleanly.
+    const second = await users.createAdmin({
+      email: "root-2@example.test",
+      name: "Root Two",
+      passwordHash: tokenHash(31),
+      role: "admin",
+    });
+    expect(second).toEqual({ ok: false, reason: "ADMIN_ALREADY_EXISTS" });
+    expect(await users.findByEmail("root-2@example.test")).toBeNull();
+
+    // A same-email race after an admin exists trips both UNIQUE constraints;
+    // the exact reason is driver-nondeterministic but never duplicates a user.
+    const third = await users.createAdmin({
+      email: "root@example.test",
+      name: "Root Duplicate",
+      passwordHash: tokenHash(32),
+      role: "admin",
+    });
+    expect(third.ok).toBe(false);
+
+    // The email UNIQUE constraint is untouched for non-admin users.
+    await users.create({ email: "plain-customer@example.test", name: "Customer 2", passwordHash: tokenHash(35) });
+    expect((await users.findByEmail("plain-customer@example.test"))?.role).toBe("customer");
   });
 });
 

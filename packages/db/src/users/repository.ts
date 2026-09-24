@@ -40,9 +40,34 @@ export interface CreateUserInput {
   role?: UserRole;
 }
 
+/**
+ * Driver-neutral reason a bootstrap insert could not create the initial
+ * administrator. The `users` UNIQUE constraints remain the race-condition
+ * backstop; the repository implementations map those SQLite constraint
+ * failures onto these values so callers never inspect driver errors.
+ */
+export type CreateAdminConflictReason = "ADMIN_ALREADY_EXISTS" | "EMAIL_IN_USE";
+
+/**
+ * Outcome of {@link UserRepository.createAdmin}: the created row, or a
+ * driver-neutral conflict reason when the "exactly one administrator"
+ * invariant (or the email UNIQUE constraint) rejected the insert.
+ */
+export type CreateAdminResult =
+  | { ok: true; user: UserRecord }
+  | { ok: false; reason: CreateAdminConflictReason };
+
 export interface UserRepository {
   /** Persist a new user. Returns the created row. */
   create(input: CreateUserInput): Promise<UserRecord>;
+  /**
+   * Atomically create the first administrator. Enforces the "exactly one
+   * administrator" invariant: the partial unique index on `role` (present on
+   * both SQLite and Cloudflare D1) rejects a second admin row, and the email
+   * UNIQUE constraint rejects a duplicate email. Both are surfaced as
+   * driver-neutral conflict reasons rather than raw constraint errors.
+   */
+  createAdmin(input: CreateUserInput): Promise<CreateAdminResult>;
   /** Resolve a user by their exact email, or `null` when unknown. */
   findByEmail(email: string): Promise<UserRecord | null>;
   /** Resolve a user by their id, or `null` when unknown. */

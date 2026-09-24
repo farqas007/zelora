@@ -68,6 +68,18 @@
     "./catalog/d1": {
       "types": "./src/catalog/d1-repository.ts",
       "default": "./src/catalog/d1-repository.ts"
+    },
+    "./audit": {
+      "types": "./src/audit/repository.ts",
+      "default": "./src/audit/repository.ts"
+    },
+    "./audit/local": {
+      "types": "./src/audit/local-repository.ts",
+      "default": "./src/audit/local-repository.ts"
+    },
+    "./audit/d1": {
+      "types": "./src/audit/d1-repository.ts",
+      "default": "./src/audit/d1-repository.ts"
     }
   },
   "scripts": {

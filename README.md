@@ -120,6 +120,36 @@ so a config copied from a Node-tuned local environment can never silently break
 authentication or crash hashing on the edge. Production deployments keep the
 `Secure` cookie and the Workers-compatible iteration cap.
 
+## Admin provisioning
+
+The platform needs exactly one administrator before anything else happens. There
+is deliberately no open registration for admin accounts — instead the very first
+admin is created through a secret-gated bootstrap endpoint:
+
+- Set `ADMIN_BOOTSTRAP_SECRET` (at least 32 characters; locally in your
+  environment, on Cloudflare Workers with `wrangler secret put
+  ADMIN_BOOTSTRAP_SECRET` — never in `wrangler.jsonc` `vars`).
+- `POST /api/admin/bootstrap` with the secret in the `X-Zelora-Admin-Bootstrap`
+  header and a `{ email, password, name }` body (the same validation as account
+  registration; the created account has the `admin` role).
+- The endpoint is a clean 404 when the secret is unset, a 403 on a wrong
+  header, a 409 if the email already belongs to a non-admin (it is never
+  promoted), and idempotent (200, no changes) for an existing admin — so a
+  leaked header value is harmless once provisioning is done.
+
+Approved administrators sign in normally and manage the review queue:
+
+- `GET /api/admin/sellers/pending?limit=&cursor=` — pending seller applications
+  oldest-first, paginated, authenticated + admin-only.
+- `POST /api/admin/sellers/:userId/activate` (CSRF-protected) — approve and
+  promote the seller.
+- `POST /api/admin/sellers/:userId/reject` (CSRF-protected) — reject; blocked
+  with a 409 for active/suspended profiles and idempotent for already-rejected
+  ones.
+
+Every bootstrap/activation/rejection is appended to an immutable `audit_logs`
+table for later surfacing.
+
 ## Phase 1 scope
 
 - pnpm workspace with shared tooling configuration

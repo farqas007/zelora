@@ -38,6 +38,15 @@ export interface OnboardingResultData {
   store: StoreDto;
 }
 
+/**
+ * {@link OnboardingResultData} plus a transition signal, so the admin service
+ * can distinguish a real `pending → active` activation from an idempotent
+ * re-activation of an already-active profile (and only audit the former).
+ */
+export interface SellerActivationData extends OnboardingResultData {
+  transitioned: boolean;
+}
+
 export interface SellerServiceDependencies {
   sellerRepository: SellerRepository;
 }
@@ -156,10 +165,12 @@ export class SellerService {
    * Approve a seller account. The profile must exist and must not be
    * suspended or rejected; activation flips the profile and its stores to
    * `active` and promotes the owning user to the `seller` role atomically.
-   * Activating an already-active profile is a no-op success (idempotent).
-   * This is an admin-level action; caller authorization lives in the route.
+   * Activating an already-active profile is a no-op success (idempotent) and
+   * reports `transitioned: false` so callers never mistreat it as a real
+   * state change. This is an admin-level action; caller authorization lives
+   * in the route.
    */
-  async activateSeller(userId: string): Promise<OnboardingResultData> {
+  async activateSeller(userId: string): Promise<SellerActivationData> {
     const profile = await this.sellerRepository.findByUserId(userId);
     if (profile === null) {
       throw new NotFoundError("No seller profile exists for this user.");
@@ -172,6 +183,11 @@ export class SellerService {
       );
     }
 
+    // Idempotency is decided up front: an already-active profile was never
+    // transitioned by this call, even though the atomic repository activation
+    // below is a harmless no-op for it.
+    const transitioned = profile.status !== "active";
+
     const activated = await this.sellerRepository.activateSeller(userId);
     if (activated === null) {
       throw new NotFoundError("No seller profile exists for this user.");
@@ -180,6 +196,7 @@ export class SellerService {
     return {
       sellerProfile: mapSellerProfileToDto(activated.sellerProfile),
       store: mapStoreToDto(activated.store),
+      transitioned,
     };
   }
 }

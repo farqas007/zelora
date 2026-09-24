@@ -1,5 +1,39 @@
 import { describe, expect, it } from "vitest";
 import { AppError, loadConfig } from "@zelora/core";
+import { ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH } from "@zelora/shared";
+
+describe("loadConfig admin bootstrap secret", () => {
+  it("disables the bootstrap endpoint by default", () => {
+    expect(loadConfig({ NODE_ENV: "test" }).adminBootstrapSecret).toBeNull();
+  });
+
+  it("treats an empty-string secret as unset", () => {
+    expect(loadConfig({ NODE_ENV: "test", ADMIN_BOOTSTRAP_SECRET: "" }).adminBootstrapSecret).toBeNull();
+  });
+
+  it("accepts a secret at exactly the minimum strength", () => {
+    const secret = "a".repeat(ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH);
+    expect(loadConfig({ NODE_ENV: "test", ADMIN_BOOTSTRAP_SECRET: secret }).adminBootstrapSecret).toBe(secret);
+  });
+
+  it("keeps the secret value verbatim (never trimmed)", () => {
+    const secret = `${"a".repeat(ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH)} `;
+    expect(loadConfig({ NODE_ENV: "test", ADMIN_BOOTSTRAP_SECRET: secret }).adminBootstrapSecret).toBe(secret);
+  });
+
+  it("rejects a secret below the minimum strength", () => {
+    const secret = "a".repeat(ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH - 1);
+    try {
+      loadConfig({ NODE_ENV: "test", ADMIN_BOOTSTRAP_SECRET: secret });
+      expect.unreachable("expected loadConfig to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AppError);
+      expect((error as AppError).code).toBe("APP_CONFIG_INVALID");
+      expect(String((error as AppError).message)).toContain("ADMIN_BOOTSTRAP_SECRET");
+      expect(String((error as AppError).message)).toContain(`${ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH}`);
+    }
+  });
+});
 
 describe("loadConfig auth defaults", () => {
   it("provides development-safe defaults", () => {

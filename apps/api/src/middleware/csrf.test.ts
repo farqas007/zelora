@@ -13,7 +13,7 @@ import type {
   AuthSessionRepository,
   CreateAuthSessionInput,
 } from "@zelora/db/auth";
-import type { UserRecord, UserRepository } from "@zelora/db/users";
+import type { UserRecord, UserRepository, CreateAdminResult, CreateUserInput } from "@zelora/db/users";
 import type { Clock } from "../services/clock";
 import type { AppEnv } from "../context";
 import { createErrorHandler } from "./error";
@@ -74,6 +74,10 @@ class FakeUserRepository implements UserRepository {
     };
     this.users.set(record.id, record);
     return record;
+  }
+
+  async createAdmin(input: CreateUserInput): Promise<CreateAdminResult> {
+    return { ok: true, user: await this.create(input) };
   }
 
   async findByEmail(email: string): Promise<UserRecord | null> {
@@ -188,8 +192,9 @@ describe("csrf middleware", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
-    sessionLastUsedThrottleSeconds: 300,
+        sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
   };
 
   const expectedCsrfToken = "expected-csrf-token";

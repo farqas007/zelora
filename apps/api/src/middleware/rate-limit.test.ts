@@ -56,6 +56,7 @@ const baseConfig: AppConfig = {
   rateLimitSellerOnboardingIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
 };
 
 const ipResolver: ClientIpResolver = {

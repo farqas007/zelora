@@ -1,6 +1,8 @@
-import { eq } from "drizzle-orm";
+import { and, asc, eq, gt, or } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
 import { sellerProfiles, stores, users } from "../schema/identities";
+import { decodeSellerCursor } from "./cursor";
+import { toPendingListPage } from "./page";
 import type { OnboardingConflictReason, SellerRepository } from "./repository";
 
 /**
@@ -105,6 +107,75 @@ export function createLocalSellerRepository(db: LocalDatabase): SellerRepository
 
         return { sellerProfile, store };
       });
+    },
+
+    async listPendingProfiles({ limit, cursor }) {
+      const start = cursor === null ? null : decodeSellerCursor(cursor);
+      if (cursor !== null && start === null) {
+        return { items: [], nextCursor: null };
+      }
+
+      const rows = db
+        .select({
+          profileId: sellerProfiles.id,
+          profileUserId: sellerProfiles.userId,
+          profileSlug: sellerProfiles.slug,
+          profileDisplayName: sellerProfiles.displayName,
+          profileStatus: sellerProfiles.status,
+          profileCreatedAt: sellerProfiles.createdAt,
+          profileUpdatedAt: sellerProfiles.updatedAt,
+          userId: users.id,
+          email: users.email,
+          name: users.name,
+          userStatus: users.status,
+          userCreatedAt: users.createdAt,
+          storeId: stores.id,
+          storeSellerProfileId: stores.sellerProfileId,
+          storeName: stores.name,
+          storeSlug: stores.slug,
+          storeDescription: stores.description,
+          storeStatus: stores.status,
+          storeCreatedAt: stores.createdAt,
+          storeUpdatedAt: stores.updatedAt,
+        })
+        .from(sellerProfiles)
+        .innerJoin(users, eq(users.id, sellerProfiles.userId))
+        .innerJoin(stores, eq(stores.sellerProfileId, sellerProfiles.id))
+        .where(
+          and(
+            eq(sellerProfiles.status, "pending"),
+            start === null
+              ? undefined
+              : or(
+                  gt(sellerProfiles.createdAt, start.createdAt),
+                  and(
+                    eq(sellerProfiles.createdAt, start.createdAt),
+                    gt(sellerProfiles.id, start.id),
+                  ),
+                ),
+          ),
+        )
+        .orderBy(asc(sellerProfiles.createdAt), asc(sellerProfiles.id))
+        .limit(limit + 1)
+        .all();
+
+      return toPendingListPage(rows, limit);
+    },
+
+    async rejectSeller(userId) {
+      return (
+        db
+          .update(sellerProfiles)
+          .set({ status: "rejected" })
+          .where(
+            and(
+              eq(sellerProfiles.userId, userId),
+              eq(sellerProfiles.status, "pending"),
+            ),
+          )
+          .returning()
+          .get() ?? null
+      );
     },
   };
 }

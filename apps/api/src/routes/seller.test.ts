@@ -1,11 +1,8 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { PBKDF2PasswordHasher, type AppConfig, type PasswordHasher } from "@zelora/core";
-import type {
-  AuthSessionRecord,
-  AuthSessionRepository,
-  CreateAuthSessionInput,
-} from "@zelora/db/auth";
-import type { UserRecord, UserRepository } from "@zelora/db/users";
+import type { AuthSessionRecord, AuthSessionRepository, CreateAuthSessionInput } from "@zelora/db/auth";
+import type { AuditLogRepository } from "@zelora/db/audit";
+import type { UserRecord, UserRepository, CreateAdminResult, CreateUserInput } from "@zelora/db/users";
 import type {
   CreateOnboardingInput,
   OnboardingConflictReason,
@@ -67,6 +64,10 @@ class FakeUserRepository implements UserRepository {
     this.users.set(record.id, record);
     this.usersByEmail.set(record.email, record);
     return record;
+  }
+
+  async createAdmin(input: CreateUserInput): Promise<CreateAdminResult> {
+    return { ok: true, user: await this.create(input) };
   }
 
   async findByEmail(email: string): Promise<UserRecord | null> {
@@ -256,6 +257,22 @@ class FakeSellerRepository implements SellerRepository {
     return { sellerProfile, store };
   }
 
+  async listPendingProfiles(): Promise<{ items: never[]; nextCursor: null }> {
+    throw new Error("pending list is not exercised by seller onboarding tests");
+  }
+
+  async rejectSeller(userId: string): Promise<SellerProfileRecord | null> {
+    const profile = Array.from(this.profiles.values()).find(
+      (candidate) => candidate.userId === userId && candidate.status === "pending",
+    );
+    if (profile === undefined) {
+      return null;
+    }
+    const sellerProfile: SellerProfileRecord = { ...profile, status: "rejected" };
+    this.profiles.set(profile.id, sellerProfile);
+    return sellerProfile;
+  }
+
   clear(): void {
     this.profiles.clear();
     this.stores.clear();
@@ -286,8 +303,9 @@ describe("POST /api/seller/onboarding", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
-    sessionLastUsedThrottleSeconds: 300,
+        sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
   };
 
   const headerIpResolver: ClientIpResolver = {
@@ -310,6 +328,15 @@ describe("POST /api/seller/onboarding", () => {
     },
   };
 
+  const inertAuditLogRepository: AuditLogRepository = {
+    create: () => {
+      throw new Error("unexpected audit log call");
+    },
+    listByAction: () => {
+      throw new Error("unexpected audit log call");
+    },
+  };
+
   let clock: FakeClock;
   let userRepository: FakeUserRepository;
   let sessionRepository: FakeAuthSessionRepository;
@@ -329,6 +356,7 @@ describe("POST /api/seller/onboarding", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
       clientIpResolver: headerIpResolver,
@@ -667,6 +695,7 @@ describe("POST /api/seller/onboarding", () => {
         sessionRepository,
         sellerRepository,
         catalogRepository: inertCatalogRepository,
+        auditLogRepository: inertAuditLogRepository,
         passwordHasher,
         clock,
         rateLimiter: limiter,

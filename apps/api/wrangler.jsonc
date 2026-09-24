@@ -8,6 +8,16 @@
     // the deployed frontend (https://zelora-web.farqas007.workers.dev).
     "CORS_ORIGIN": "https://zelora-web.farqas007.workers.dev"
 
+    // !!! SECRET — NEVER ADD A REAL VALUE TO `vars` !!!
+    // The first-admin bootstrap secret lives in a Cloudflare secret binding, set
+    // with a secret-put command, not in this file:
+    //
+    //   wrangler secret put ADMIN_BOOTSTRAP_SECRET
+    //
+    // It is consumed by POST /api/admin/bootstrap (see src/services/admin.ts).
+    // Leaving it unset keeps the endpoint disabled (404). Anyone can read this
+    // file in the repository, so any secret value here is compromised directly.
+
     // Local development (wrangler dev) serves over plain HTTP on localhost,
     // where browsers drop Secure cookies and auth silently breaks. Run the
     // Worker locally with an explicit development posture:

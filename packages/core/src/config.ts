@@ -1,4 +1,5 @@
 import { AppError } from "./errors";
+import { ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH } from "@zelora/shared";
 
 export interface AppConfig {
   nodeEnv: "development" | "test" | "production" | "unknown";
@@ -24,6 +25,13 @@ export interface AppConfig {
   rateLimitRegisterIpWindowSeconds: number;
   rateLimitSellerOnboardingIpMax: number;
   rateLimitSellerOnboardingIpWindowSeconds: number;
+  /**
+   * Secret gating the initial-admin bootstrap endpoint, or `null` when the
+   * endpoint is disabled. When set, it must be at least
+   * {@link ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH} characters. Never a default
+   * value and never echoed by any read path.
+   */
+  adminBootstrapSecret: string | null;
 }
 
 const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
@@ -47,6 +55,8 @@ const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
   rateLimitRegisterIpWindowSeconds: 3_600,
   rateLimitSellerOnboardingIpMax: 10,
   rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+  /** Admin bootstrap is opt-in: disabled unless a secret is provided. */
+  adminBootstrapSecret: null,
 };
 
 function parsePort(value: string | undefined): number {
@@ -132,6 +142,27 @@ function parseBoolean(
     `${name} must be "true" or "false", received "${value}".`,
     500,
   );
+}
+
+/**
+ * Parse the admin bootstrap secret. An unset/empty value disables the
+ * bootstrap endpoint (`null`); a set value must reach the minimum strength
+ * so operators cannot opt in with a guessable secret. The value is never
+ * trimmed — the secret is opaque byte material and any whitespace is part of
+ * it.
+ */
+function parseAdminBootstrapSecret(value: string | undefined): string | null {
+  if (value === undefined || value === "") {
+    return null;
+  }
+  if (value.length < ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH) {
+    throw new AppError(
+      "APP_CONFIG_INVALID",
+      `ADMIN_BOOTSTRAP_SECRET must be at least ${ADMIN_BOOTSTRAP_SECRET_MIN_LENGTH} characters when set, received ${value.length} characters.`,
+      500,
+    );
+  }
+  return value;
 }
 
 /**
@@ -229,5 +260,6 @@ export function loadConfig(
       DEFAULT_CONFIG.rateLimitSellerOnboardingIpWindowSeconds,
       "RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS",
     ),
+    adminBootstrapSecret: parseAdminBootstrapSecret(env.ADMIN_BOOTSTRAP_SECRET),
   };
 }

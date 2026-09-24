@@ -19,6 +19,8 @@ export type {
   UserRecord,
   UserRepository,
   CreateUserInput,
+  CreateAdminConflictReason,
+  CreateAdminResult,
 } from "./users/repository";
 export type {
   SellerProfileRecord,
@@ -28,6 +30,10 @@ export type {
   OnboardingConflictReason,
   CreateOnboardingResult,
   SellerActivationResult,
+  PendingSellerUserRecord,
+  PendingSellerRecord,
+  PendingSellerListPage,
+  PendingSellerListQuery,
 } from "./seller/repository";
 export type {
   CatalogCategoryRecord,
@@ -39,3 +45,8 @@ export type {
   CatalogProductDetailRecord,
   CatalogRepository,
 } from "./catalog/repository";
+export type {
+  AuditLogRecord,
+  AuditLogRepository,
+  CreateAuditLogInput,
+} from "./audit/repository";

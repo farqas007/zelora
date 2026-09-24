@@ -12,6 +12,7 @@ import type {
   UserRepository,
   UserRecord,
   CreateUserInput,
+  CreateAdminResult,
 } from "@zelora/db/users";
 import type {
   AuthSessionRepository,
@@ -52,6 +53,10 @@ class FakeUserRepository implements UserRepository {
     this.users.set(id, record);
     this.usersByEmail.set(record.email, record);
     return record;
+  }
+
+  async createAdmin(input: CreateUserInput): Promise<CreateAdminResult> {
+    return { ok: true, user: await this.create(input) };
   }
 
   async findByEmail(email: string): Promise<UserRecord | null> {
@@ -221,8 +226,9 @@ describe("AuthService", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
-    sessionLastUsedThrottleSeconds: 300,
+        sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
   };
 
   let clock: FakeClock;

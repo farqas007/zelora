@@ -5,7 +5,8 @@ import type {
   AuthSessionRepository,
   CreateAuthSessionInput,
 } from "@zelora/db/auth";
-import type { UserRecord, UserRepository } from "@zelora/db/users";
+import type { AuditLogRepository } from "@zelora/db/audit";
+import type { UserRecord, UserRepository, CreateAdminResult, CreateUserInput } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
@@ -55,6 +56,10 @@ class FakeUserRepository implements UserRepository {
     this.users.set(record.id, record);
     this.usersByEmail.set(record.email, record);
     return record;
+  }
+
+  async createAdmin(input: CreateUserInput): Promise<CreateAdminResult> {
+    return { ok: true, user: await this.create(input) };
   }
 
   async findByEmail(email: string): Promise<UserRecord | null> {
@@ -165,6 +170,13 @@ const sellerRepository: SellerRepository = {
   findStoreBySlug: unimplementedSeller,
   createOnboarding: unimplementedSeller,
   activateSeller: unimplementedSeller,
+  listPendingProfiles: unimplementedSeller,
+  rejectSeller: unimplementedSeller,
+};
+
+const inertAuditLogRepository: AuditLogRepository = {
+  create: unimplementedSeller,
+  listByAction: unimplementedSeller,
 };
 
 /**
@@ -198,8 +210,9 @@ describe("auth routes", () => {
     rateLimitRegisterIpWindowSeconds: 3_600,
     rateLimitSellerOnboardingIpMax: 10,
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
-    sessionLastUsedThrottleSeconds: 300,
+        sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
   };
 
   let clock: FakeClock;
@@ -219,6 +232,7 @@ describe("auth routes", () => {
       sessionRepository,
       sellerRepository,
       catalogRepository: inertCatalogRepository,
+      auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
     });
@@ -861,6 +875,7 @@ describe("auth routes", () => {
         sessionRepository,
         sellerRepository,
         catalogRepository: inertCatalogRepository,
+        auditLogRepository: inertAuditLogRepository,
         passwordHasher,
         clock,
         rateLimiter: limiter,

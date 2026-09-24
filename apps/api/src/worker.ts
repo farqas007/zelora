@@ -5,6 +5,7 @@ import { createD1AuthSessionRepository } from "@zelora/db/auth/d1";
 import { createD1UserRepository } from "@zelora/db/users/d1";
 import { createD1SellerRepository } from "@zelora/db/seller/d1";
 import { createD1CatalogRepository } from "@zelora/db/catalog/d1";
+import { createD1AuditLogRepository } from "@zelora/db/audit/d1";
 import { createApp } from "./app";
 import { systemClock } from "./services/clock";
 import { normalizeClientIp, type ClientIpResolver } from "./services/client-ip";
@@ -56,6 +57,12 @@ export interface Env {
   /** Seller onboarding submissions allowed per IP address per window. */
   RATE_LIMIT_SELLER_ONBOARDING_IP_MAX?: string;
   RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS?: string;
+  /**
+   * Secret gating the initial-admin bootstrap endpoint. Deployed via
+   * `wrangler secret put ADMIN_BOOTSTRAP_SECRET` (a secret binding, so it is
+   * never visible in the dashboard vars or `wrangler.jsonc`).
+   */
+  ADMIN_BOOTSTRAP_SECRET?: string;
 }
 
 /**
@@ -80,6 +87,7 @@ const WORKER_CONFIG_KEYS = [
   "RATE_LIMIT_REGISTER_IP_WINDOW_SECONDS",
   "RATE_LIMIT_SELLER_ONBOARDING_IP_MAX",
   "RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS",
+  "ADMIN_BOOTSTRAP_SECRET",
 ] as const;
 
 /**
@@ -175,6 +183,7 @@ function createWorkerApp(env: Env): Hono {
     sessionRepository: createD1AuthSessionRepository(db),
     sellerRepository: createD1SellerRepository(db),
     catalogRepository: createD1CatalogRepository(db),
+    auditLogRepository: createD1AuditLogRepository(db),
     passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
     clock: systemClock,
     clientIpResolver,

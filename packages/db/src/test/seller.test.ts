@@ -281,3 +281,174 @@ describe("seller repository activation", () => {
     expect(user?.role).toBe("customer");
   });
 });
+
+describe("seller repository pending review queue", () => {
+  it("lists pending applications oldest-first with owner and store projection", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalSellerRepository(db);
+
+    const userA = insertUser(db);
+    const userB = insertUser(db);
+    const userC = insertUser(db);
+
+    const third = await repo.createOnboarding(onboardingInput(userC, { profileSlug: "profile-c" }));
+    const first = await repo.createOnboarding(onboardingInput(userA, { profileSlug: "profile-a" }));
+    const second = await repo.createOnboarding(onboardingInput(userB, { profileSlug: "profile-b" }));
+    if (!first.ok || !second.ok || !third.ok) {
+      throw new Error("expected successful onboardings");
+    }
+
+    // `createdAt` defaults to the insert instant, which can tie across quick
+    // inserts; pin explicit timestamps so the oldest-first contract is tested,
+    // not the clock.
+    db.update(schema.sellerProfiles)
+      .set({ createdAt: new Date("2026-01-01T00:00:00.000Z") })
+      .where(eq(schema.sellerProfiles.id, first.sellerProfile.id))
+      .run();
+    db.update(schema.sellerProfiles)
+      .set({ createdAt: new Date("2026-01-02T00:00:00.000Z") })
+      .where(eq(schema.sellerProfiles.id, second.sellerProfile.id))
+      .run();
+    db.update(schema.sellerProfiles)
+      .set({ createdAt: new Date("2026-01-03T00:00:00.000Z") })
+      .where(eq(schema.sellerProfiles.id, third.sellerProfile.id))
+      .run();
+
+    const page = await repo.listPendingProfiles({ limit: 10, cursor: null });
+
+    expect(page.items).toHaveLength(3);
+    expect(page.nextCursor).toBeNull();
+    expect(page.items.map((item) => item.sellerProfile.userId)).toEqual([userA, userB, userC]);
+    expect(page.items.map((item) => item.sellerProfile.status)).toEqual(["pending", "pending", "pending"]);
+
+    // Owner projection carries identity but never credential material.
+    for (const item of page.items) {
+      expect(item.user.id).toBe(item.sellerProfile.userId);
+      expect(item.user.email).toMatch(/seller-user-.*@example\.test/);
+      expect(item.user.name).toBe("Seller User");
+      expect(item.user.status).toBe("active");
+      expect(item.store).toMatchObject({ status: "draft" });
+      expect(item.store.sellerProfileId).toBe(item.sellerProfile.id);
+    }
+  });
+
+  it("paginates with a keyset cursor respecting the page size", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalSellerRepository(db);
+
+    for (let index = 0; index < 3; index += 1) {
+      await repo.createOnboarding(onboardingInput(insertUser(db)));
+    }
+
+    const first = await repo.listPendingProfiles({ limit: 2, cursor: null });
+    expect(first.items).toHaveLength(2);
+    expect(first.nextCursor).not.toBeNull();
+
+    const second = await repo.listPendingProfiles({ limit: 2, cursor: first.nextCursor });
+    expect(second.items).toHaveLength(1);
+    expect(second.nextCursor).toBeNull();
+
+    // The keyset cursor must never overlap with the previous page.
+    const seen = new Set(first.items.map((item) => item.sellerProfile.id));
+    for (const item of second.items) {
+      expect(seen.has(item.sellerProfile.id)).toBe(false);
+    }
+  });
+
+  it("treats a malformed cursor as an empty last page", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalSellerRepository(db);
+
+    await repo.createOnboarding(onboardingInput(insertUser(db)));
+
+    const page = await repo.listPendingProfiles({ limit: 10, cursor: "not-a-cursor" });
+    expect(page.items).toHaveLength(0);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it("treats an unknown-format cursor as an empty page even with pending rows present", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalSellerRepository(db);
+
+    await repo.createOnboarding(onboardingInput(insertUser(db)));
+
+    const page = await repo.listPendingProfiles({
+      limit: 10,
+      cursor: "9999999999999:01955f00-0000-7000-8000-000000000091",
+    });
+    expect(page.items).toHaveLength(0);
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it("excludes profiles that are no longer pending", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalSellerRepository(db);
+
+    const pendingUser = insertUser(db);
+    const rejectedUser = insertUser(db);
+    const activeUser = insertUser(db);
+    await repo.createOnboarding(onboardingInput(pendingUser, { profileSlug: "pending-a" }));
+    await repo.createOnboarding(onboardingInput(rejectedUser, { profileSlug: "rejected-b" }));
+    await repo.createOnboarding(onboardingInput(activeUser, { profileSlug: "active-c" }));
+
+    await repo.rejectSeller(rejectedUser);
+    await repo.activateSeller(activeUser);
+
+    const page = await repo.listPendingProfiles({ limit: 10, cursor: null });
+    expect(page.items.map((item) => item.sellerProfile.userId)).toEqual([pendingUser]);
+  });
+});
+
+describe("seller repository rejection", () => {
+  it("rejects a pending profile but leaves the store draft and the role untouched", async () => {
+    const { db } = createTestDatabase();
+    const userId = insertUser(db);
+    const repo = createLocalSellerRepository(db);
+
+    const onboarding = await repo.createOnboarding(onboardingInput(userId));
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+
+    const rejected = await repo.rejectSeller(userId);
+
+    expect(rejected).not.toBeNull();
+    expect(rejected?.id).toBe(onboarding.sellerProfile.id);
+    expect(rejected?.status).toBe("rejected");
+
+    expect(await repo.findByUserId(userId)).toMatchObject({ status: "rejected" });
+    expect(await repo.findStoreBySlug(onboarding.store.slug)).toMatchObject({ status: "draft" });
+    const user = db.select().from(schema.users).where(eq(schema.users.id, userId)).get();
+    expect(user?.role).toBe("customer");
+  });
+
+  it("returns null for a user with no seller profile", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalSellerRepository(db);
+
+    expect(await repo.rejectSeller(insertUser(db))).toBeNull();
+  });
+
+  it("cannot reject an already-rejected profile (idempotent no-op)", async () => {
+    const { db } = createTestDatabase();
+    const userId = insertUser(db);
+    const repo = createLocalSellerRepository(db);
+
+    await repo.createOnboarding(onboardingInput(userId));
+
+    expect((await repo.rejectSeller(userId))?.status).toBe("rejected");
+    expect(await repo.rejectSeller(userId)).toBeNull();
+  });
+
+  it("cannot reject an activated profile", async () => {
+    const { db } = createTestDatabase();
+    const userId = insertUser(db);
+    const repo = createLocalSellerRepository(db);
+
+    await repo.createOnboarding(onboardingInput(userId));
+    await repo.activateSeller(userId);
+
+    expect(await repo.rejectSeller(userId)).toBeNull();
+    expect(await repo.findByUserId(userId)).toMatchObject({ status: "active" });
+  });
+});

@@ -1,4 +1,4 @@
-import type { SellerProfileStatus, StoreStatus } from "@zelora/shared";
+import type { SellerProfileStatus, StoreStatus, UserStatus } from "@zelora/shared";
 
 /**
  * Async-first seller-account repository port.
@@ -77,6 +77,37 @@ export interface SellerActivationResult {
   store: StoreRecord;
 }
 
+/**
+ * Lean owner projection for a pending seller application. Deliberately omits
+ * credential and role material: admin review needs identity, account state
+ * and contact — never a password hash.
+ */
+export interface PendingSellerUserRecord {
+  id: string;
+  email: string;
+  name: string;
+  status: UserStatus;
+  createdAt: Date;
+}
+
+/** One pending seller application: profile + owner + initial store. */
+export interface PendingSellerRecord {
+  sellerProfile: SellerProfileRecord;
+  user: PendingSellerUserRecord;
+  store: StoreRecord;
+}
+
+export interface PendingSellerListPage {
+  items: PendingSellerRecord[];
+  /** Opaque keyset cursor for the next page, or `null` when this is the last page. */
+  nextCursor: string | null;
+}
+
+export interface PendingSellerListQuery {
+  limit: number;
+  cursor: string | null;
+}
+
 export interface SellerRepository {
   /** Resolve a seller profile by its owning user id, or `null`. */
   findByUserId(userId: string): Promise<SellerProfileRecord | null>;
@@ -97,4 +128,20 @@ export interface SellerRepository {
    * writes become no-ops). Returns `null` when the user has no profile.
    */
   activateSeller(userId: string): Promise<SellerActivationResult | null>;
+  /**
+   * Keyset-paginated review queue of pending applications, oldest submission
+   * first (`(createdAt, id)` ascending) so the ordering is stable as new
+   * applications arrive. A malformed/unknown cursor yields an empty page
+   * (`nextCursor: null`).
+   */
+  listPendingProfiles(opts: PendingSellerListQuery): Promise<PendingSellerListPage>;
+  /**
+   * Conditionally reject a pending application: flips a `pending` profile to
+   * `rejected` (the store stays `draft`; the owner's role is untouched).
+   * Returns the updated profile, or `null` when the user has no pending
+   * profile (none exists, or it is no longer `pending`). The status predicate
+   * is enforced in SQL so a concurrent activation can never be overwritten by
+   * a stale rejection.
+   */
+  rejectSeller(userId: string): Promise<SellerProfileRecord | null>;
 }

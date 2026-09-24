@@ -149,6 +149,122 @@ describe("user repository", () => {
   });
 });
 
+describe("createAdmin (exactly one administrator)", () => {
+  it("creates the first admin and persists the admin role", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalUserRepository(db);
+
+    const result = await repo.createAdmin({
+      email: "root@example.test",
+      name: "Root",
+      passwordHash: "test-password-hash",
+      role: "admin",
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const stored = db.select().from(schema.users).where(eq(schema.users.email, "root@example.test")).get();
+    expect(result.user.role).toBe("admin");
+    expect(stored?.role).toBe("admin");
+  });
+
+  it("rejects a second admin with a DIFFERENT email (ADMIN_ALREADY_EXISTS)", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalUserRepository(db);
+
+    const first = await repo.createAdmin({
+      email: "root@example.test",
+      name: "Root",
+      passwordHash: "test-password-hash",
+      role: "admin",
+    });
+    expect(first.ok).toBe(true);
+
+    const second = await repo.createAdmin({
+      email: "root-2@example.test",
+      name: "Root Two",
+      passwordHash: "test-password-hash",
+      role: "admin",
+    });
+
+    expect(second).toEqual({ ok: false, reason: "ADMIN_ALREADY_EXISTS" });
+    // The invariant held: no second admin row and no user row at all.
+    expect(
+      db.select().from(schema.users).where(eq(schema.users.email, "root-2@example.test")).get(),
+    ).toBeUndefined();
+    const admins = db.select().from(schema.users).where(eq(schema.users.role, "admin")).all();
+    expect(admins).toHaveLength(1);
+  });
+
+  it("rejects a duplicate admin email (EMAIL_IN_USE) deterministically", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalUserRepository(db);
+
+    // A customer registered moments before the bootstrap: only the email
+    // UNIQUE constraint trips (no admin exists yet, so the single-admin
+    // partial index is inactive) and the reason is unambiguous.
+    await repo.create({ email: "root@example.test", name: "Customer First", passwordHash: "h" });
+
+    const second = await repo.createAdmin({
+      email: "root@example.test",
+      name: "Root Duplicate",
+      passwordHash: "test-password-hash",
+      role: "admin",
+    });
+
+    expect(second).toEqual({ ok: false, reason: "EMAIL_IN_USE" });
+    const stored = db.select().from(schema.users).where(eq(schema.users.email, "root@example.test")).get();
+    expect(stored?.role).toBe("customer");
+  });
+
+  it("surfaces a same-email bootstrap race as a clean failure, never a second user", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalUserRepository(db);
+
+    await repo.createAdmin({
+      email: "root@example.test",
+      name: "Root",
+      passwordHash: "test-password-hash",
+      role: "admin",
+    });
+
+    // Both UNIQUE constraints trip together in a same-email race; SQLite
+    // reports the first it hits, which may be either. The recipient (the
+    // admin service) re-resolves by email, so the exact reason is irrelevant —
+    // what matters is that no duplicate user row is ever created.
+    const racer = await repo.createAdmin({
+      email: "root@example.test",
+      name: "Root Duplicate",
+      passwordHash: "test-password-hash",
+      role: "admin",
+    });
+
+    expect(racer.ok).toBe(false);
+    const matches = db.select().from(schema.users).where(eq(schema.users.email, "root@example.test")).all();
+    expect(matches).toHaveLength(1);
+  });
+
+  it("allows an admin alongside many customers and sellers", async () => {
+    const { db } = createTestDatabase();
+    const repo = createLocalUserRepository(db);
+
+    await repo.createAdmin({
+      email: "root@example.test",
+      name: "Root",
+      passwordHash: "test-password-hash",
+      role: "admin",
+    });
+    await repo.create({ email: "c1@example.test", name: "C1", passwordHash: "h" });
+    await repo.create({ email: "c2@example.test", name: "C2", passwordHash: "h" });
+    await repo.create({ email: "s1@example.test", name: "S1", passwordHash: "h", role: "seller" });
+
+    expect(db.select().from(schema.users).all()).toHaveLength(4);
+    expect(
+      db.select().from(schema.users).where(eq(schema.users.role, "admin")).all(),
+    ).toHaveLength(1);
+  });
+});
+
 describe("user schema constraints", () => {
   it("enforces that users without a password_hash may still be looked up", async () => {
     const { db, sqlite } = createTestDatabase();
@@ -196,6 +312,29 @@ describe("user schema constraints", () => {
           status: "banned" as unknown as UserStatus,
         }).run(),
       /CHECK constraint failed: users_status_check/,
+    );
+  });
+
+  it("enforces the exactly-one-admin invariant at the database level", () => {
+    const { db } = createTestDatabase();
+    db.insert(schema.users).values({
+      email: "root@example.test",
+      name: "Root",
+      passwordHash: "test-password-hash",
+      role: "admin",
+    }).run();
+
+    // The second admin row — any path, not just bootstrap — hits the partial
+    // unique index on `role`, so a raw race at the driver layer still holds.
+    expectConstraintError(
+      () =>
+        db.insert(schema.users).values({
+          email: "root-2@example.test",
+          name: "Root Two",
+          passwordHash: "test-password-hash",
+          role: "admin",
+        }).run(),
+      /UNIQUE constraint failed: users\.role/,
     );
   });
 });

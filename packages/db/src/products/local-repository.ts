@@ -1,7 +1,15 @@
-import { and, eq, gte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, or } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
+import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
 import { inventory, products, productVariants } from "../schema/catalog";
-import type { ProductRecord, ProductRepository } from "./repository";
+import type {
+  ProductDetailRecord,
+  ProductListPage,
+  ProductListQuery,
+  ProductRecord,
+  ProductRepository,
+  ProductVariantDetailRecord,
+} from "./repository";
 
 /**
  * Local (better-sqlite3) implementation of the product repository.
@@ -17,6 +25,14 @@ import type { ProductRecord, ProductRepository } from "./repository";
  */
 export function createLocalProductRepository(db: LocalDatabase): ProductRepository {
   return {
+    async listByStore(storeId, query) {
+      return loadProductPage(db, storeId, query);
+    },
+
+    async findByStoreAndId(storeId, productId) {
+      return findProductDetail(db, storeId, productId);
+    },
+
     async findByStoreAndSlug(storeId, slug) {
       return (
         db
@@ -155,6 +171,103 @@ export function createLocalProductRepository(db: LocalDatabase): ProductReposito
       return { ok: true, product: updated };
     },
   };
+}
+
+function loadProductPage(
+  db: LocalDatabase,
+  storeId: string,
+  query: ProductListQuery,
+): ProductListPage {
+  const start = query.cursor === null ? null : decodeCatalogCursor(query.cursor);
+  if (query.cursor !== null && start === null) {
+    return { items: [], nextCursor: null };
+  }
+
+  const rows = db
+    .select()
+    .from(products)
+    .where(
+      and(
+        eq(products.storeId, storeId),
+        start === null
+          ? undefined
+          : or(
+              lt(products.createdAt, start.createdAt),
+              and(eq(products.createdAt, start.createdAt), lt(products.id, start.id)),
+            ),
+      ),
+    )
+    .orderBy(desc(products.createdAt), desc(products.id))
+    .limit(query.limit + 1)
+    .all();
+  const pageRows = rows.slice(0, query.limit);
+  const last = pageRows[pageRows.length - 1];
+
+  return {
+    items: pageRows,
+    nextCursor:
+      rows.length > query.limit && last !== undefined
+        ? encodeCatalogCursor({ createdAt: last.createdAt, id: last.id })
+        : null,
+  };
+}
+
+function findProductDetail(
+  db: LocalDatabase,
+  storeId: string,
+  productId: string,
+): ProductDetailRecord | null {
+  const product = findOwnedProduct(db, productId, storeId);
+  if (product === null) {
+    return null;
+  }
+
+  const rows = db
+    .select({
+      id: productVariants.id,
+      productId: productVariants.productId,
+      sku: productVariants.sku,
+      name: productVariants.name,
+      priceAmountCents: productVariants.priceAmountCents,
+      compareAtAmountCents: productVariants.compareAtAmountCents,
+      currency: productVariants.currency,
+      status: productVariants.status,
+      createdAt: productVariants.createdAt,
+      updatedAt: productVariants.updatedAt,
+      inventoryVariantId: inventory.variantId,
+      inventoryQuantity: inventory.quantity,
+      inventoryUpdatedAt: inventory.updatedAt,
+    })
+    .from(productVariants)
+    .leftJoin(inventory, eq(inventory.variantId, productVariants.id))
+    .where(eq(productVariants.productId, productId))
+    .orderBy(asc(productVariants.createdAt), asc(productVariants.id))
+    .all();
+
+  const variants: ProductVariantDetailRecord[] = rows.map((row) => ({
+    id: row.id,
+    productId: row.productId,
+    sku: row.sku,
+    name: row.name,
+    priceAmountCents: row.priceAmountCents,
+    compareAtAmountCents: row.compareAtAmountCents,
+    currency: row.currency,
+    status: row.status,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    inventory:
+      row.inventoryVariantId === null ||
+      row.inventoryQuantity === null ||
+      row.inventoryUpdatedAt === null
+        ? null
+        : {
+            variantId: row.inventoryVariantId,
+            quantity: row.inventoryQuantity,
+            updatedAt: row.inventoryUpdatedAt,
+          },
+  }));
+
+  return { ...product, variants };
 }
 
 /**

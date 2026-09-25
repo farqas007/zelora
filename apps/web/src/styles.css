@@ -499,6 +499,126 @@ a {
   align-items: flex-start;
 }
 
+.section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+
+.section-heading h2 {
+  margin: 0;
+}
+
+.section-heading p {
+  margin: 0.35rem 0 0;
+}
+
+.seller-products,
+.seller-product-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.seller-products {
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  box-shadow: var(--shadow-sm);
+}
+
+.seller-product-list,
+.seller-variant-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.seller-product-row,
+.seller-variant-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.9rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+}
+
+.seller-product-meta,
+.seller-variant-meta,
+.seller-variant-data {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem 0.75rem;
+}
+
+.seller-product-meta,
+.seller-variant-meta {
+  min-width: 0;
+}
+
+.seller-variant-data {
+  justify-content: flex-end;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.seller-product-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.seller-product-detail-header h2 {
+  margin: 0;
+}
+
+.seller-product-detail-header p {
+  margin: 0.35rem 0 0;
+}
+
+.seller-product-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.seller-product-facts > div {
+  padding: 0.85rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
+.seller-product-facts dt {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.seller-product-facts dd {
+  margin: 0.3rem 0 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.pagination-actions {
+  display: flex;
+  justify-content: center;
+}
+
 /* ============================================================================
    Marketplace landing page
    ========================================================================== */
@@ -1924,6 +2044,22 @@ a.category-chip {
   .variant-actions {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .seller-product-row,
+  .seller-variant-row,
+  .seller-product-detail-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .seller-variant-data {
+    justify-content: flex-start;
+    white-space: normal;
+  }
+
+  .seller-product-facts {
+    grid-template-columns: 1fr;
   }
 }
 

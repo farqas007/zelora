@@ -777,6 +777,104 @@ describe("D1 product repository (variant lifecycle, inventory and publish)", () 
       reason: "PRODUCT_NOT_FOUND",
     });
   });
+
+  it("paginates only the owner's D1 products with the same keyset cursor", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 8);
+    const otherStoreId = await seedSeller(db, 9);
+    await db.insert(schema.products).values([
+      {
+        storeId,
+        name: "Draft",
+        slug: "d1-list-draft",
+        status: "draft",
+        createdAt: new Date("2026-04-01T00:00:00.000Z"),
+      },
+      {
+        storeId,
+        name: "Archived",
+        slug: "d1-list-archived",
+        status: "archived",
+        createdAt: new Date("2026-04-02T00:00:00.000Z"),
+      },
+      {
+        storeId,
+        name: "Active",
+        slug: "d1-list-active",
+        status: "active",
+        createdAt: new Date("2026-04-03T00:00:00.000Z"),
+      },
+      {
+        storeId: otherStoreId,
+        name: "Other",
+        slug: "d1-list-other",
+        status: "active",
+        createdAt: new Date("2026-04-04T00:00:00.000Z"),
+      },
+    ]);
+
+    const first = await repo.listByStore(storeId, { limit: 2, cursor: null });
+    expect(first.items.map((product) => product.slug)).toEqual([
+      "d1-list-active",
+      "d1-list-archived",
+    ]);
+    expect(first.nextCursor).not.toBeNull();
+
+    const second = await repo.listByStore(storeId, { limit: 2, cursor: first.nextCursor });
+    expect(second.items.map((product) => product.slug)).toEqual(["d1-list-draft"]);
+    expect(second.nextCursor).toBeNull();
+  });
+
+  it("returns D1 owner detail with inventory and hides another store's product", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 10);
+    const otherStoreId = await seedSeller(db, 11);
+    const product = await db
+      .insert(schema.products)
+      .values({
+        storeId,
+        name: "D1 Detail",
+        slug: "d1-detail",
+        description: "Owned detail",
+      })
+      .returning()
+      .get();
+    const variants = await db
+      .insert(schema.productVariants)
+      .values([
+        {
+          productId: product.id,
+          name: "No Stock",
+          priceAmountCents: 1000,
+          currency: "USD",
+          status: "active",
+          createdAt: new Date("2026-05-01T00:00:00.000Z"),
+        },
+        {
+          productId: product.id,
+          name: "In Stock",
+          priceAmountCents: 2000,
+          currency: "USD",
+          status: "inactive",
+          createdAt: new Date("2026-05-02T00:00:00.000Z"),
+        },
+      ])
+      .returning();
+    await db.insert(schema.inventory).values({
+      variantId: variants[1]!.id,
+      quantity: 6,
+      updatedAt: new Date("2026-05-02T01:00:00.000Z"),
+    });
+
+    const detail = await repo.findByStoreAndId(storeId, product.id);
+    expect(detail?.description).toBe("Owned detail");
+    expect(detail?.variants.map((variant) => variant.name)).toEqual(["No Stock", "In Stock"]);
+    expect(detail?.variants[0]?.inventory).toBeNull();
+    expect(detail?.variants[1]?.inventory).toMatchObject({ quantity: 6 });
+    expect(await repo.findByStoreAndId(otherStoreId, product.id)).toBeNull();
+  });
 });
 
 describe("D1 cart repository (unique conflicts + cascade)", () => {

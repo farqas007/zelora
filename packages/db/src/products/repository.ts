@@ -64,6 +64,24 @@ export interface InventoryRecord {
   updatedAt: Date;
 }
 
+export interface ProductListQuery {
+  limit: number;
+  cursor: string | null;
+}
+
+export interface ProductListPage {
+  items: ProductRecord[];
+  nextCursor: string | null;
+}
+
+export interface ProductVariantDetailRecord extends VariantRecord {
+  inventory: InventoryRecord | null;
+}
+
+export interface ProductDetailRecord extends ProductRecord {
+  variants: ProductVariantDetailRecord[];
+}
+
 /**
  * Everything required to create a product. Ownership (`storeId`) is derived by
  * the service from the authenticated seller; `status` is intentionally absent
@@ -127,6 +145,8 @@ export type PublishProductResult =
   | { ok: false; reason: PublishProductConflictReason };
 
 export interface ProductRepository {
+  listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage>;
+  findByStoreAndId(storeId: string, productId: string): Promise<ProductDetailRecord | null>;
   /**
    * Pre-check used by the service: resolve one product within a single store
    * by slug, or `null` when the store has no product with that slug. The real

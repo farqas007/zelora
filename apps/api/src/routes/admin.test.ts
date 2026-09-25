@@ -387,6 +387,12 @@ const inertCartRepository: CartRepository = {
  * tests. Any accidental invocation would reveal a wiring bug loudly.
  */
 const inertProductRepository: ProductRepository = {
+  listByStore: () => {
+    throw new Error("unexpected product call");
+  },
+  findByStoreAndId: () => {
+    throw new Error("unexpected product call");
+  },
   findByStoreAndSlug: () => {
     throw new Error("unexpected product call");
   },

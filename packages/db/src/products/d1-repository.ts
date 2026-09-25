@@ -1,12 +1,17 @@
-import { and, eq, gte } from "drizzle-orm";
+import { and, asc, desc, eq, gte, lt, or } from "drizzle-orm";
 import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
+import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
 import { inventory, products, productVariants } from "../schema/catalog";
 import type {
   CreateProductConflictReason,
   CreateVariantConflictReason,
+  ProductDetailRecord,
+  ProductListPage,
+  ProductListQuery,
   ProductRecord,
   ProductRepository,
+  ProductVariantDetailRecord,
 } from "./repository";
 
 /**
@@ -25,6 +30,14 @@ export function createD1ProductRepository(
   db: DrizzleD1Database<DatabaseSchema>,
 ): ProductRepository {
   return {
+    async listByStore(storeId, query) {
+      return loadProductPage(db, storeId, query);
+    },
+
+    async findByStoreAndId(storeId, productId) {
+      return findProductDetail(db, storeId, productId);
+    },
+
     async findByStoreAndSlug(storeId, slug) {
       const row = await db
         .select()
@@ -163,6 +176,101 @@ export function createD1ProductRepository(
       return { ok: true, product: updated };
     },
   };
+}
+
+async function loadProductPage(
+  db: DrizzleD1Database<DatabaseSchema>,
+  storeId: string,
+  query: ProductListQuery,
+): Promise<ProductListPage> {
+  const start = query.cursor === null ? null : decodeCatalogCursor(query.cursor);
+  if (query.cursor !== null && start === null) {
+    return { items: [], nextCursor: null };
+  }
+
+  const rows = await db
+    .select()
+    .from(products)
+    .where(
+      and(
+        eq(products.storeId, storeId),
+        start === null
+          ? undefined
+          : or(
+              lt(products.createdAt, start.createdAt),
+              and(eq(products.createdAt, start.createdAt), lt(products.id, start.id)),
+            ),
+      ),
+    )
+    .orderBy(desc(products.createdAt), desc(products.id))
+    .limit(query.limit + 1);
+  const pageRows = rows.slice(0, query.limit);
+  const last = pageRows[pageRows.length - 1];
+
+  return {
+    items: pageRows,
+    nextCursor:
+      rows.length > query.limit && last !== undefined
+        ? encodeCatalogCursor({ createdAt: last.createdAt, id: last.id })
+        : null,
+  };
+}
+
+async function findProductDetail(
+  db: DrizzleD1Database<DatabaseSchema>,
+  storeId: string,
+  productId: string,
+): Promise<ProductDetailRecord | null> {
+  const product = await findOwnedProduct(db, productId, storeId);
+  if (product === null) {
+    return null;
+  }
+
+  const rows = await db
+    .select({
+      id: productVariants.id,
+      productId: productVariants.productId,
+      sku: productVariants.sku,
+      name: productVariants.name,
+      priceAmountCents: productVariants.priceAmountCents,
+      compareAtAmountCents: productVariants.compareAtAmountCents,
+      currency: productVariants.currency,
+      status: productVariants.status,
+      createdAt: productVariants.createdAt,
+      updatedAt: productVariants.updatedAt,
+      inventoryVariantId: inventory.variantId,
+      inventoryQuantity: inventory.quantity,
+      inventoryUpdatedAt: inventory.updatedAt,
+    })
+    .from(productVariants)
+    .leftJoin(inventory, eq(inventory.variantId, productVariants.id))
+    .where(eq(productVariants.productId, productId))
+    .orderBy(asc(productVariants.createdAt), asc(productVariants.id));
+
+  const variants: ProductVariantDetailRecord[] = rows.map((row) => ({
+    id: row.id,
+    productId: row.productId,
+    sku: row.sku,
+    name: row.name,
+    priceAmountCents: row.priceAmountCents,
+    compareAtAmountCents: row.compareAtAmountCents,
+    currency: row.currency,
+    status: row.status,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    inventory:
+      row.inventoryVariantId === null ||
+      row.inventoryQuantity === null ||
+      row.inventoryUpdatedAt === null
+        ? null
+        : {
+            variantId: row.inventoryVariantId,
+            quantity: row.inventoryQuantity,
+            updatedAt: row.inventoryUpdatedAt,
+          },
+  }));
+
+  return { ...product, variants };
 }
 
 /**

@@ -24,6 +24,12 @@ import type { ApiEnvelope } from "./envelope";
 export const PRODUCT_STATUSES = ["draft", "active", "archived"] as const;
 export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
 
+export const SELLER_PRODUCT_PAGE_LIMITS = {
+  min: 1,
+  max: 50,
+  default: 20,
+} as const;
+
 /**
  * Validation limits applied by the API before any product mutation happens.
  * Shared so the web app can mirror them (e.g. inline hints) without
@@ -68,6 +74,27 @@ export interface ProductDto {
   /** ISO 8601 timestamp. */
   createdAt: string;
 }
+
+export interface SellerProductSummaryDto {
+  id: string;
+  slug: string;
+  name: string;
+  categoryId: string | null;
+  status: ProductStatus;
+  createdAt: string;
+}
+
+export interface SellerListProductsRequest {
+  limit?: number;
+  cursor?: string;
+}
+
+export interface SellerProductListData {
+  items: SellerProductSummaryDto[];
+  nextCursor: string | null;
+}
+
+export type ListSellerProductsEnvelope = ApiEnvelope<SellerProductListData>;
 
 /**
  * Error codes the seller product endpoints can produce, as stable string
@@ -177,6 +204,17 @@ export interface InventoryDto {
 
 /** Success payload for `POST /api/seller/products/:id/variants/:variantId/inventory`. */
 export type SetInventoryEnvelope = ApiEnvelope<InventoryDto>;
+
+export interface SellerProductVariantDetailDto extends ProductVariantDto {
+  inventory: InventoryDto | null;
+}
+
+export interface SellerProductDetailDto extends SellerProductSummaryDto {
+  description: string | null;
+  variants: SellerProductVariantDetailDto[];
+}
+
+export type GetSellerProductEnvelope = ApiEnvelope<SellerProductDetailDto>;
 
 /** Success payload for `POST /api/seller/products/:id/publish`. */
 export type PublishProductEnvelope = ApiEnvelope<ProductDto>;

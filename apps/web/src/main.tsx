@@ -13,6 +13,7 @@ import { ProductDetailPage } from "./pages/ProductDetail";
 import { RegisterPage } from "./pages/Register";
 import { SellerOnboardingPage } from "./pages/SellerOnboarding";
 import { SellerProductCreatePage } from "./pages/SellerProductCreate";
+import { SellerProductDetailPage } from "./pages/SellerProductDetail";
 import { StorefrontPage } from "./pages/Storefront";
 import "./styles.css";
 
@@ -65,6 +66,14 @@ createRoot(rootElement).render(
               element={
                 <RequireAuth>
                   <SellerProductCreatePage />
+                </RequireAuth>
+              }
+            />
+            <Route
+              path="/seller/products/:productId"
+              element={
+                <RequireAuth>
+                  <SellerProductDetailPage />
                 </RequireAuth>
               }
             />

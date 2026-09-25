@@ -117,6 +117,8 @@ describe("storefront routes", () => {
         rejectSeller: inert,
       },
       productRepository: {
+        listByStore: inert,
+        findByStoreAndId: inert,
         findByStoreAndSlug: inert,
         createProduct: inert,
         createVariant: inert,

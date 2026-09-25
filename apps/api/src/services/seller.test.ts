@@ -13,6 +13,7 @@ import {
   AUTH_ERROR_CODES,
   DEFAULT_PRODUCT_CURRENCY,
   SELLER_PRODUCT_ERROR_CODES,
+  SELLER_PRODUCT_PAGE_LIMITS,
 } from "@zelora/shared";
 import type {
   CreateVariantInput,
@@ -20,8 +21,12 @@ import type {
   InventoryRecord,
   CreateProductInput,
   CreateProductResult,
+  ProductDetailRecord,
+  ProductListPage,
+  ProductListQuery,
   ProductRecord,
   ProductRepository,
+  ProductVariantDetailRecord,
   PublishProductResult,
   SetInventoryInput,
   SetInventoryResult,
@@ -172,6 +177,42 @@ class FakeProductRepository implements ProductRepository {
 
   createVariantCalls: CreateVariantInput[] = [];
   setInventoryCalls: SetInventoryInput[] = [];
+  listCalls: Array<{ storeId: string; query: ProductListQuery }> = [];
+
+  async listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage> {
+    this.listCalls.push({ storeId, query });
+    const owned = Array.from(this.products.values())
+      .filter((product) => product.storeId === storeId)
+      .sort(
+        (left, right) =>
+          right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id),
+      );
+    const items = owned.slice(0, query.limit);
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor:
+        owned.length > query.limit && last !== undefined ? `next:${last.id}` : null,
+    };
+  }
+
+  async findByStoreAndId(storeId: string, productId: string): Promise<ProductDetailRecord | null> {
+    const product = this.products.get(productId);
+    if (product === undefined || product.storeId !== storeId) {
+      return null;
+    }
+    const variants: ProductVariantDetailRecord[] = Array.from(this.variants.values())
+      .filter((variant) => variant.productId === productId)
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      )
+      .map((variant) => ({
+        ...variant,
+        inventory: this.inventory.get(variant.id) ?? null,
+      }));
+    return { ...product, variants };
+  }
 
   async findByStoreAndSlug(storeId: string, slug: string): Promise<ProductRecord | null> {
     return (
@@ -284,6 +325,18 @@ class FakeProductRepository implements ProductRepository {
     this.products.set(productId, updated);
     return { ok: true, product: updated };
   }
+
+  seedProduct(product: ProductRecord): void {
+    this.products.set(product.id, product);
+  }
+
+  seedVariant(variant: VariantRecord): void {
+    this.variants.set(variant.id, variant);
+  }
+
+  seedInventory(inventory: InventoryRecord): void {
+    this.inventory.set(inventory.variantId, inventory);
+  }
 }
 
 /** Minimal catalog-repository fake: only the active-category list is used. */
@@ -379,6 +432,28 @@ describe("SellerService", () => {
       catalogRepository: catalog,
     });
   });
+
+  function seedApprovedSellerForProductReads(): void {
+    repository.seedProfile({
+      id: "sp-reads",
+      userId: "user-authenticated",
+      slug: "approved-shop",
+      displayName: "Approved Seller",
+      status: "active",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    repository.seedStore({
+      id: "st-reads",
+      sellerProfileId: "sp-reads",
+      name: "Approved Shop",
+      slug: "approved-shop",
+      description: null,
+      status: "active",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+  }
 
   describe("onboard", () => {
     it("valid onboarding returns a pending profile and a draft store", async () => {
@@ -753,6 +828,180 @@ describe("SellerService", () => {
         AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
         409,
       );
+    });
+  });
+
+  describe("listProducts", () => {
+    it("uses the approved store, forwards bounded pagination, and returns safe summaries", async () => {
+      seedApprovedSellerForProductReads();
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      products.seedProduct({
+        id: fakeId(10),
+        storeId: "st-reads",
+        slug: "newest-owned",
+        name: "Newest Owned",
+        description: "Must not be listed",
+        categoryId: "category-1",
+        status: "active",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      products.seedProduct({
+        id: fakeId(11),
+        storeId: "st-reads",
+        slug: "older-owned",
+        name: "Older Owned",
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt: new Date("2026-05-01T00:00:00.000Z"),
+        updatedAt: createdAt,
+      });
+      products.seedProduct({
+        id: fakeId(12),
+        storeId: "st-other",
+        slug: "other-owned",
+        name: "Other Owned",
+        description: null,
+        categoryId: null,
+        status: "archived",
+        createdAt: new Date("2026-07-01T00:00:00.000Z"),
+        updatedAt: createdAt,
+      });
+
+      const result = await service.listProducts(makeUser({ role: "seller" }), {
+        limit: "1",
+        cursor: "opaque-cursor",
+      });
+
+      expect(products.listCalls).toEqual([
+        { storeId: "st-reads", query: { limit: 1, cursor: "opaque-cursor" } },
+      ]);
+      expect(result).toEqual({
+        items: [
+          {
+            id: fakeId(10),
+            slug: "newest-owned",
+            name: "Newest Owned",
+            categoryId: "category-1",
+            status: "active",
+            createdAt: createdAt.toISOString(),
+          },
+        ],
+        nextCursor: `next:${fakeId(10)}`,
+      });
+      expect(result.items[0]).not.toHaveProperty("storeId");
+      expect(result.items[0]).not.toHaveProperty("description");
+      expect(result.items[0]).not.toHaveProperty("updatedAt");
+    });
+
+    it("uses the shared default page size when limit is omitted", async () => {
+      seedApprovedSellerForProductReads();
+
+      await service.listProducts(makeUser({ role: "seller" }), undefined);
+
+      expect(products.listCalls[0]?.query).toEqual({
+        limit: SELLER_PRODUCT_PAGE_LIMITS.default,
+        cursor: null,
+      });
+    });
+
+    it.each(["0", "51", "1.5", "abc"])(
+      "rejects invalid limit %s before querying products",
+      async (limit) => {
+        seedApprovedSellerForProductReads();
+
+        await expect(
+          service.listProducts(makeUser({ role: "seller" }), { limit }),
+        ).rejects.toMatchObject({ code: "VALIDATION_ERROR", statusCode: 422 });
+        expect(products.listCalls).toHaveLength(0);
+      },
+    );
+  });
+
+  describe("getProduct", () => {
+    it("returns owned detail with variants and nullable inventory without ownership fields", async () => {
+      seedApprovedSellerForProductReads();
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      products.seedProduct({
+        id: fakeId(20),
+        storeId: "st-reads",
+        slug: "owned-detail",
+        name: "Owned Detail",
+        description: "Complete product",
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      products.seedVariant({
+        id: fakeId(21),
+        productId: fakeId(20),
+        sku: null,
+        name: "No Inventory",
+        priceAmountCents: 1200,
+        compareAtAmountCents: null,
+        currency: "USD",
+        status: "active",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      const stockedVariant: VariantRecord = {
+        id: fakeId(22),
+        productId: fakeId(20),
+        sku: "STOCKED",
+        name: "Stocked",
+        priceAmountCents: 1500,
+        compareAtAmountCents: 1800,
+        currency: "USD",
+        status: "inactive",
+        createdAt: new Date("2026-06-02T00:00:00.000Z"),
+        updatedAt: createdAt,
+      };
+      products.seedVariant(stockedVariant);
+      products.seedInventory({
+        variantId: stockedVariant.id,
+        quantity: 7,
+        updatedAt: createdAt,
+      });
+
+      const result = await service.getProduct(makeUser({ role: "seller" }), fakeId(20));
+
+      expect(result).toMatchObject({
+        id: fakeId(20),
+        name: "Owned Detail",
+        description: "Complete product",
+        variants: [
+          { id: fakeId(21), name: "No Inventory", inventory: null },
+          { id: fakeId(22), name: "Stocked", inventory: { quantity: 7 } },
+        ],
+      });
+      expect(result).not.toHaveProperty("storeId");
+      expect(result).not.toHaveProperty("updatedAt");
+    });
+
+    it("returns the same 404 for malformed, unknown, and cross-store product ids", async () => {
+      seedApprovedSellerForProductReads();
+      products.seedProduct({
+        id: fakeId(30),
+        storeId: "st-other",
+        slug: "other-detail",
+        name: "Other Detail",
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const user = makeUser({ role: "seller" });
+
+      for (const productId of ["not-an-id", fakeId(31), fakeId(30)]) {
+        await expectSellerError(
+          () => service.getProduct(user, productId),
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          404,
+        );
+      }
     });
   });
 

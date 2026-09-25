@@ -326,6 +326,8 @@ describe("cart routes", () => {
       } satisfies SellerRepository,
       catalogRepository,
       productRepository: {
+        listByStore: inert,
+        findByStoreAndId: inert,
         findByStoreAndSlug: inert,
         createProduct: inert,
         createVariant: inert,

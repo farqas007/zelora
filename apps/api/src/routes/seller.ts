@@ -6,6 +6,8 @@ import type { UserRepository } from "@zelora/db/users";
 import type {
   CreateProductEnvelope,
   CreateProductVariantEnvelope,
+  GetSellerProductEnvelope,
+  ListSellerProductsEnvelope,
   PublishProductEnvelope,
   SellerOnboardingEnvelope,
   SetInventoryEnvelope,
@@ -153,6 +155,21 @@ export function createSellerRoutes(dependencies: SellerRoutesDependencies): Hono
     const body = await readJsonBody(c);
     const data = await sellerService.onboard(auth.user, body);
     return c.json<SellerOnboardingEnvelope>({ ok: true, data }, 201);
+  });
+
+  app.get("/products", requireAuth, requireSellerRole(), async (c) => {
+    const auth = c.get("auth");
+    const data = await sellerService.listProducts(auth.user, {
+      limit: c.req.query("limit"),
+      cursor: c.req.query("cursor"),
+    });
+    return c.json<ListSellerProductsEnvelope>({ ok: true, data }, 200);
+  });
+
+  app.get("/products/:id", requireAuth, requireSellerRole(), async (c) => {
+    const auth = c.get("auth");
+    const data = await sellerService.getProduct(auth.user, c.req.param("id"));
+    return c.json<GetSellerProductEnvelope>({ ok: true, data }, 200);
   });
 
   app.post(

@@ -15,8 +15,12 @@ import type {
   InventoryRecord,
   CreateVariantInput,
   CreateVariantResult,
+  ProductDetailRecord,
+  ProductListPage,
+  ProductListQuery,
   ProductRepository,
   ProductRecord,
+  ProductVariantDetailRecord,
   CreateProductInput,
   PublishProductResult,
   SetInventoryInput,
@@ -314,8 +318,41 @@ class FakeProductRepository implements ProductRepository {
   createCalls: CreateProductInput[] = [];
   createVariantCalls: CreateVariantInput[] = [];
   setInventoryCalls: SetInventoryInput[] = [];
+  listCalls: Array<{ storeId: string; query: ProductListQuery }> = [];
   forceCreateConflict: boolean = false;
   forceSkuConflict: boolean = false;
+
+  async listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage> {
+    this.listCalls.push({ storeId, query });
+    const owned = Array.from(this.products.values())
+      .filter((product) => product.storeId === storeId)
+      .sort(
+        (left, right) =>
+          right.createdAt.getTime() - left.createdAt.getTime() || right.id.localeCompare(left.id),
+      );
+    const items = owned.slice(0, query.limit);
+    const last = items[items.length - 1];
+    return {
+      items,
+      nextCursor:
+        owned.length > query.limit && last !== undefined ? `next:${last.id}` : null,
+    };
+  }
+
+  async findByStoreAndId(storeId: string, productId: string): Promise<ProductDetailRecord | null> {
+    const product = this.products.get(productId);
+    if (product === undefined || product.storeId !== storeId) {
+      return null;
+    }
+    const variants: ProductVariantDetailRecord[] = Array.from(this.variants.values())
+      .filter((variant) => variant.productId === productId)
+      .sort(
+        (left, right) =>
+          left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
+      )
+      .map((variant) => ({ ...variant, inventory: this.inventory.get(variant.id) ?? null }));
+    return { ...product, variants };
+  }
 
   async findByStoreAndSlug(storeId: string, slug: string): Promise<ProductRecord | null> {
     return (
@@ -430,6 +467,18 @@ class FakeProductRepository implements ProductRepository {
     return { ok: true, product: updated };
   }
 
+  seedProduct(product: ProductRecord): void {
+    this.products.set(product.id, product);
+  }
+
+  seedVariant(variant: VariantRecord): void {
+    this.variants.set(variant.id, variant);
+  }
+
+  seedInventory(inventory: InventoryRecord): void {
+    this.inventory.set(inventory.variantId, inventory);
+  }
+
   clear(): void {
     this.products.clear();
     this.variants.clear();
@@ -438,6 +487,7 @@ class FakeProductRepository implements ProductRepository {
     this.createCalls = [];
     this.createVariantCalls = [];
     this.setInventoryCalls = [];
+    this.listCalls = [];
     this.forceCreateConflict = false;
     this.forceSkuConflict = false;
   }
@@ -559,6 +609,12 @@ describe("POST /api/seller/onboarding", () => {
   };
 
   const inertProductRepository: ProductRepository = {
+    listByStore: () => {
+      throw new Error("unexpected product call");
+    },
+    findByStoreAndId: () => {
+      throw new Error("unexpected product call");
+    },
     findByStoreAndSlug: () => {
       throw new Error("unexpected product call");
     },
@@ -1021,7 +1077,7 @@ describe("POST /api/seller/onboarding", () => {
   });
 });
 
-describe("POST /api/seller/products", () => {
+describe("/api/seller/products", () => {
   const baseConfig: AppConfig = {
     nodeEnv: "test",
     host: "127.0.0.1",
@@ -1134,6 +1190,17 @@ describe("POST /api/seller/products", () => {
     });
   }
 
+  function get(
+    path: string,
+    cookie?: string,
+    api: ReturnType<typeof createApp> = app,
+  ) {
+    return api.request(path, {
+      method: "GET",
+      headers: cookie === undefined ? {} : { Cookie: cookie },
+    });
+  }
+
   function extractSessionCookie(response: Response): string {
     const setCookie = response.headers.get("set-cookie");
     if (setCookie === null) {
@@ -1209,6 +1276,217 @@ describe("POST /api/seller/products", () => {
     description: "A lovely film camera.",
     categoryId: "01955f00-0000-7000-8000-000000000001",
   };
+
+  it("GET list rejects unauthenticated callers with 401", async () => {
+    await expectCreateFailure(
+      await get("/api/seller/products"),
+      "SESSION_EXPIRED",
+      401,
+    );
+    expect(productRepository.listCalls).toHaveLength(0);
+  });
+
+  it("GET list rejects authenticated customers with 403 FORBIDDEN", async () => {
+    const session = await registerUser();
+
+    await expectCreateFailure(
+      await get("/api/seller/products", session.cookie),
+      "FORBIDDEN",
+      403,
+    );
+    expect(productRepository.listCalls).toHaveLength(0);
+  });
+
+  it("GET list rejects a pending seller with SELLER_NOT_APPROVED", async () => {
+    const session = await registerUser();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, role: "seller" });
+    const now = new Date();
+    sellerRepository.seedProfile({
+      id: "sp-pending-list",
+      userId: session.userId,
+      slug: "pending-list",
+      displayName: "Pending Seller",
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: "st-pending-list",
+      sellerProfileId: "sp-pending-list",
+      name: "Pending Store",
+      slug: "pending-list",
+      description: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    await expectCreateFailure(
+      await get("/api/seller/products", session.cookie),
+      "SELLER_NOT_APPROVED",
+      403,
+    );
+    expect(productRepository.listCalls).toHaveLength(0);
+  });
+
+  it("GET list returns only the approved seller's bounded page and ignores spoofed storeId", async () => {
+    const session = await registerApprovedSeller();
+    const firstCreatedAt = new Date("2026-06-01T00:00:00.000Z");
+    productRepository.seedProduct({
+      id: fakeId(40),
+      storeId: "st-approved",
+      slug: "newest",
+      name: "Newest",
+      description: "private description",
+      categoryId: null,
+      status: "active",
+      createdAt: firstCreatedAt,
+      updatedAt: firstCreatedAt,
+    });
+    productRepository.seedProduct({
+      id: fakeId(41),
+      storeId: "st-approved",
+      slug: "older",
+      name: "Older",
+      description: null,
+      categoryId: null,
+      status: "draft",
+      createdAt: new Date("2026-05-01T00:00:00.000Z"),
+      updatedAt: firstCreatedAt,
+    });
+    productRepository.seedProduct({
+      id: fakeId(42),
+      storeId: "st-other",
+      slug: "other",
+      name: "Other",
+      description: null,
+      categoryId: null,
+      status: "active",
+      createdAt: new Date("2026-07-01T00:00:00.000Z"),
+      updatedAt: firstCreatedAt,
+    });
+
+    const response = await get(
+      `/api/seller/products?limit=1&storeId=st-other`,
+      session.cookie,
+    );
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: true;
+      data: { items: Array<Record<string, unknown>>; nextCursor: string | null };
+    };
+    expect(body.data.items).toEqual([
+      {
+        id: fakeId(40),
+        slug: "newest",
+        name: "Newest",
+        categoryId: null,
+        status: "active",
+        createdAt: firstCreatedAt.toISOString(),
+      },
+    ]);
+    expect(body.data.nextCursor).toBe(`next:${fakeId(40)}`);
+    expect(productRepository.listCalls).toEqual([
+      { storeId: "st-approved", query: { limit: 1, cursor: null } },
+    ]);
+    expect(JSON.stringify(body)).not.toContain("storeId");
+    expect(JSON.stringify(body)).not.toContain("private description");
+  });
+
+  it("GET list validates the limit without querying the repository", async () => {
+    const session = await registerApprovedSeller();
+
+    await expectCreateFailure(
+      await get("/api/seller/products?limit=51", session.cookie),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(productRepository.listCalls).toHaveLength(0);
+  });
+
+  it("GET detail returns owned variants and inventory", async () => {
+    const session = await registerApprovedSeller();
+    const now = new Date("2026-06-01T00:00:00.000Z");
+    const productId = fakeId(50);
+    const variantId = fakeId(51);
+    productRepository.seedProduct({
+      id: productId,
+      storeId: "st-approved",
+      slug: "detail",
+      name: "Detail",
+      description: "Owned detail",
+      categoryId: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    productRepository.seedVariant({
+      id: variantId,
+      productId,
+      sku: "DETAIL",
+      name: "Detail variant",
+      priceAmountCents: 1200,
+      compareAtAmountCents: null,
+      currency: "USD",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    productRepository.seedInventory({ variantId, quantity: 3, updatedAt: now });
+
+    const response = await get(`/api/seller/products/${productId}`, session.cookie);
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: true;
+      data: {
+        id: string;
+        description: string | null;
+        variants: Array<{ id: string; inventory: { quantity: number } | null }>;
+      };
+    };
+    expect(body.data.id).toBe(productId);
+    expect(body.data.description).toBe("Owned detail");
+    expect(body.data.variants).toHaveLength(1);
+    expect(body.data.variants[0]?.inventory).toMatchObject({ quantity: 3 });
+    expect(JSON.stringify(body)).not.toContain("storeId");
+  });
+
+  it("GET detail returns the same safe 404 for malformed, unknown, and cross-store ids", async () => {
+    const session = await registerApprovedSeller();
+    const crossStoreId = fakeId(60);
+    const now = new Date();
+    productRepository.seedProduct({
+      id: crossStoreId,
+      storeId: "st-other",
+      slug: "cross-store",
+      name: "Cross store",
+      description: null,
+      categoryId: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const responses = [
+      await get("/api/seller/products/not-an-id", session.cookie),
+      await get(`/api/seller/products/${fakeId(61)}`, session.cookie),
+      await get(`/api/seller/products/${crossStoreId}`, session.cookie),
+    ];
+    const bodies = [];
+    for (const response of responses) {
+      expect(response.status).toBe(404);
+      bodies.push(await response.json());
+    }
+    expect(bodies[0]).toEqual(bodies[1]);
+    expect(bodies[1]).toEqual(bodies[2]);
+    expect(bodies[0]).toMatchObject({
+      ok: false,
+      error: { code: "PRODUCT_NOT_FOUND", message: "This product is not available." },
+    });
+  });
 
   it("A: unauthenticated request returns 401", async () => {
     const response = await postJson("/api/seller/products", validBody);

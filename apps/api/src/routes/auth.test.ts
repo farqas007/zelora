@@ -201,6 +201,8 @@ const inertCatalogRepository: CatalogRepository = {
  * a wiring bug loudly.
  */
 const inertProductRepository: ProductRepository = {
+  listByStore: unimplementedSeller,
+  findByStoreAndId: unimplementedSeller,
   findByStoreAndSlug: unimplementedSeller,
   createProduct: unimplementedSeller,
   createVariant: unimplementedSeller,

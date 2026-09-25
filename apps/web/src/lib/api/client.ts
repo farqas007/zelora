@@ -13,7 +13,9 @@ import type {
   CreateProductRequest,
   CreateProductVariantEnvelope,
   CreateProductVariantRequest,
+  GetSellerProductEnvelope,
   HealthResponse,
+  ListSellerProductsEnvelope,
   LoginEnvelope,
   LoginRequest,
   LogoutAllEnvelope,
@@ -23,6 +25,7 @@ import type {
   RegisterRequest,
   SellerOnboardingEnvelope,
   SellerOnboardingRequest,
+  SellerListProductsRequest,
   SetInventoryEnvelope,
   SetInventoryRequest,
   StorefrontEnvelope,
@@ -74,6 +77,8 @@ export interface ZeloraApi {
   logout(): Promise<LogoutEnvelope>;
   logoutAll(): Promise<LogoutAllEnvelope>;
   onboardSeller(input: SellerOnboardingRequest): Promise<SellerOnboardingEnvelope>;
+  listSellerProducts(input?: SellerListProductsRequest): Promise<ListSellerProductsEnvelope>;
+  getSellerProduct(productId: string): Promise<GetSellerProductEnvelope>;
   createProduct(input: CreateProductRequest): Promise<CreateProductEnvelope>;
   createProductVariant(
     productId: string,
@@ -200,6 +205,25 @@ export function createApiClient(
         body: input,
         csrf: true,
       }),
+    listSellerProducts: (input = {}) => {
+      const params = new URLSearchParams();
+      if (input.limit !== undefined) {
+        params.set("limit", String(input.limit));
+      }
+      if (input.cursor !== undefined && input.cursor !== "") {
+        params.set("cursor", input.cursor);
+      }
+      const query = params.toString();
+      return request<ListSellerProductsEnvelope>(
+        `/api/seller/products${query === "" ? "" : `?${query}`}`,
+        { method: "GET" },
+      );
+    },
+    getSellerProduct: (productId) =>
+      request<GetSellerProductEnvelope>(
+        `/api/seller/products/${encodeURIComponent(productId)}`,
+        { method: "GET" },
+      ),
     createProduct: (input: CreateProductRequest) =>
       request<CreateProductEnvelope>("/api/seller/products", {
         method: "POST",

@@ -2,17 +2,22 @@ import {
   AUTH_ERROR_CODES,
   DEFAULT_PRODUCT_CURRENCY,
   SELLER_PRODUCT_ERROR_CODES,
+  SELLER_PRODUCT_PAGE_LIMITS,
   type CreateProductRequest,
   type CreateProductVariantRequest,
   type InventoryDto,
   type ProductDto,
   type ProductVariantDto,
+  type SellerProductDetailDto,
+  type SellerProductListData,
+  type SellerProductSummaryDto,
+  type SellerProductVariantDetailDto,
   type SellerOnboardingRequest,
   type SellerProfileDto,
   type SetInventoryRequest,
   type StoreDto,
 } from "@zelora/shared";
-import { AppError, NotFoundError } from "@zelora/core";
+import { AppError, NotFoundError, ValidationError } from "@zelora/core";
 import { isValidId } from "@zelora/db/ids";
 import type { UserRecord } from "@zelora/db/users";
 import type {
@@ -23,8 +28,10 @@ import type {
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type {
   InventoryRecord,
+  ProductDetailRecord,
   ProductRecord,
   ProductRepository,
+  ProductVariantDetailRecord,
   VariantRecord,
 } from "@zelora/db/products";
 import {
@@ -74,6 +81,11 @@ export interface SellerServiceDependencies {
   catalogRepository: CatalogRepository;
 }
 
+export interface ListSellerProductsParams {
+  limit?: string;
+  cursor?: string;
+}
+
 function mapSellerProfileToDto(profile: SellerProfileRecord): SellerProfileDto {
   return {
     id: profile.id,
@@ -107,6 +119,34 @@ function mapProductToDto(product: ProductRecord): ProductDto {
   };
 }
 
+function mapSellerProductSummaryToDto(product: ProductRecord): SellerProductSummaryDto {
+  return {
+    id: product.id,
+    slug: product.slug,
+    name: product.name,
+    categoryId: product.categoryId,
+    status: product.status,
+    createdAt: product.createdAt.toISOString(),
+  };
+}
+
+function mapSellerProductDetailToDto(product: ProductDetailRecord): SellerProductDetailDto {
+  return {
+    ...mapSellerProductSummaryToDto(product),
+    description: product.description,
+    variants: product.variants.map(mapSellerProductVariantDetailToDto),
+  };
+}
+
+function mapSellerProductVariantDetailToDto(
+  variant: ProductVariantDetailRecord,
+): SellerProductVariantDetailDto {
+  return {
+    ...mapVariantToDto(variant),
+    inventory: variant.inventory === null ? null : mapInventoryToDto(variant.inventory),
+  };
+}
+
 function mapVariantToDto(variant: VariantRecord): ProductVariantDto {
   return {
     id: variant.id,
@@ -128,6 +168,29 @@ function mapInventoryToDto(inventory: InventoryRecord): InventoryDto {
     quantity: inventory.quantity,
     updatedAt: inventory.updatedAt.toISOString(),
   };
+}
+
+function parseSellerProductListLimit(rawLimit: string | undefined): number {
+  if (rawLimit === undefined || rawLimit === "") {
+    return SELLER_PRODUCT_PAGE_LIMITS.default;
+  }
+  if (!/^\d+$/.test(rawLimit)) {
+    throw new ValidationError("The request is invalid.", {
+      limit: ["Limit must be a positive integer."],
+    });
+  }
+  const limit = Number(rawLimit);
+  if (
+    limit < SELLER_PRODUCT_PAGE_LIMITS.min ||
+    limit > SELLER_PRODUCT_PAGE_LIMITS.max
+  ) {
+    throw new ValidationError("The request is invalid.", {
+      limit: [
+        `Limit must be between ${SELLER_PRODUCT_PAGE_LIMITS.min} and ${SELLER_PRODUCT_PAGE_LIMITS.max}.`,
+      ],
+    });
+  }
+  return limit;
 }
 
 export class SellerService {
@@ -222,6 +285,42 @@ export class SellerService {
       sellerProfile: mapSellerProfileToDto(result.sellerProfile),
       store: mapStoreToDto(result.store),
     };
+  }
+
+  async listProducts(
+    user: UserRecord,
+    params: ListSellerProductsParams | undefined,
+  ): Promise<SellerProductListData> {
+    const store = await this.resolveApprovedStore(user);
+    const limit = parseSellerProductListLimit(params?.limit);
+    const page = await this.productRepository.listByStore(store.id, {
+      limit,
+      cursor: params?.cursor || null,
+    });
+    return {
+      items: page.items.map(mapSellerProductSummaryToDto),
+      nextCursor: page.nextCursor,
+    };
+  }
+
+  async getProduct(user: UserRecord, productId: string): Promise<SellerProductDetailDto> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+    const product = await this.productRepository.findByStoreAndId(store.id, productId);
+    if (product === null) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+    return mapSellerProductDetailToDto(product);
   }
 
   /**

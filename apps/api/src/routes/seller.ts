@@ -3,7 +3,13 @@ import type { Context, MiddlewareHandler } from "hono";
 import { AppError, type AppConfig } from "@zelora/core";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { UserRepository } from "@zelora/db/users";
-import type { SellerOnboardingEnvelope, CreateProductEnvelope } from "@zelora/shared";
+import type {
+  CreateProductEnvelope,
+  CreateProductVariantEnvelope,
+  PublishProductEnvelope,
+  SellerOnboardingEnvelope,
+  SetInventoryEnvelope,
+} from "@zelora/shared";
 import type { AppEnv } from "../context";
 import { createAuthMiddleware } from "../middleware/auth";
 import { createCsrfMiddleware } from "../middleware/csrf";
@@ -27,6 +33,14 @@ import type { RateLimiter } from "../services/rate-limit";
  * seller-role gate ({@link requireSellerRole}) and a dedicated per-IP rate
  * limit, then delegates identity verification and product creation to
  * {@link SellerService.createProduct}.
+ *
+ * `POST /api/seller/products/:id/variants`,
+ * `POST /api/seller/products/:id/variants/:variantId/inventory` and
+ * `POST /api/seller/products/:id/publish` extend the same flow: each runs
+ * behind auth, the seller-role gate, CSRF and its own per-IP rate limit, then
+ * delegates to {@link SellerService}. Ownership is resolved entirely
+ * server-side by the service from the authenticated session, never from the
+ * request body.
  *
  * Route modules stay edge-compatible: the seller repository is injected by the
  * application boundary and only its contract is referenced here as a type.
@@ -104,6 +118,36 @@ export function createSellerRoutes(dependencies: SellerRoutesDependencies): Hono
     windowSeconds: config.rateLimitProductCreateIpWindowSeconds,
   });
 
+  const productVariantRateLimit = createIpRateLimitMiddleware({
+    config,
+    rateLimiter,
+    clientIpResolver,
+    clock,
+    scope: "seller-product-variant",
+    limit: config.rateLimitProductCreateIpMax,
+    windowSeconds: config.rateLimitProductCreateIpWindowSeconds,
+  });
+
+  const productInventoryRateLimit = createIpRateLimitMiddleware({
+    config,
+    rateLimiter,
+    clientIpResolver,
+    clock,
+    scope: "seller-product-inventory",
+    limit: config.rateLimitProductCreateIpMax,
+    windowSeconds: config.rateLimitProductCreateIpWindowSeconds,
+  });
+
+  const productPublishRateLimit = createIpRateLimitMiddleware({
+    config,
+    rateLimiter,
+    clientIpResolver,
+    clock,
+    scope: "seller-product-publish",
+    limit: config.rateLimitProductCreateIpMax,
+    windowSeconds: config.rateLimitProductCreateIpWindowSeconds,
+  });
+
   app.post("/onboarding", requireAuth, requireCsrf, onboardingRateLimit, async (c) => {
     const auth = c.get("auth");
     const body = await readJsonBody(c);
@@ -122,6 +166,51 @@ export function createSellerRoutes(dependencies: SellerRoutesDependencies): Hono
       const body = await readJsonBody(c);
       const data = await sellerService.createProduct(auth.user, body);
       return c.json<CreateProductEnvelope>({ ok: true, data }, 201);
+    },
+  );
+
+  app.post(
+    "/products/:id/variants",
+    requireAuth,
+    requireSellerRole(),
+    requireCsrf,
+    productVariantRateLimit,
+    async (c) => {
+      const auth = c.get("auth");
+      const id = c.req.param("id");
+      const body = await readJsonBody(c);
+      const data = await sellerService.createVariant(auth.user, id, body);
+      return c.json<CreateProductVariantEnvelope>({ ok: true, data }, 201);
+    },
+  );
+
+  app.post(
+    "/products/:id/variants/:variantId/inventory",
+    requireAuth,
+    requireSellerRole(),
+    requireCsrf,
+    productInventoryRateLimit,
+    async (c) => {
+      const auth = c.get("auth");
+      const id = c.req.param("id");
+      const variantId = c.req.param("variantId");
+      const body = await readJsonBody(c);
+      const data = await sellerService.setInventory(auth.user, id, variantId, body);
+      return c.json<SetInventoryEnvelope>({ ok: true, data }, 200);
+    },
+  );
+
+  app.post(
+    "/products/:id/publish",
+    requireAuth,
+    requireSellerRole(),
+    requireCsrf,
+    productPublishRateLimit,
+    async (c) => {
+      const auth = c.get("auth");
+      const id = c.req.param("id");
+      const data = await sellerService.publishProduct(auth.user, id);
+      return c.json<PublishProductEnvelope>({ ok: true, data }, 200);
     },
   );
 

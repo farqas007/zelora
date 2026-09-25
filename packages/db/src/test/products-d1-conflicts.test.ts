@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { mapD1ProductCreateConflict } from "../products/d1-repository";
+import {
+  mapD1ProductCreateConflict,
+  mapD1VariantCreateConflict,
+} from "../products/d1-repository";
 
 /**
  * Unit tests for the D1/Drizzle UNIQUE-conflict → driver-neutral reason
@@ -54,5 +57,57 @@ describe("D1 product create conflict mapping", () => {
     expect(mapD1ProductCreateConflict(null)).toBeNull();
     expect(mapD1ProductCreateConflict(42)).toBeNull();
     expect(mapD1ProductCreateConflict("")).toBeNull();
+  });
+});
+
+describe("D1 variant create conflict mapping", () => {
+  it("maps the global product_variants.sku UNIQUE constraint message to SKU_IN_USE", () => {
+    expect(
+      mapD1VariantCreateConflict(
+        new Error("D1_ERROR: UNIQUE constraint failed: product_variants.sku: SQLITE_CONSTRAINT_UNIQUE"),
+      ),
+    ).toBe("SKU_IN_USE");
+  });
+
+  it("is tolerant of the bare SQLite message without the D1 prefix or trailing code", () => {
+    expect(
+      mapD1VariantCreateConflict(new Error("UNIQUE constraint failed: product_variants.sku")),
+    ).toBe("SKU_IN_USE");
+  });
+
+  it("handles error objects that are not Error instances (cross-realm objects)", () => {
+    const fakeError = {
+      message: "D1_ERROR: UNIQUE constraint failed: product_variants.sku: SQLITE_CONSTRAINT_UNIQUE",
+    };
+    expect(mapD1VariantCreateConflict(fakeError)).toBe("SKU_IN_USE");
+  });
+
+  it("walks a wrapped cause chain to reach the underlying driver error", () => {
+    const inner = new Error("D1_ERROR: UNIQUE constraint failed: product_variants.sku: SQLITE_CONSTRAINT_UNIQUE");
+    const outer = new Error("drizzle transaction failed");
+    (outer as { cause?: unknown }).cause = inner;
+    expect(mapD1VariantCreateConflict(outer)).toBe("SKU_IN_USE");
+  });
+
+  it("does not conflate the product (store_id, slug) conflict with the SKU conflict", () => {
+    expect(
+      mapD1VariantCreateConflict(
+        new Error("D1_ERROR: UNIQUE constraint failed: products.store_id, products.slug: SQLITE_CONSTRAINT_UNIQUE"),
+      ),
+    ).toBeNull();
+  });
+
+  it("returns null for unrelated failures so they propagate unchanged", () => {
+    expect(mapD1VariantCreateConflict(new Error("D1_ERROR: FOREIGN KEY constraint failed"))).toBeNull();
+    expect(mapD1VariantCreateConflict(new Error("D1_ERROR: no such table: product_variants"))).toBeNull();
+    expect(mapD1VariantCreateConflict(new Error("UNIQUE constraint failed: products.slug"))).toBeNull();
+    expect(mapD1VariantCreateConflict(new Error("network error"))).toBeNull();
+  });
+
+  it("returns null for non-error inputs", () => {
+    expect(mapD1VariantCreateConflict(undefined)).toBeNull();
+    expect(mapD1VariantCreateConflict(null)).toBeNull();
+    expect(mapD1VariantCreateConflict(42)).toBeNull();
+    expect(mapD1VariantCreateConflict("")).toBeNull();
   });
 });

@@ -203,6 +203,9 @@ const inertCatalogRepository: CatalogRepository = {
 const inertProductRepository: ProductRepository = {
   findByStoreAndSlug: unimplementedSeller,
   createProduct: unimplementedSeller,
+  createVariant: unimplementedSeller,
+  setInventory: unimplementedSeller,
+  publishProduct: unimplementedSeller,
 };
 
 const inertCartRepository: CartRepository = {

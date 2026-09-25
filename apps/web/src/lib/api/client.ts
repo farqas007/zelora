@@ -11,15 +11,20 @@ import type {
   CatalogProductListData,
   CreateProductEnvelope,
   CreateProductRequest,
+  CreateProductVariantEnvelope,
+  CreateProductVariantRequest,
   HealthResponse,
   LoginEnvelope,
   LoginRequest,
   LogoutAllEnvelope,
   LogoutEnvelope,
+  PublishProductEnvelope,
   RegisterEnvelope,
   RegisterRequest,
   SellerOnboardingEnvelope,
   SellerOnboardingRequest,
+  SetInventoryEnvelope,
+  SetInventoryRequest,
   StorefrontEnvelope,
   StorefrontRequest,
   UpdateCartItemRequest,
@@ -70,6 +75,16 @@ export interface ZeloraApi {
   logoutAll(): Promise<LogoutAllEnvelope>;
   onboardSeller(input: SellerOnboardingRequest): Promise<SellerOnboardingEnvelope>;
   createProduct(input: CreateProductRequest): Promise<CreateProductEnvelope>;
+  createProductVariant(
+    productId: string,
+    input: CreateProductVariantRequest,
+  ): Promise<CreateProductVariantEnvelope>;
+  setProductInventory(
+    productId: string,
+    variantId: string,
+    input: SetInventoryRequest,
+  ): Promise<SetInventoryEnvelope>;
+  publishProduct(productId: string): Promise<PublishProductEnvelope>;
   listCatalogCategories(): Promise<ApiEnvelope<CatalogCategoryDto[]>>;
   listCatalogProducts(input: CatalogListProductsRequest): Promise<ApiEnvelope<CatalogProductListData>>;
   getCatalogProductBySlug(slug: string): Promise<ApiEnvelope<CatalogProductDetailDto>>;
@@ -189,6 +204,22 @@ export function createApiClient(
       request<CreateProductEnvelope>("/api/seller/products", {
         method: "POST",
         body: input,
+        csrf: true,
+      }),
+    createProductVariant: (productId, input) =>
+      request<CreateProductVariantEnvelope>(`/api/seller/products/${encodeURIComponent(productId)}/variants`, {
+        method: "POST",
+        body: input,
+        csrf: true,
+      }),
+    setProductInventory: (productId, variantId, input) =>
+      request<SetInventoryEnvelope>(
+        `/api/seller/products/${encodeURIComponent(productId)}/variants/${encodeURIComponent(variantId)}/inventory`,
+        { method: "POST", body: input, csrf: true },
+      ),
+    publishProduct: (productId) =>
+      request<PublishProductEnvelope>(`/api/seller/products/${encodeURIComponent(productId)}/publish`, {
+        method: "POST",
         csrf: true,
       }),
     listCatalogCategories: () =>

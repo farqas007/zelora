@@ -9,13 +9,24 @@ import type {
   StoreRecord,
 } from "@zelora/db/seller";
 import type { CatalogCategoryRecord, CatalogRepository } from "@zelora/db/catalog";
+import {
+  AUTH_ERROR_CODES,
+  DEFAULT_PRODUCT_CURRENCY,
+  SELLER_PRODUCT_ERROR_CODES,
+} from "@zelora/shared";
 import type {
+  CreateVariantInput,
+  CreateVariantResult,
+  InventoryRecord,
   CreateProductInput,
   CreateProductResult,
   ProductRecord,
   ProductRepository,
+  PublishProductResult,
+  SetInventoryInput,
+  SetInventoryResult,
+  VariantRecord,
 } from "@zelora/db/products";
-import { AUTH_ERROR_CODES } from "@zelora/shared";
 import { SellerService } from "./seller";
 
 /**
@@ -146,13 +157,21 @@ class FakeSellerRepository implements SellerRepository {
 /**
  * Minimal product-repository fake exercising the seller create logic. Products
  * live in a map keyed by id; slug uniqueness is enforced per store exactly like
- * the real repository's `(store_id, slug)` constraint.
+ * the real repository's `(store_id, slug)` constraint. Variants are inserted
+ * `active` and follow the real publish invariant (at least one active variant
+ * with a positive price and inventory).
  */
 class FakeProductRepository implements ProductRepository {
   private products: Map<string, ProductRecord> = new Map();
+  private variants: Map<string, VariantRecord> = new Map();
+  private inventory: Map<string, InventoryRecord> = new Map();
   private nextId = 1;
 
   forceCreateConflict: boolean = false;
+  forceSkuConflict: boolean = false;
+
+  createVariantCalls: CreateVariantInput[] = [];
+  setInventoryCalls: SetInventoryInput[] = [];
 
   async findByStoreAndSlug(storeId: string, slug: string): Promise<ProductRecord | null> {
     return (
@@ -172,7 +191,7 @@ class FakeProductRepository implements ProductRepository {
     }
     const now = new Date();
     const product: ProductRecord = {
-      id: `pr-${this.nextId}`,
+      id: fakeId(this.nextId),
       storeId: input.storeId,
       slug: input.slug,
       name: input.name,
@@ -185,6 +204,85 @@ class FakeProductRepository implements ProductRepository {
     this.nextId += 1;
     this.products.set(product.id, product);
     return { ok: true, product };
+  }
+
+  async createVariant(input: CreateVariantInput): Promise<CreateVariantResult> {
+    this.createVariantCalls.push(input);
+    if (this.forceSkuConflict) {
+      return { ok: false, reason: "SKU_IN_USE" };
+    }
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    if (input.sku !== null) {
+      const skuInUse = Array.from(this.variants.values()).some(
+        (variant) => variant.sku !== null && variant.sku === input.sku,
+      );
+      if (skuInUse) {
+        return { ok: false, reason: "SKU_IN_USE" };
+      }
+    }
+    const now = new Date();
+    const variant: VariantRecord = {
+      id: fakeId(this.nextId),
+      productId: input.productId,
+      sku: input.sku,
+      name: input.name,
+      priceAmountCents: input.priceAmountCents,
+      compareAtAmountCents: input.compareAtAmountCents,
+      currency: input.currency,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.nextId += 1;
+    this.variants.set(variant.id, variant);
+    return { ok: true, variant };
+  }
+
+  async setInventory(input: SetInventoryInput): Promise<SetInventoryResult> {
+    this.setInventoryCalls.push(input);
+    const product = this.products.get(input.productId);
+    const variant = this.variants.get(input.variantId);
+    if (
+      product === undefined ||
+      variant === undefined ||
+      variant.productId !== input.productId ||
+      product.storeId !== input.storeId
+    ) {
+      return { ok: false, reason: "VARIANT_NOT_FOUND" };
+    }
+    const inventory: InventoryRecord = {
+      variantId: input.variantId,
+      quantity: input.quantity,
+      updatedAt: new Date(),
+    };
+    this.inventory.set(input.variantId, inventory);
+    return { ok: true, inventory };
+  }
+
+  async publishProduct(productId: string, storeId: string): Promise<PublishProductResult> {
+    const product = this.products.get(productId);
+    if (product === undefined || product.storeId !== storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    if (product.status === "archived") {
+      return { ok: false, reason: "PRODUCT_ARCHIVED" };
+    }
+    const sellable = Array.from(this.variants.values()).some(
+      (variant) =>
+        variant.productId === productId &&
+        variant.status === "active" &&
+        variant.priceAmountCents >= 1 &&
+        (this.inventory.get(variant.id)?.quantity ?? 0) >= 1,
+    );
+    if (!sellable) {
+      return { ok: false, reason: "NOT_PUBLISHABLE" };
+    }
+    const updated: ProductRecord = { ...product, status: "active", updatedAt: new Date() };
+    this.products.set(productId, updated);
+    return { ok: true, product: updated };
   }
 }
 
@@ -238,6 +336,14 @@ const validBody = {
   storeName: "  Ada's Store  ",
   storeSlug: "  ada-store ",
 };
+
+/**
+ * Deterministic canonical UUIDv7-shaped id so service-side `isValidId` checks
+ * (mirroring the real repository) accept the fake records.
+ */
+function fakeId(seq: number): string {
+  return `01955f00-0000-7000-8000-${seq.toString(16).padStart(12, "0")}`;
+}
 
 async function expectSellerError(
   run: () => Promise<unknown>,
@@ -985,6 +1091,494 @@ describe("SellerService", () => {
         () => service.createProduct(makeUser({ role: "seller" }), null),
         "VALIDATION_ERROR",
         422,
+      );
+    });
+  });
+
+  describe("createVariant", () => {
+    function seedApprovedSeller(): void {
+      repository.seedProfile({
+        id: "sp-approved",
+        userId: "user-authenticated",
+        slug: "approved-shop",
+        displayName: "Approved Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-approved",
+        sellerProfileId: "sp-approved",
+        name: "Approved Shop",
+        slug: "approved-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+
+    async function seedProduct(): Promise<string> {
+      seedApprovedSeller();
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Vintage Camera",
+        slug: "vintage-camera",
+      });
+      return product.id;
+    }
+
+    it("creates an active variant on the seller's own draft product", async () => {
+      const productId = await seedProduct();
+
+      const data = await service.createVariant(makeUser({ role: "seller" }), productId, {
+        name: "Body Only",
+        sku: "CAM-BODY",
+        priceAmountCents: 49900,
+        compareAtAmountCents: 59900,
+        currency: "USD",
+      });
+
+      expect(data.productId).toBe(productId);
+      expect(data.sku).toBe("CAM-BODY");
+      expect(data.name).toBe("Body Only");
+      expect(data.priceAmountCents).toBe(49900);
+      expect(data.compareAtAmountCents).toBe(59900);
+      expect(data.currency).toBe("USD");
+      expect(data.status).toBe("active");
+    });
+
+    it("defaults currency to USD and maps omitted optional fields to null", async () => {
+      const productId = await seedProduct();
+
+      const data = await service.createVariant(makeUser({ role: "seller" }), productId, {
+        name: "Body Only",
+        priceAmountCents: 49900,
+      });
+
+      expect(data.currency).toBe(DEFAULT_PRODUCT_CURRENCY);
+      expect(data.sku).toBeNull();
+      expect(data.compareAtAmountCents).toBeNull();
+    });
+
+    it("resolves the store from the session and ignores spoofed ownership/status fields", async () => {
+      const productId = await seedProduct();
+
+      const data = await service.createVariant(makeUser({ role: "seller" }), productId, {
+        name: "Body Only",
+        priceAmountCents: 49900,
+        storeId: "st-someone-else",
+        sellerProfileId: "sp-someone-else",
+        status: "inactive",
+      });
+
+      expect(data.status).toBe("active");
+      expect(products.createVariantCalls[0]?.storeId).toBe("st-approved");
+    });
+
+    it("rejects an unknown product id as PRODUCT_NOT_FOUND 404", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), "product-unknown", {
+            name: "Body Only",
+            priceAmountCents: 100,
+          }),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+
+    it("does not let a seller add a variant to another store's product", async () => {
+      seedApprovedSeller();
+      const owned = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Mine",
+        slug: "mine",
+      });
+      repository.seedProfile({
+        id: "sp-other",
+        userId: "other-seller",
+        slug: "other-shop",
+        displayName: "Other Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-other",
+        sellerProfileId: "sp-other",
+        name: "Other Shop",
+        slug: "other-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const otherProduct = await service.createProduct(makeUser({ role: "seller", id: "other-seller" }), {
+        name: "Theirs",
+        slug: "theirs",
+      });
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), otherProduct.id, {
+            name: "Sneaky",
+            priceAmountCents: 100,
+          }),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller", id: "other-seller" }), owned.id, {
+            name: "Sneaky",
+            priceAmountCents: 100,
+          }),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+
+    it("maps a duplicate SKU to SKU_IN_USE 409", async () => {
+      const productId = await seedProduct();
+      await service.createVariant(makeUser({ role: "seller" }), productId, {
+        name: "Body Only",
+        sku: "CAM-BODY",
+        priceAmountCents: 49900,
+      });
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), productId, {
+            name: "Body Only",
+            sku: "CAM-BODY",
+            priceAmountCents: 49900,
+          }),
+        SELLER_PRODUCT_ERROR_CODES.SKU_IN_USE,
+        409,
+      );
+    });
+
+    it("maps a race-triggered SKU conflict to SKU_IN_USE 409", async () => {
+      const productId = await seedProduct();
+      products.forceSkuConflict = true;
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), productId, {
+            name: "Body Only",
+            sku: "CAM-BODY",
+            priceAmountCents: 49900,
+          }),
+        SELLER_PRODUCT_ERROR_CODES.SKU_IN_USE,
+        409,
+      );
+    });
+
+    it("rejects a missing variant name", async () => {
+      const productId = await seedProduct();
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), productId, {
+            name: "   ",
+            priceAmountCents: 100,
+          }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+
+    it("rejects an invalid SKU", async () => {
+      const productId = await seedProduct();
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), productId, {
+            name: "Body Only",
+            sku: "bad sku!",
+            priceAmountCents: 100,
+          }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+
+    it("rejects a zero price", async () => {
+      const productId = await seedProduct();
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), productId, {
+            name: "Body Only",
+            priceAmountCents: 0,
+          }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+
+    it("rejects a string price", async () => {
+      const productId = await seedProduct();
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), productId, {
+            name: "Body Only",
+            priceAmountCents: "49900",
+          }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+
+    it("rejects an invalid currency", async () => {
+      const productId = await seedProduct();
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "seller" }), productId, {
+            name: "Body Only",
+            priceAmountCents: 100,
+            currency: "usd",
+          }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+
+    it("enforces the seller gate before touching the product", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () =>
+          service.createVariant(makeUser({ role: "customer" }), "01955f00-0000-7000-8000-000000000001", {
+            name: "Body Only",
+            priceAmountCents: 100,
+          }),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+    });
+  });
+
+  describe("setInventory", () => {
+    function seedApprovedSeller(): void {
+      repository.seedProfile({
+        id: "sp-approved",
+        userId: "user-authenticated",
+        slug: "approved-shop",
+        displayName: "Approved Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-approved",
+        sellerProfileId: "sp-approved",
+        name: "Approved Shop",
+        slug: "approved-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+
+    async function seedVariant(): Promise<{ productId: string; variantId: string }> {
+      seedApprovedSeller();
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Vintage Camera",
+        slug: "vintage-camera",
+      });
+      const variant = await service.createVariant(makeUser({ role: "seller" }), product.id, {
+        name: "Body Only",
+        priceAmountCents: 49900,
+      });
+      return { productId: product.id, variantId: variant.id };
+    }
+
+    it("upserts inventory for one of the seller's own variants", async () => {
+      const { productId, variantId } = await seedVariant();
+
+      const data = await service.setInventory(makeUser({ role: "seller" }), productId, variantId, {
+        quantity: 7,
+      });
+
+      expect(data.variantId).toBe(variantId);
+      expect(data.quantity).toBe(7);
+      expect(products.setInventoryCalls[0]).toMatchObject({
+        productId,
+        variantId,
+        storeId: "st-approved",
+        quantity: 7,
+      });
+    });
+
+    it("rejects an unknown product as PRODUCT_NOT_FOUND", async () => {
+      const { variantId } = await seedVariant();
+
+      await expectSellerError(
+        () => service.setInventory(makeUser({ role: "seller" }), "product-unknown", variantId, { quantity: 1 }),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+
+    it("rejects a variant that does not belong to the product", async () => {
+      const { productId } = await seedVariant();
+
+      await expectSellerError(
+        () =>
+          service.setInventory(makeUser({ role: "seller" }), productId, "variant-unknown", {
+            quantity: 1,
+          }),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+
+    it("rejects a negative quantity", async () => {
+      const { productId, variantId } = await seedVariant();
+
+      await expectSellerError(
+        () => service.setInventory(makeUser({ role: "seller" }), productId, variantId, { quantity: -1 }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+
+    it("rejects a fractional quantity", async () => {
+      const { productId, variantId } = await seedVariant();
+
+      await expectSellerError(
+        () => service.setInventory(makeUser({ role: "seller" }), productId, variantId, { quantity: 2.5 }),
+        "VALIDATION_ERROR",
+        422,
+      );
+    });
+  });
+
+  describe("publishProduct", () => {
+    function seedApprovedSeller(): void {
+      repository.seedProfile({
+        id: "sp-approved",
+        userId: "user-authenticated",
+        slug: "approved-shop",
+        displayName: "Approved Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-approved",
+        sellerProfileId: "sp-approved",
+        name: "Approved Shop",
+        slug: "approved-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+    }
+
+    async function seedPublishedProduct(): Promise<{ productId: string; variantId: string }> {
+      seedApprovedSeller();
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Vintage Camera",
+        slug: "vintage-camera",
+      });
+      const variant = await service.createVariant(makeUser({ role: "seller" }), product.id, {
+        name: "Body Only",
+        priceAmountCents: 49900,
+      });
+      await service.setInventory(makeUser({ role: "seller" }), product.id, variant.id, { quantity: 3 });
+      return { productId: product.id, variantId: variant.id };
+    }
+
+    it("publishes a draft when at least one variant is sellable", async () => {
+      const { productId } = await seedPublishedProduct();
+
+      const data = await service.publishProduct(makeUser({ role: "seller" }), productId);
+
+      expect(data.id).toBe(productId);
+      expect(data.status).toBe("active");
+    });
+
+    it("rejects publishing without any variant", async () => {
+      seedApprovedSeller();
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Vintage Camera",
+        slug: "vintage-camera",
+      });
+
+      await expectSellerError(
+        () => service.publishProduct(makeUser({ role: "seller" }), product.id),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_PUBLISHABLE,
+        409,
+      );
+    });
+
+    it("rejects publishing without inventory", async () => {
+      seedApprovedSeller();
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Vintage Camera",
+        slug: "vintage-camera",
+      });
+      const variant = await service.createVariant(makeUser({ role: "seller" }), product.id, {
+        name: "Body Only",
+        priceAmountCents: 49900,
+      });
+      expect(variant.status).toBe("active");
+
+      await expectSellerError(
+        () => service.publishProduct(makeUser({ role: "seller" }), product.id),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_PUBLISHABLE,
+        409,
+      );
+    });
+
+    it("rejects publishing a variant owned by another store", async () => {
+      seedApprovedSeller();
+      const product = await service.createProduct(makeUser({ role: "seller" }), {
+        name: "Vintage Camera",
+        slug: "vintage-camera",
+      });
+
+      repository.seedProfile({
+        id: "sp-other",
+        userId: "other-seller",
+        slug: "other-shop",
+        displayName: "Other Seller",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-other",
+        sellerProfileId: "sp-other",
+        name: "Other Shop",
+        slug: "other-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+
+      await expectSellerError(
+        () => service.publishProduct(makeUser({ role: "seller", id: "other-seller" }), product.id),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+
+    it("rejects an unknown product as PRODUCT_NOT_FOUND", async () => {
+      seedApprovedSeller();
+
+      await expectSellerError(
+        () => service.publishProduct(makeUser({ role: "seller" }), "product-unknown"),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
       );
     });
   });

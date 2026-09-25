@@ -1,7 +1,7 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, gte } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
-import { products } from "../schema/catalog";
-import type { ProductRepository } from "./repository";
+import { inventory, products, productVariants } from "../schema/catalog";
+import type { ProductRecord, ProductRepository } from "./repository";
 
 /**
  * Local (better-sqlite3) implementation of the product repository.
@@ -51,7 +51,124 @@ export function createLocalProductRepository(db: LocalDatabase): ProductReposito
         throw error;
       }
     },
+
+    async createVariant(input) {
+      const product = findOwnedProduct(db, input.productId, input.storeId);
+      if (product === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      try {
+        const row = db
+          .insert(productVariants)
+          .values({
+            productId: input.productId,
+            sku: input.sku,
+            name: input.name,
+            priceAmountCents: input.priceAmountCents,
+            compareAtAmountCents: input.compareAtAmountCents,
+            currency: input.currency,
+            status: "active",
+          })
+          .returning()
+          .get();
+        if (row === undefined) {
+          throw new Error("variant insert returned no row");
+        }
+        return { ok: true, variant: row };
+      } catch (error) {
+        if (isVariantSkuConflict(error)) {
+          return { ok: false, reason: "SKU_IN_USE" };
+        }
+        throw error;
+      }
+    },
+
+    async setInventory(input) {
+      const variant = db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .innerJoin(products, eq(products.id, productVariants.productId))
+        .where(
+          and(
+            eq(productVariants.id, input.variantId),
+            eq(products.id, input.productId),
+            eq(products.storeId, input.storeId),
+          ),
+        )
+        .get();
+      if (variant === undefined) {
+        return { ok: false, reason: "VARIANT_NOT_FOUND" };
+      }
+      const row = db
+        .insert(inventory)
+        .values({ variantId: input.variantId, quantity: input.quantity })
+        .onConflictDoUpdate({
+          target: inventory.variantId,
+          set: { quantity: input.quantity, updatedAt: new Date() },
+        })
+        .returning()
+        .get();
+      if (row === undefined) {
+        throw new Error("inventory upsert returned no row");
+      }
+      return { ok: true, inventory: row };
+    },
+
+    async publishProduct(productId, storeId) {
+      const product = findOwnedProduct(db, productId, storeId);
+      if (product === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      if (product.status === "archived") {
+        return { ok: false, reason: "PRODUCT_ARCHIVED" };
+      }
+      const sellableVariant =
+        db
+          .select({ id: productVariants.id })
+          .from(productVariants)
+          .innerJoin(inventory, eq(inventory.variantId, productVariants.id))
+          .where(
+            and(
+              eq(productVariants.productId, productId),
+              eq(productVariants.status, "active"),
+              gte(productVariants.priceAmountCents, 1),
+              gte(inventory.quantity, 1),
+            ),
+          )
+          .limit(1)
+          .get();
+      if (sellableVariant === undefined) {
+        return { ok: false, reason: "NOT_PUBLISHABLE" };
+      }
+      if (product.status === "active") {
+        return { ok: true, product };
+      }
+      const updated = db
+        .update(products)
+        .set({ status: "active" })
+        .where(eq(products.id, productId))
+        .returning()
+        .get();
+      if (updated === undefined) {
+        throw new Error("product publish returned no row");
+      }
+      return { ok: true, product: updated };
+    },
   };
+}
+
+/**
+ * Resolve one product the caller owns (by id and store), or `null`. Keeps
+ * existence hidden from callers who do not own the product.
+ */
+function findOwnedProduct(db: LocalDatabase, productId: string, storeId: string): ProductRecord | null {
+  return (
+    db
+      .select()
+      .from(products)
+      .where(and(eq(products.id, productId), eq(products.storeId, storeId)))
+      .get() ?? null
+  );
 }
 
 /**
@@ -64,4 +181,12 @@ function isProductSlugConflict(error: unknown): boolean {
     error instanceof Error &&
     /UNIQUE constraint failed: products\.store_id, products\.slug/.test(error.message)
   );
+}
+
+/**
+ * Match the `UNIQUE constraint failed: product_variants.sku` message
+ * better-sqlite3 raises for the global SKU index.
+ */
+function isVariantSkuConflict(error: unknown): boolean {
+  return error instanceof Error && /UNIQUE constraint failed: product_variants\.sku/.test(error.message);
 }

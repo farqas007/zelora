@@ -11,7 +11,18 @@ import type {
   StoreRecord,
 } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
-import type { ProductRepository, ProductRecord, CreateProductInput } from "@zelora/db/products";
+import type {
+  InventoryRecord,
+  CreateVariantInput,
+  CreateVariantResult,
+  ProductRepository,
+  ProductRecord,
+  CreateProductInput,
+  PublishProductResult,
+  SetInventoryInput,
+  SetInventoryResult,
+  VariantRecord,
+} from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
@@ -288,13 +299,23 @@ class FakeSellerRepository implements SellerRepository {
   }
 }
 
-/** Working product-repository fake: slug uniqueness enforced per store. */
+/** Deterministic canonical UUIDv7-shaped id so route-level `isValidId` checks accept fake records. */
+function fakeId(seq: number): string {
+  return `01955f00-0000-7000-8000-${seq.toString(16).padStart(12, "0")}`;
+}
+
+/** Working product-repository fake: slug uniqueness per store, SKU uniqueness global. */
 class FakeProductRepository implements ProductRepository {
   private products: Map<string, ProductRecord> = new Map();
+  private variants: Map<string, VariantRecord> = new Map();
+  private inventory: Map<string, InventoryRecord> = new Map();
   private nextId = 1;
 
   createCalls: CreateProductInput[] = [];
+  createVariantCalls: CreateVariantInput[] = [];
+  setInventoryCalls: SetInventoryInput[] = [];
   forceCreateConflict: boolean = false;
+  forceSkuConflict: boolean = false;
 
   async findByStoreAndSlug(storeId: string, slug: string): Promise<ProductRecord | null> {
     return (
@@ -317,7 +338,7 @@ class FakeProductRepository implements ProductRepository {
     }
     const now = new Date();
     const product: ProductRecord = {
-      id: `product-${this.nextId++}`,
+      id: fakeId(this.nextId++),
       storeId: input.storeId,
       slug: input.slug,
       name: input.name,
@@ -331,11 +352,94 @@ class FakeProductRepository implements ProductRepository {
     return { ok: true, product };
   }
 
+  async createVariant(input: CreateVariantInput): Promise<CreateVariantResult> {
+    this.createVariantCalls.push(input);
+    if (this.forceSkuConflict) {
+      return { ok: false, reason: "SKU_IN_USE" };
+    }
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    if (input.sku !== null) {
+      const skuInUse = Array.from(this.variants.values()).some(
+        (variant) => variant.sku !== null && variant.sku === input.sku,
+      );
+      if (skuInUse) {
+        return { ok: false, reason: "SKU_IN_USE" };
+      }
+    }
+    const now = new Date();
+    const variant: VariantRecord = {
+      id: fakeId(this.nextId++),
+      productId: input.productId,
+      sku: input.sku,
+      name: input.name,
+      priceAmountCents: input.priceAmountCents,
+      compareAtAmountCents: input.compareAtAmountCents,
+      currency: input.currency,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.variants.set(variant.id, variant);
+    return { ok: true, variant };
+  }
+
+  async setInventory(input: SetInventoryInput): Promise<SetInventoryResult> {
+    this.setInventoryCalls.push(input);
+    const product = this.products.get(input.productId);
+    const variant = this.variants.get(input.variantId);
+    if (
+      product === undefined ||
+      variant === undefined ||
+      variant.productId !== input.productId ||
+      product.storeId !== input.storeId
+    ) {
+      return { ok: false, reason: "VARIANT_NOT_FOUND" };
+    }
+    const inventory: InventoryRecord = {
+      variantId: input.variantId,
+      quantity: input.quantity,
+      updatedAt: new Date(),
+    };
+    this.inventory.set(input.variantId, inventory);
+    return { ok: true, inventory };
+  }
+
+  async publishProduct(productId: string, storeId: string): Promise<PublishProductResult> {
+    const product = this.products.get(productId);
+    if (product === undefined || product.storeId !== storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    if (product.status === "archived") {
+      return { ok: false, reason: "PRODUCT_ARCHIVED" };
+    }
+    const sellable = Array.from(this.variants.values()).some(
+      (variant) =>
+        variant.productId === productId &&
+        variant.status === "active" &&
+        variant.priceAmountCents >= 1 &&
+        (this.inventory.get(variant.id)?.quantity ?? 0) >= 1,
+    );
+    if (!sellable) {
+      return { ok: false, reason: "NOT_PUBLISHABLE" };
+    }
+    const updated: ProductRecord = { ...product, status: "active", updatedAt: new Date() };
+    this.products.set(productId, updated);
+    return { ok: true, product: updated };
+  }
+
   clear(): void {
     this.products.clear();
+    this.variants.clear();
+    this.inventory.clear();
     this.nextId = 1;
     this.createCalls = [];
+    this.createVariantCalls = [];
+    this.setInventoryCalls = [];
     this.forceCreateConflict = false;
+    this.forceSkuConflict = false;
   }
 }
 
@@ -459,6 +563,15 @@ describe("POST /api/seller/onboarding", () => {
       throw new Error("unexpected product call");
     },
     createProduct: () => {
+      throw new Error("unexpected product call");
+    },
+    createVariant: () => {
+      throw new Error("unexpected product call");
+    },
+    setInventory: () => {
+      throw new Error("unexpected product call");
+    },
+    publishProduct: () => {
       throw new Error("unexpected product call");
     },
   };
@@ -1445,5 +1558,716 @@ describe("POST /api/seller/products", () => {
       body: JSON.stringify({ ...validBody, slug: "camera-2" }),
     });
     expect(otherIp.status).toBe(201);
+  });
+});
+
+describe("POST /api/seller/products/:id variants, inventory and publish", () => {
+  const baseConfig: AppConfig = {
+    nodeEnv: "test",
+    host: "127.0.0.1",
+    port: 3001,
+    appVersion: "0.1.0",
+    corsOrigin: "http://localhost:5173",
+    sessionCookieName: "zelora_session",
+    sessionTtlSeconds: 2_592_000,
+    sessionCookieSecure: false,
+    pbkdf2Iterations: 1_000,
+    rateLimitEnabled: true,
+    rateLimitTrustProxy: false,
+    rateLimitLoginIpMax: 20,
+    rateLimitLoginIpWindowSeconds: 900,
+    rateLimitLoginEmailMax: 10,
+    rateLimitLoginEmailWindowSeconds: 900,
+    rateLimitRegisterIpMax: 10,
+    rateLimitRegisterIpWindowSeconds: 3_600,
+    rateLimitSellerOnboardingIpMax: 10,
+    rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    rateLimitProductCreateIpMax: 100,
+    rateLimitProductCreateIpWindowSeconds: 3_600,
+    sessionLastUsedThrottleSeconds: 300,
+    sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
+  };
+
+  const headerIpResolver: ClientIpResolver = {
+    resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+  };
+
+  const inertAuditLogRepository: AuditLogRepository = {
+    create: () => {
+      throw new Error("unexpected audit log call");
+    },
+    listByAction: () => {
+      throw new Error("unexpected audit log call");
+    },
+  };
+
+  const inertCartRepository: CartRepository = {
+    getCartByUserId: () => {
+      throw new Error("unexpected cart call");
+    },
+    createCart: () => {
+      throw new Error("unexpected cart call");
+    },
+    addItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    updateItemQuantity: () => {
+      throw new Error("unexpected cart call");
+    },
+    removeItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    clearCart: () => {
+      throw new Error("unexpected cart call");
+    },
+  };
+
+  let clock: FakeClock;
+  let userRepository: FakeUserRepository;
+  let sessionRepository: FakeAuthSessionRepository;
+  let sellerRepository: FakeSellerRepository;
+  let productRepository: FakeProductRepository;
+  let catalogRepository: FakeCatalogRepository;
+  let passwordHasher: PasswordHasher;
+  let app: ReturnType<typeof createApp>;
+
+  beforeEach(() => {
+    clock = new FakeClock();
+    userRepository = new FakeUserRepository();
+    sessionRepository = new FakeAuthSessionRepository();
+    sellerRepository = new FakeSellerRepository();
+    productRepository = new FakeProductRepository();
+    catalogRepository = new FakeCatalogRepository();
+    catalogRepository.categories = [{ id: "01955f00-0000-7000-8000-000000000001", slug: "electronics", name: "Electronics" }];
+    passwordHasher = new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations);
+    app = createApp({
+      config: baseConfig,
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      clientIpResolver: headerIpResolver,
+    });
+  });
+
+  let ipCounter = 0;
+  function nextIp(): string {
+    ipCounter += 1;
+    return `198.51.100.${100 + (ipCounter % 150)}`;
+  }
+
+  function postJson(
+    path: string,
+    body: unknown,
+    cookie?: string,
+    csrfToken?: string,
+    ip: string = nextIp(),
+    api: ReturnType<typeof createApp> = app,
+  ) {
+    return api.request(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(cookie === undefined ? {} : { Cookie: cookie }),
+        ...(csrfToken === undefined ? {} : { "X-Zelora-CSRF": csrfToken }),
+        "X-Test-IP": ip,
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  function extractSessionCookie(response: Response): string {
+    const setCookie = response.headers.get("set-cookie");
+    if (setCookie === null) {
+      throw new Error("expected a set-cookie header");
+    }
+    return setCookie.split(";")[0] ?? "";
+  }
+
+  async function registerUser(
+    email = "seller@example.com",
+  ): Promise<{ cookie: string; csrfToken: string; userId: string }> {
+    const response = await postJson("/api/auth/register", {
+      email,
+      password: "password123",
+      name: "Ada Lovelace",
+    });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: AuthUserResponse };
+    return {
+      cookie: extractSessionCookie(response),
+      csrfToken: body.data.session.csrfToken,
+      userId: body.data.user.id,
+    };
+  }
+
+  async function registerApprovedSeller(): Promise<{
+    cookie: string;
+    csrfToken: string;
+    userId: string;
+  }> {
+    const session = await registerUser();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, role: "seller" });
+    const now = new Date();
+    sellerRepository.seedProfile({
+      id: "sp-approved",
+      userId: session.userId,
+      slug: "approved-shop",
+      displayName: "Approved Seller",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: "st-approved",
+      sellerProfileId: "sp-approved",
+      name: "Approved Shop",
+      slug: "approved-shop",
+      description: null,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return session;
+  }
+
+  async function createDraftProduct(session: { cookie: string; csrfToken: string }): Promise<string> {
+    const response = await postJson(
+      "/api/seller/products",
+      { name: "Vintage Camera", slug: "vintage-camera" },
+      session.cookie,
+      session.csrfToken,
+    );
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: { id: string } };
+    return body.data.id;
+  }
+
+  /** Promote an arbitrary (already-registered) user into an approved seller of `st-other`. */
+  function seedApprovedSellerFor(userId: string): void {
+    const now = new Date();
+    sellerRepository.seedProfile({
+      id: "sp-other",
+      userId,
+      slug: "other-shop",
+      displayName: "Other Seller",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: "st-other",
+      sellerProfileId: "sp-other",
+      name: "Other Shop",
+      slug: "other-shop",
+      description: null,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  async function expectFailure(
+    response: Response,
+    code: string,
+    status: number,
+  ): Promise<ApiFailure> {
+    expect(response.status).toBe(status);
+    const body = (await response.json()) as ApiFailure;
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe(code);
+    return body;
+  }
+
+  describe("POST /api/seller/products/:id/variants", () => {
+    it("A: unauthenticated request returns 401", async () => {
+      const response = await postJson(
+        "/api/seller/products/01955f00-0000-7000-8000-000000000001/variants",
+        { name: "Body Only", priceAmountCents: 100 },
+      );
+
+      await expectFailure(response, "SESSION_EXPIRED", 401);
+      expect(productRepository.createVariantCalls).toHaveLength(0);
+    });
+
+    it("A: a non-seller role is rejected 403 FORBIDDEN before any ownership check", async () => {
+      const session = await registerUser();
+
+      const response = await postJson(
+        "/api/seller/products/01955f00-0000-7000-8000-000000000001/variants",
+        { name: "Body Only", priceAmountCents: 100 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      await expectFailure(response, "FORBIDDEN", 403);
+      expect(productRepository.createVariantCalls).toHaveLength(0);
+    });
+
+    it("A: missing CSRF returns 403 CSRF_FAILED", async () => {
+      const session = await registerApprovedSeller();
+
+      const response = await postJson(
+        "/api/seller/products/01955f00-0000-7000-8000-000000000001/variants",
+        { name: "Body Only", priceAmountCents: 100 },
+        session.cookie,
+      );
+
+      await expectFailure(response, "CSRF_FAILED", 403);
+      expect(productRepository.createVariantCalls).toHaveLength(0);
+    });
+
+    it("B: an approved seller adds an active variant to their own draft product", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        {
+          name: "Body Only",
+          sku: "CAM-BODY",
+          priceAmountCents: 49900,
+          compareAtAmountCents: 59900,
+          currency: "USD",
+        },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      expect(response.status).toBe(201);
+      const body = (await response.json()) as {
+        ok: true;
+        data: {
+          id: string;
+          productId: string;
+          sku: string | null;
+          name: string;
+          priceAmountCents: number;
+          compareAtAmountCents: number | null;
+          currency: string;
+          status: string;
+          createdAt: string;
+          updatedAt: string;
+        };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.data.productId).toBe(productId);
+      expect(body.data.sku).toBe("CAM-BODY");
+      expect(body.data.name).toBe("Body Only");
+      expect(body.data.priceAmountCents).toBe(49900);
+      expect(body.data.compareAtAmountCents).toBe(59900);
+      expect(body.data.currency).toBe("USD");
+      expect(body.data.status).toBe("active");
+      expect(Number.isNaN(Date.parse(body.data.createdAt))).toBe(false);
+      expect(Number.isNaN(Date.parse(body.data.updatedAt))).toBe(false);
+      expect(productRepository.createVariantCalls).toHaveLength(1);
+      expect(productRepository.createVariantCalls[0]?.storeId).toBe("st-approved");
+    });
+
+    it("B: spoofed ownership and status fields are ignored", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        {
+          name: "Body Only",
+          priceAmountCents: 49900,
+          storeId: "st-someone-else",
+          sellerProfileId: "sp-someone-else",
+          status: "inactive",
+        },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      expect(response.status).toBe(201);
+      const body = (await response.json()) as { ok: true; data: { status: string } };
+      expect(body.data.status).toBe("active");
+      expect(productRepository.createVariantCalls[0]?.storeId).toBe("st-approved");
+    });
+
+    it("B: a seller cannot add a variant to another store's product (404, no leak)", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      const otherSession = await registerUser("other@example.com");
+      const otherUser = userRepository.getUser(otherSession.userId)!;
+      userRepository.setUser({ ...otherUser, role: "seller" });
+      seedApprovedSellerFor(otherSession.userId);
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Sneaky", priceAmountCents: 100 },
+        otherSession.cookie,
+        otherSession.csrfToken,
+      );
+
+      await expectFailure(response, "PRODUCT_NOT_FOUND", 404);
+      // Ownership always comes from the caller's session, never the body.
+      expect(productRepository.createVariantCalls[0]?.storeId).toBe("st-other");
+    });
+
+    it("C: a duplicate SKU returns 409 SKU_IN_USE", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", sku: "CAM-BODY", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", sku: "CAM-BODY", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      const body = await expectFailure(response, "SKU_IN_USE", 409);
+      expect(body.error.message).toBe("A variant with this SKU already exists.");
+      expect(productRepository.createVariantCalls).toHaveLength(2);
+    });
+
+    it("E: a suspended account cannot add variants", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      const user = userRepository.getUser(session.userId)!;
+      userRepository.setUser({ ...user, status: "suspended" });
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 100 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      await expectFailure(response, "ACCOUNT_SUSPENDED", 403);
+      expect(productRepository.createVariantCalls).toHaveLength(0);
+    });
+
+    it("D: invalid payload returns 422 VALIDATION_ERROR with per-field errors", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "   ", priceAmountCents: 0, storage: true },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      const body = await expectFailure(response, "VALIDATION_ERROR", 422);
+      expect(body.error.fields?.name).toBeDefined();
+      expect(body.error.fields?.priceAmountCents).toBeDefined();
+      expect(productRepository.createVariantCalls).toHaveLength(0);
+    });
+
+    it("B: a missing product id returns 404 PRODUCT_NOT_FOUND", async () => {
+      const session = await registerApprovedSeller();
+
+      const response = await postJson(
+        "/api/seller/products/not-a-uuid/variants",
+        { name: "Body Only", priceAmountCents: 100 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      await expectFailure(response, "PRODUCT_NOT_FOUND", 404);
+      expect(productRepository.createVariantCalls).toHaveLength(0);
+    });
+  });
+
+  describe("POST /api/seller/products/:id/variants/:variantId/inventory", () => {
+    it("B: upserts inventory for a variant of the seller's own product", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      const variantResponse = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+      );
+      expect(variantResponse.status).toBe(201);
+      const variant = (await variantResponse.json()) as { ok: true; data: { id: string } };
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants/${variant.data.id}/inventory`,
+        { quantity: 7 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: true;
+        data: { variantId: string; quantity: number; updatedAt: string };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.data.variantId).toBe(variant.data.id);
+      expect(body.data.quantity).toBe(7);
+      expect(Number.isNaN(Date.parse(body.data.updatedAt))).toBe(false);
+      expect(productRepository.setInventoryCalls[0]).toMatchObject({
+        productId,
+        variantId: variant.data.id,
+        storeId: "st-approved",
+        quantity: 7,
+      });
+    });
+
+    it("B: setting inventory a second time overwrites the quantity", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      const variantResponse = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+      );
+      expect(variantResponse.status).toBe(201);
+      const variant = (await variantResponse.json()) as { ok: true; data: { id: string } };
+      await postJson(
+        `/api/seller/products/${productId}/variants/${variant.data.id}/inventory`,
+        { quantity: 7 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants/${variant.data.id}/inventory`,
+        { quantity: 3 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok: true; data: { quantity: number } };
+      expect(body.data.quantity).toBe(3);
+    });
+
+    it("B: a variant that belongs to another store's product is 404", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      const variantResponse = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+      );
+      expect(variantResponse.status).toBe(201);
+      const variant = (await variantResponse.json()) as { ok: true; data: { id: string } };
+
+      const otherSession = await registerUser("other@example.com");
+      const otherUser = userRepository.getUser(otherSession.userId)!;
+      userRepository.setUser({ ...otherUser, role: "seller" });
+      seedApprovedSellerFor(otherSession.userId);
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants/${variant.data.id}/inventory`,
+        { quantity: 5 },
+        otherSession.cookie,
+        otherSession.csrfToken,
+      );
+
+      await expectFailure(response, "PRODUCT_NOT_FOUND", 404);
+      // Ownership always comes from the caller's session, never the body.
+      expect(productRepository.setInventoryCalls[0]?.storeId).toBe("st-other");
+    });
+
+    it("D: a negative quantity returns 422", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      const variantResponse = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+      );
+      expect(variantResponse.status).toBe(201);
+      const variant = (await variantResponse.json()) as { ok: true; data: { id: string } };
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/variants/${variant.data.id}/inventory`,
+        { quantity: -1 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      await expectFailure(response, "VALIDATION_ERROR", 422);
+      expect(productRepository.setInventoryCalls).toHaveLength(0);
+    });
+  });
+
+  describe("POST /api/seller/products/:id/publish", () => {
+    it("B: publishes a draft once it has a sellable variant and inventory", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      const variantResponse = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+      );
+      expect(variantResponse.status).toBe(201);
+      const variant = (await variantResponse.json()) as { ok: true; data: { id: string } };
+      await postJson(
+        `/api/seller/products/${productId}/variants/${variant.data.id}/inventory`,
+        { quantity: 3 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/publish`,
+        {},
+        session.cookie,
+        session.csrfToken,
+      );
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok: true; data: { id: string; status: string } };
+      expect(body.ok).toBe(true);
+      expect(body.data.id).toBe(productId);
+      expect(body.data.status).toBe("active");
+    });
+
+    it("B: rejects publishing a draft with no sellable variant as 409 PRODUCT_NOT_PUBLISHABLE", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/publish`,
+        {},
+        session.cookie,
+        session.csrfToken,
+      );
+
+      const body = await expectFailure(response, "PRODUCT_NOT_PUBLISHABLE", 409);
+      expect(body.error.message).toContain("Add at least one active variant");
+    });
+
+    it("B: rejects publishing with a variant but no inventory", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+      await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+      );
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/publish`,
+        {},
+        session.cookie,
+        session.csrfToken,
+      );
+
+      await expectFailure(response, "PRODUCT_NOT_PUBLISHABLE", 409);
+    });
+
+    it("B: an owner cannot publish another store's product (404, no leak)", async () => {
+      const session = await registerApprovedSeller();
+      const productId = await createDraftProduct(session);
+
+      const otherSession = await registerUser("other@example.com");
+      const otherUser = userRepository.getUser(otherSession.userId)!;
+      userRepository.setUser({ ...otherUser, role: "seller" });
+      seedApprovedSellerFor(otherSession.userId);
+
+      const response = await postJson(
+        `/api/seller/products/${productId}/publish`,
+        {},
+        otherSession.cookie,
+        otherSession.csrfToken,
+      );
+
+      await expectFailure(response, "PRODUCT_NOT_FOUND", 404);
+    });
+
+    it("I: variant, inventory and publish use separate rate-limit buckets", async () => {
+      const limiter = new MemoryWindowRateLimiter(clock);
+      const limitedApp = createApp({
+        config: { ...baseConfig, rateLimitEnabled: true, rateLimitProductCreateIpMax: 1 },
+        userRepository,
+        sessionRepository,
+        sellerRepository,
+        catalogRepository,
+        productRepository,
+        cartRepository: inertCartRepository,
+        auditLogRepository: inertAuditLogRepository,
+        passwordHasher,
+        clock,
+        rateLimiter: limiter,
+        clientIpResolver: headerIpResolver,
+      });
+
+      const session = await registerApprovedSeller();
+      const ip = "203.0.113.90";
+
+      const createResponse = await postJson(
+        "/api/seller/products",
+        { name: "Vintage Camera", slug: "vintage-camera" },
+        session.cookie,
+        session.csrfToken,
+        ip,
+        limitedApp,
+      );
+      expect(createResponse.status).toBe(201);
+      const created = (await createResponse.json()) as { ok: true; data: { id: string } };
+      const productId = created.data.id;
+
+      // Product-create bucket is full; the variant call must still pass.
+      const variantResponse = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+        ip,
+        limitedApp,
+      );
+      expect(variantResponse.status).toBe(201);
+      const variant = (await variantResponse.json()) as { ok: true; data: { id: string } };
+
+      // Inventory keeps its own bucket and still passes.
+      const inventoryResponse = await postJson(
+        `/api/seller/products/${productId}/variants/${variant.data.id}/inventory`,
+        { quantity: 3 },
+        session.cookie,
+        session.csrfToken,
+        ip,
+        limitedApp,
+      );
+      expect(inventoryResponse.status).toBe(200);
+
+      // The second variant call in the same window trips the variant bucket.
+      const variantAgain = await postJson(
+        `/api/seller/products/${productId}/variants`,
+        { name: "Body Only", priceAmountCents: 49900 },
+        session.cookie,
+        session.csrfToken,
+        ip,
+        limitedApp,
+      );
+      expect(variantAgain.status).toBe(429);
+
+      // Publish keeps its own bucket and still passes.
+      const publishResponse = await postJson(
+        `/api/seller/products/${productId}/publish`,
+        {},
+        session.cookie,
+        session.csrfToken,
+        ip,
+        limitedApp,
+      );
+      expect(publishResponse.status).toBe(200);
+    });
   });
 });

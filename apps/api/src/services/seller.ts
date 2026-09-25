@@ -1,13 +1,19 @@
 import {
   AUTH_ERROR_CODES,
+  DEFAULT_PRODUCT_CURRENCY,
   SELLER_PRODUCT_ERROR_CODES,
   type CreateProductRequest,
+  type CreateProductVariantRequest,
+  type InventoryDto,
   type ProductDto,
+  type ProductVariantDto,
   type SellerOnboardingRequest,
   type SellerProfileDto,
+  type SetInventoryRequest,
   type StoreDto,
 } from "@zelora/shared";
 import { AppError, NotFoundError } from "@zelora/core";
+import { isValidId } from "@zelora/db/ids";
 import type { UserRecord } from "@zelora/db/users";
 import type {
   SellerProfileRecord,
@@ -15,8 +21,18 @@ import type {
   StoreRecord,
 } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
-import type { ProductRepository, ProductRecord } from "@zelora/db/products";
-import { parseCreateProductRequest, parseSellerOnboardingRequest } from "./validation";
+import type {
+  InventoryRecord,
+  ProductRecord,
+  ProductRepository,
+  VariantRecord,
+} from "@zelora/db/products";
+import {
+  parseAddProductVariantRequest,
+  parseCreateProductRequest,
+  parseSellerOnboardingRequest,
+  parseSetInventoryRequest,
+} from "./validation";
 
 /**
  * Seller account onboarding for an authenticated session.
@@ -88,6 +104,29 @@ function mapProductToDto(product: ProductRecord): ProductDto {
     categoryId: product.categoryId,
     status: product.status,
     createdAt: product.createdAt.toISOString(),
+  };
+}
+
+function mapVariantToDto(variant: VariantRecord): ProductVariantDto {
+  return {
+    id: variant.id,
+    productId: variant.productId,
+    sku: variant.sku,
+    name: variant.name,
+    priceAmountCents: variant.priceAmountCents,
+    compareAtAmountCents: variant.compareAtAmountCents,
+    currency: variant.currency,
+    status: variant.status,
+    createdAt: variant.createdAt.toISOString(),
+    updatedAt: variant.updatedAt.toISOString(),
+  };
+}
+
+function mapInventoryToDto(inventory: InventoryRecord): InventoryDto {
+  return {
+    variantId: inventory.variantId,
+    quantity: inventory.quantity,
+    updatedAt: inventory.updatedAt.toISOString(),
   };
 }
 
@@ -200,45 +239,7 @@ export class SellerService {
    * accepted from the client.
    */
   async createProduct(user: UserRecord, request: unknown): Promise<ProductDto> {
-    if (user.status === "suspended") {
-      throw new AppError(
-        AUTH_ERROR_CODES.ACCOUNT_SUSPENDED,
-        "This account has been suspended.",
-        403,
-      );
-    }
-    if (user.status === "deleted") {
-      throw new AppError(
-        AUTH_ERROR_CODES.ACCOUNT_DELETED,
-        "This account has been deleted.",
-        403,
-      );
-    }
-    if (user.role !== "seller") {
-      throw new AppError(
-        SELLER_PRODUCT_ERROR_CODES.SELLER_NOT_APPROVED,
-        "Only approved sellers can create products.",
-        403,
-      );
-    }
-
-    const profile = await this.sellerRepository.findByUserId(user.id);
-    if (profile === null || profile.status !== "active") {
-      throw new AppError(
-        SELLER_PRODUCT_ERROR_CODES.SELLER_NOT_APPROVED,
-        "Your seller account is not approved yet.",
-        403,
-      );
-    }
-
-    const store = await this.sellerRepository.findStoreBySellerProfileId(profile.id);
-    if (store === null || store.status !== "active") {
-      throw new AppError(
-        SELLER_PRODUCT_ERROR_CODES.SELLER_NOT_APPROVED,
-        "Your store is not active yet.",
-        403,
-      );
-    }
+    const store = await this.resolveApprovedStore(user);
 
     const parsed: CreateProductRequest = parseCreateProductRequest(request);
 
@@ -285,6 +286,193 @@ export class SellerService {
     }
 
     return mapProductToDto(result.product);
+  }
+
+  /**
+   * Add a variant to one of the caller's own products. Ownership is resolved
+   * server-side: the product id comes from the URL path and the store comes
+   * from the authenticated user (never from the body), so a client cannot
+   * attach variants to another seller's product. Unknown/unowned products are
+   * indistinguishable (404, no existence leak). The variant is inserted
+   * `active`, but the product stays invisible until it is published.
+   */
+  async createVariant(
+    user: UserRecord,
+    productId: string,
+    request: unknown,
+  ): Promise<ProductVariantDto> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    const parsed: CreateProductVariantRequest = parseAddProductVariantRequest(request);
+
+    const result = await this.productRepository.createVariant({
+      productId,
+      storeId: store.id,
+      sku: parsed.sku ?? null,
+      name: parsed.name,
+      priceAmountCents: parsed.priceAmountCents,
+      compareAtAmountCents: parsed.compareAtAmountCents ?? null,
+      currency: parsed.currency ?? DEFAULT_PRODUCT_CURRENCY,
+    });
+
+    if (!result.ok) {
+      if (result.reason === "PRODUCT_NOT_FOUND") {
+        throw new AppError(
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          "This product is not available.",
+          404,
+        );
+      }
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.SKU_IN_USE,
+        "A variant with this SKU already exists.",
+        409,
+      );
+    }
+
+    return mapVariantToDto(result.variant);
+  }
+
+  /**
+   * Upsert the inventory of one of the caller's own variants. Ownership is
+   * resolved server-side from the authenticated session; the product and
+   * variant ids come from the URL path. Unknown paths are 404.
+   */
+  async setInventory(
+    user: UserRecord,
+    productId: string,
+    variantId: string,
+    request: unknown,
+  ): Promise<InventoryDto> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId) || !isValidId(variantId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    const parsed: SetInventoryRequest = parseSetInventoryRequest(request);
+
+    const result = await this.productRepository.setInventory({
+      productId,
+      variantId,
+      storeId: store.id,
+      quantity: parsed.quantity,
+    });
+
+    if (!result.ok) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    return mapInventoryToDto(result.inventory);
+  }
+
+  /**
+   * Publish one of the caller's own products. The product only becomes
+   * `active` (and therefore visible on the public catalog/storefront) when it
+   * has at least one sellable variant: status `active`, price at least 1 cent
+   * and inventory quantity at least 1. Publishing an already-`active` product
+   * is idempotent; archived products cannot be published.
+   */
+  async publishProduct(user: UserRecord, productId: string): Promise<ProductDto> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    const result = await this.productRepository.publishProduct(productId, store.id);
+
+    if (!result.ok) {
+      if (result.reason === "PRODUCT_NOT_FOUND") {
+        throw new AppError(
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          "This product is not available.",
+          404,
+        );
+      }
+      if (result.reason === "PRODUCT_ARCHIVED") {
+        throw new AppError(
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_ARCHIVED,
+          "This product is archived and cannot be published.",
+          409,
+        );
+      }
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_PUBLISHABLE,
+        "Add at least one active variant with a positive price and available inventory before publishing.",
+        409,
+      );
+    }
+
+    return mapProductToDto(result.product);
+  }
+
+  /**
+   * Resolve the authenticated user's approved seller store, or throw 403. This
+   * is the single ownership gate shared by every seller product mutation: the
+   * user's role must be `seller`, their seller profile must exist and be
+   * `active`, and their store must exist and be `active`. The store is always
+   * derived from the session identity, never from the request body.
+   */
+  private async resolveApprovedStore(user: UserRecord): Promise<StoreRecord> {
+    if (user.status === "suspended") {
+      throw new AppError(
+        AUTH_ERROR_CODES.ACCOUNT_SUSPENDED,
+        "This account has been suspended.",
+        403,
+      );
+    }
+    if (user.status === "deleted") {
+      throw new AppError(
+        AUTH_ERROR_CODES.ACCOUNT_DELETED,
+        "This account has been deleted.",
+        403,
+      );
+    }
+    if (user.role !== "seller") {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.SELLER_NOT_APPROVED,
+        "Only approved sellers can create products.",
+        403,
+      );
+    }
+
+    const profile = await this.sellerRepository.findByUserId(user.id);
+    if (profile === null || profile.status !== "active") {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.SELLER_NOT_APPROVED,
+        "Your seller account is not approved yet.",
+        403,
+      );
+    }
+
+    const store = await this.sellerRepository.findStoreBySellerProfileId(profile.id);
+    if (store === null || store.status !== "active") {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.SELLER_NOT_APPROVED,
+        "Your store is not active yet.",
+        403,
+      );
+    }
+
+    return store;
   }
 
   /**

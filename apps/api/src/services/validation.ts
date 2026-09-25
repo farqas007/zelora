@@ -3,15 +3,21 @@ import { isValidId } from "@zelora/db/ids";
 import {
   AUTH_LIMITS,
   CART_ITEM_QUANTITY_LIMITS,
+  CURRENCY_PATTERN,
   EMAIL_PATTERN,
+  INVENTORY_LIMITS,
   PRODUCT_LIMITS,
   PRODUCT_SLUG_PATTERN,
+  PRODUCT_VARIANT_LIMITS,
+  SKU_PATTERN,
   SLUG_PATTERN,
   type AddCartItemRequest,
   type CreateProductRequest,
+  type CreateProductVariantRequest,
   type LoginRequest,
   type RegisterRequest,
   type SellerOnboardingRequest,
+  type SetInventoryRequest,
   type UpdateCartItemRequest,
 } from "@zelora/shared";
 
@@ -150,6 +156,43 @@ export function validateProductSlug(slug: string): string[] {
   return [];
 }
 
+/** Validate a (previously trimmed) variant name against {@link PRODUCT_VARIANT_LIMITS}. */
+export function validateVariantName(name: string): string[] {
+  if (
+    name.length < PRODUCT_VARIANT_LIMITS.nameMinLength ||
+    name.length > PRODUCT_VARIANT_LIMITS.nameMaxLength
+  ) {
+    return [
+      `Variant name must be between ${PRODUCT_VARIANT_LIMITS.nameMinLength} and ${PRODUCT_VARIANT_LIMITS.nameMaxLength} characters.`,
+    ];
+  }
+  return [];
+}
+
+/** Validate a SKU against {@link PRODUCT_VARIANT_LIMITS} and {@link SKU_PATTERN}. */
+export function validateVariantSku(sku: string): string[] {
+  if (
+    sku.length < PRODUCT_VARIANT_LIMITS.skuMinLength ||
+    sku.length > PRODUCT_VARIANT_LIMITS.skuMaxLength
+  ) {
+    return [
+      `SKU must be between ${PRODUCT_VARIANT_LIMITS.skuMinLength} and ${PRODUCT_VARIANT_LIMITS.skuMaxLength} characters.`,
+    ];
+  }
+  if (!SKU_PATTERN.test(sku)) {
+    return ["SKU is invalid."];
+  }
+  return [];
+}
+
+/** Validate a 3-letter ISO 4217 currency code. */
+export function validateCurrency(currency: string): string[] {
+  if (!CURRENCY_PATTERN.test(currency)) {
+    return ["Currency must be a 3-letter ISO 4217 code, e.g. USD."];
+  }
+  return [];
+}
+
 /** Reject anything that is not a plain JSON object body. */
 function asObjectBody(body: unknown): Record<string, unknown> {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
@@ -265,26 +308,69 @@ export function parseSellerOnboardingRequest(body: unknown): SellerOnboardingReq
  */
 const VARIANT_ID_MAX_LENGTH = 64;
 
-/** Collect an integer field within `[min, max]`; problems are added to `fields`. */
+/** Collect a required integer field within `[min, max]`; problems are added to `fields`. */
+function collectInteger(
+  fields: FieldErrors,
+  record: Record<string, unknown>,
+  field: string,
+  label: string,
+  min: number,
+  max: number,
+): number | null {
+  const raw = record[field];
+  if (raw === undefined || raw === null) {
+    addFieldError(fields, field, `${label} is required.`);
+    return null;
+  }
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw)) {
+    addFieldError(fields, field, `${label} must be a whole number.`);
+    return null;
+  }
+  if (raw < min || raw > max) {
+    addFieldError(fields, field, `${label} must be between ${min} and ${max}.`);
+    return null;
+  }
+  return raw;
+}
+
+/** Collect an optional integer field within `[min, max]`; missing means `undefined`. */
+function collectOptionalInteger(
+  fields: FieldErrors,
+  record: Record<string, unknown>,
+  field: string,
+  label: string,
+  min: number,
+  max: number,
+): number | undefined {
+  const raw = record[field];
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (typeof raw !== "number" || !Number.isSafeInteger(raw)) {
+    addFieldError(fields, field, `${label} must be a whole number.`);
+    return undefined;
+  }
+  if (raw < min || raw > max) {
+    addFieldError(fields, field, `${label} must be between ${min} and ${max}.`);
+    return undefined;
+  }
+  return raw;
+}
+
+/** Collect a cart quantity field within {@link CART_ITEM_QUANTITY_LIMITS}. */
 function collectQuantity(
   fields: FieldErrors,
   record: Record<string, unknown>,
   field: string,
 ): number | null {
-  const raw = record[field];
-  if (raw === undefined || raw === null) {
-    addFieldError(fields, field, "Quantity is required.");
-    return null;
-  }
-  if (typeof raw !== "number" || !Number.isSafeInteger(raw)) {
-    addFieldError(fields, field, "Quantity must be a whole number.");
-    return null;
-  }
-  if (raw < CART_ITEM_QUANTITY_LIMITS.min || raw > CART_ITEM_QUANTITY_LIMITS.max) {
-    addFieldError(fields, field, `Quantity must be between ${CART_ITEM_QUANTITY_LIMITS.min} and ${CART_ITEM_QUANTITY_LIMITS.max}.`);
-    return null;
-  }
-  return raw;
+  return collectInteger(
+    fields,
+    record,
+    field,
+    "Quantity",
+    CART_ITEM_QUANTITY_LIMITS.min,
+    CART_ITEM_QUANTITY_LIMITS.max,
+  );
 }
 
 /**
@@ -403,4 +489,83 @@ export function parseCreateProductRequest(body: unknown): CreateProductRequest {
     result.categoryId = categoryId;
   }
   return result;
+}
+
+/**
+ * Parse and validate an add-variant request body. `name` is required and
+ * trimmed; `priceAmountCents` is a required integer within
+ * {@link PRODUCT_VARIANT_LIMITS}. `sku` is optional but must be valid when
+ * present (and is globally unique at the database); `compareAtAmountCents` is
+ * optional; `currency` is optional and normalized to an uppercase 3-letter ISO
+ * 4217 code (the service defaults it to `DEFAULT_PRODUCT_CURRENCY`).
+ * Ownership/variant-status fields are ignored. Field problems are collected
+ * into a single {@link ValidationError}.
+ */
+export function parseAddProductVariantRequest(body: unknown): CreateProductVariantRequest {
+  const record = asObjectBody(body);
+  const fields: FieldErrors = {};
+
+  const name = collectField(fields, record, "name", "Variant name", normalizeName, validateVariantName);
+  const sku = collectOptionalString(fields, record, "sku", validateVariantSku);
+  const priceAmountCents = collectInteger(
+    fields,
+    record,
+    "priceAmountCents",
+    "Price amount",
+    PRODUCT_VARIANT_LIMITS.priceAmountCentsMin,
+    PRODUCT_VARIANT_LIMITS.priceAmountCentsMax,
+  );
+  const compareAtAmountCents = collectOptionalInteger(
+    fields,
+    record,
+    "compareAtAmountCents",
+    "Compare-at price amount",
+    PRODUCT_VARIANT_LIMITS.compareAtAmountCentsMin,
+    PRODUCT_VARIANT_LIMITS.compareAtAmountCentsMax,
+  );
+  const currency = collectOptionalString(fields, record, "currency", validateCurrency);
+
+  if (Object.keys(fields).length > 0) {
+    throw new ValidationError("The request is invalid.", fields);
+  }
+
+  const result: CreateProductVariantRequest = {
+    name: name as string,
+    priceAmountCents: priceAmountCents as number,
+  };
+  if (sku !== undefined) {
+    result.sku = sku;
+  }
+  if (compareAtAmountCents !== undefined) {
+    result.compareAtAmountCents = compareAtAmountCents;
+  }
+  if (currency !== undefined) {
+    result.currency = currency;
+  }
+  return result;
+}
+
+/**
+ * Parse and validate a set-inventory request body. `quantity` must be an
+ * integer within {@link INVENTORY_LIMITS}; JSON-native numbers only. Field
+ * problems are collected into a single {@link ValidationError}.
+ */
+export function parseSetInventoryRequest(body: unknown): SetInventoryRequest {
+  const record = asObjectBody(body);
+  const fields: FieldErrors = {};
+
+  const quantity = collectInteger(
+    fields,
+    record,
+    "quantity",
+    "Quantity",
+    INVENTORY_LIMITS.quantityMin,
+    INVENTORY_LIMITS.quantityMax,
+  );
+
+  if (Object.keys(fields).length > 0) {
+    throw new ValidationError("The request is invalid.", fields);
+  }
+
+  return { quantity: quantity as number };
 }

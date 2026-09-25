@@ -51,6 +51,15 @@ export type {
   CreateProductInput,
   CreateProductConflictReason,
   CreateProductResult,
+  VariantRecord,
+  CreateVariantInput,
+  CreateVariantConflictReason,
+  CreateVariantResult,
+  InventoryRecord,
+  SetInventoryInput,
+  SetInventoryResult,
+  PublishProductConflictReason,
+  PublishProductResult,
   ProductRepository,
 } from "./products/repository";
 export type {

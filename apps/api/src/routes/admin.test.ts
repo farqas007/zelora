@@ -393,6 +393,15 @@ const inertProductRepository: ProductRepository = {
   createProduct: () => {
     throw new Error("unexpected product call");
   },
+  createVariant: () => {
+    throw new Error("unexpected product call");
+  },
+  setInventory: () => {
+    throw new Error("unexpected product call");
+  },
+  publishProduct: () => {
+    throw new Error("unexpected product call");
+  },
 };
 
 describe("POST /api/admin/sellers/:userId/activate", () => {

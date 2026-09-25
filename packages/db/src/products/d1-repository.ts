@@ -1,17 +1,22 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, gte } from "drizzle-orm";
 import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
-import { products } from "../schema/catalog";
-import type { CreateProductConflictReason, ProductRepository } from "./repository";
+import { inventory, products, productVariants } from "../schema/catalog";
+import type {
+  CreateProductConflictReason,
+  CreateVariantConflictReason,
+  ProductRecord,
+  ProductRepository,
+} from "./repository";
 
 /**
  * Cloudflare D1 implementation of the product repository.
  *
  * Concrete implementation of {@link ProductRepository} against the Drizzle D1
  * client created by {@link createD1Client}. Mirrors the local better-sqlite3
- * contract: reads resolve to `null` when unknown, and `createProduct` maps the
- * `(store_id, slug)` UNIQUE constraint failure into the driver-neutral
- * {@link CreateProductConflictReason} result.
+ * contract: reads resolve to `null` when unknown, `createProduct` maps the
+ * `(store_id, slug)` UNIQUE constraint failure and `createVariant` maps the
+ * global `product_variants.sku` constraint into driver-neutral results.
  *
  * Worker-safe: only the Drizzle D1 driver and the product contract are
  * imported; the Node-only SQLite stack is never pulled into the Worker bundle.
@@ -54,7 +59,127 @@ export function createD1ProductRepository(
         throw error;
       }
     },
+
+    async createVariant(input) {
+      const product = await findOwnedProduct(db, input.productId, input.storeId);
+      if (product === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      try {
+        const rows = await db
+          .insert(productVariants)
+          .values({
+            productId: input.productId,
+            sku: input.sku,
+            name: input.name,
+            priceAmountCents: input.priceAmountCents,
+            compareAtAmountCents: input.compareAtAmountCents,
+            currency: input.currency,
+            status: "active",
+          })
+          .returning();
+        const variant = rows[0];
+        if (variant === undefined) {
+          throw new Error("variant insert returned no row");
+        }
+        return { ok: true, variant };
+      } catch (error) {
+        const reason = mapD1VariantCreateConflict(error);
+        if (reason !== null) {
+          return { ok: false, reason };
+        }
+        throw error;
+      }
+    },
+
+    async setInventory(input) {
+      const variant = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .innerJoin(products, eq(products.id, productVariants.productId))
+        .where(
+          and(
+            eq(productVariants.id, input.variantId),
+            eq(products.id, input.productId),
+            eq(products.storeId, input.storeId),
+          ),
+        )
+        .get();
+      if (variant === undefined) {
+        return { ok: false, reason: "VARIANT_NOT_FOUND" };
+      }
+      const rows = await db
+        .insert(inventory)
+        .values({ variantId: input.variantId, quantity: input.quantity })
+        .onConflictDoUpdate({
+          target: inventory.variantId,
+          set: { quantity: input.quantity, updatedAt: new Date() },
+        })
+        .returning();
+      const inventoryRow = rows[0];
+      if (inventoryRow === undefined) {
+        throw new Error("inventory upsert returned no row");
+      }
+      return { ok: true, inventory: inventoryRow };
+    },
+
+    async publishProduct(productId, storeId) {
+      const product = await findOwnedProduct(db, productId, storeId);
+      if (product === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      if (product.status === "archived") {
+        return { ok: false, reason: "PRODUCT_ARCHIVED" };
+      }
+      const sellableVariant = await db
+        .select({ id: productVariants.id })
+        .from(productVariants)
+        .innerJoin(inventory, eq(inventory.variantId, productVariants.id))
+        .where(
+          and(
+            eq(productVariants.productId, productId),
+            eq(productVariants.status, "active"),
+            gte(productVariants.priceAmountCents, 1),
+            gte(inventory.quantity, 1),
+          ),
+        )
+        .limit(1)
+        .get();
+      if (sellableVariant === undefined) {
+        return { ok: false, reason: "NOT_PUBLISHABLE" };
+      }
+      if (product.status === "active") {
+        return { ok: true, product };
+      }
+      const updatedRows = await db
+        .update(products)
+        .set({ status: "active" })
+        .where(eq(products.id, productId))
+        .returning();
+      const updated = updatedRows[0];
+      if (updated === undefined) {
+        throw new Error("product publish returned no row");
+      }
+      return { ok: true, product: updated };
+    },
   };
+}
+
+/**
+ * Resolve one product the caller owns (by id and store), or `null`. Keeps
+ * existence hidden from callers who do not own the product.
+ */
+async function findOwnedProduct(
+  db: DrizzleD1Database<DatabaseSchema>,
+  productId: string,
+  storeId: string,
+): Promise<ProductRecord | null> {
+  const product = await db
+    .select()
+    .from(products)
+    .where(and(eq(products.id, productId), eq(products.storeId, storeId)))
+    .get();
+  return product ?? null;
 }
 
 /**
@@ -68,6 +193,13 @@ const PRODUCT_UNIQUE_CONFLICT_PATTERN =
   /UNIQUE constraint failed:\s+products\.store_id,\s*products\.slug/i;
 
 /**
+ * Same shape as {@link PRODUCT_UNIQUE_CONFLICT_PATTERN} but for the global
+ * `product_variants.sku` unique index.
+ */
+const VARIANT_UNIQUE_CONFLICT_PATTERN =
+  /UNIQUE constraint failed:\s+product_variants\.sku/i;
+
+/**
  * Translate a D1/Drizzle UNIQUE constraint failure for the product
  * `(store_id, slug)` index into the driver-neutral conflict reason, or `null`
  * when the error is unrelated. Extraction is tolerant of wrapper prefixes
@@ -79,6 +211,21 @@ export function mapD1ProductCreateConflict(error: unknown): CreateProductConflic
   for (const message of collectErrorMessages(error)) {
     if (PRODUCT_UNIQUE_CONFLICT_PATTERN.test(message)) {
       return "PRODUCT_SLUG_IN_USE";
+    }
+  }
+  return null;
+}
+
+/**
+ * Translate a D1/Drizzle UNIQUE constraint failure for the global
+ * `product_variants.sku` index into the driver-neutral conflict reason, or
+ * `null` when the error is unrelated. Same tolerance rules as
+ * {@link mapD1ProductCreateConflict}. Pure and exported for tests.
+ */
+export function mapD1VariantCreateConflict(error: unknown): CreateVariantConflictReason | null {
+  for (const message of collectErrorMessages(error)) {
+    if (VARIANT_UNIQUE_CONFLICT_PATTERN.test(message)) {
+      return "SKU_IN_USE";
     }
   }
   return null;

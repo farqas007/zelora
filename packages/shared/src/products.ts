@@ -1,14 +1,14 @@
 /**
  * Seller product contracts shared between the API and the browser.
  *
- * This module is the browser-facing vocabulary for the Seller Product Create
- * phase: an approved seller (a user whose role is `seller` with an active
- * seller profile and an active store) creates a product in their own store.
+ * This module is the browser-facing vocabulary for the seller product
+ * lifecycle: an approved seller (a user whose role is `seller` with an active
+ * seller profile and an active store) creates a product in their own store,
+ * adds variants, manages variant inventory and publishes.
  *
- * Only product-row creation happens here: no variants, pricing, publishing,
- * editing or deletion yet. New products are created as `draft` by the database
- * default, so they never appear on the public catalog/storefront until a later
- * publishing phase flips the status.
+ * New products are created as `draft` by the database default and stay
+ * invisible on the public catalog/storefront until the seller adds a sellable
+ * variant (active, positive price, valid inventory) and publishes the product.
  *
  * Ownership is never accepted from the client. The `CreateProductRequest`
  * carries only visible listing fields; the API resolves the seller's own
@@ -70,8 +70,8 @@ export interface ProductDto {
 }
 
 /**
- * Error codes the seller product-creation endpoint can produce, as stable
- * string values. Auth/ownership transport errors reuse the auth vocabulary
+ * Error codes the seller product endpoints can produce, as stable string
+ * values. Auth/ownership transport errors reuse the auth vocabulary
  * (`ACCOUNT_SUSPENDED`, `ACCOUNT_DELETED`, `SLUG_IN_USE`, `RATE_LIMITED`,
  * `VALIDATION_ERROR`).
  */
@@ -79,9 +79,104 @@ export const SELLER_PRODUCT_ERROR_CODES = {
   SELLER_NOT_APPROVED: "SELLER_NOT_APPROVED",
   CATEGORY_NOT_FOUND: "CATEGORY_NOT_FOUND",
   PRODUCT_SLUG_IN_USE: "PRODUCT_SLUG_IN_USE",
+  PRODUCT_NOT_FOUND: "PRODUCT_NOT_FOUND",
+  SKU_IN_USE: "SKU_IN_USE",
+  PRODUCT_ARCHIVED: "PRODUCT_ARCHIVED",
+  PRODUCT_NOT_PUBLISHABLE: "PRODUCT_NOT_PUBLISHABLE",
 } as const;
 export type SellerProductErrorCode =
   (typeof SELLER_PRODUCT_ERROR_CODES)[keyof typeof SELLER_PRODUCT_ERROR_CODES];
 
 /** Success payload for `POST /api/seller/products`: the created draft. */
 export type CreateProductEnvelope = ApiEnvelope<ProductDto>;
+
+/**
+ * Variant statuses. Variants are inserted as `active` when created by a
+ * seller; the product itself only becomes sellable once published.
+ */
+export const PRODUCT_VARIANT_STATUSES = ["draft", "active", "inactive"] as const;
+export type ProductVariantStatus = (typeof PRODUCT_VARIANT_STATUSES)[number];
+
+/**
+ * Validation limits applied by the API before any variant/inventory mutation.
+ * Money stays in integer cents. Shared so the web app can mirror them.
+ */
+export const PRODUCT_VARIANT_LIMITS = {
+  nameMinLength: 1,
+  nameMaxLength: 120,
+  skuMinLength: 1,
+  skuMaxLength: 64,
+  priceAmountCentsMin: 1,
+  priceAmountCentsMax: 100_000_000,
+  compareAtAmountCentsMin: 1,
+  compareAtAmountCentsMax: 100_000_000,
+} as const;
+
+/** 3-letter ISO 4217 currency code, e.g. `USD`. */
+export const CURRENCY_PATTERN = /^[A-Z]{3}$/;
+
+/**
+ * Default currency applied when a variant request omits one. Kept in sync
+ * with the seeded catalog data.
+ */
+export const DEFAULT_PRODUCT_CURRENCY = "USD";
+
+/** SKU pattern: alphanumeric start, then alphanumerics, `.`, `_` or `-`. */
+export const SKU_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** Inventory quantity bounds applied by the API. */
+export const INVENTORY_LIMITS = {
+  quantityMin: 0,
+  quantityMax: 100_000,
+} as const;
+
+/**
+ * Body of the add-variant request. `currency` is optional and defaults to
+ * `DEFAULT_PRODUCT_CURRENCY` on the server. `sku` is optional but must be
+ * globally unique when provided.
+ */
+export interface CreateProductVariantRequest {
+  name: string;
+  sku?: string;
+  priceAmountCents: number;
+  compareAtAmountCents?: number;
+  currency?: string;
+}
+
+/** Owner view of a product variant. */
+export interface ProductVariantDto {
+  id: string;
+  productId: string;
+  sku: string | null;
+  name: string;
+  priceAmountCents: number;
+  compareAtAmountCents: number | null;
+  currency: string;
+  status: ProductVariantStatus;
+  /** ISO 8601 timestamp. */
+  createdAt: string;
+  /** ISO 8601 timestamp. */
+  updatedAt: string;
+}
+
+/** Success payload for `POST /api/seller/products/:id/variants`. */
+export type CreateProductVariantEnvelope = ApiEnvelope<ProductVariantDto>;
+
+/** Body of the set-inventory request for a single variant. */
+export interface SetInventoryRequest {
+  quantity: number;
+}
+
+/** Owner view of a variant's inventory. */
+export interface InventoryDto {
+  variantId: string;
+  quantity: number;
+  /** ISO 8601 timestamp. */
+  updatedAt: string;
+}
+
+/** Success payload for `POST /api/seller/products/:id/variants/:variantId/inventory`. */
+export type SetInventoryEnvelope = ApiEnvelope<InventoryDto>;
+
+/** Success payload for `POST /api/seller/products/:id/publish`. */
+export type PublishProductEnvelope = ApiEnvelope<ProductDto>;

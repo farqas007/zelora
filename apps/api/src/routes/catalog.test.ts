@@ -125,6 +125,9 @@ describe("catalog routes", () => {
       productRepository: {
         findByStoreAndSlug: inert,
         createProduct: inert,
+        createVariant: inert,
+        setInventory: inert,
+        publishProduct: inert,
       } satisfies ProductRepository,
       auditLogRepository: {
         create: inert,

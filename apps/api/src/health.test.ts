@@ -83,6 +83,9 @@ const cartRepository: CartRepository = {
 const productRepository: ProductRepository = {
   findByStoreAndSlug: unimplemented,
   createProduct: unimplemented,
+  createVariant: unimplemented,
+  setInventory: unimplemented,
+  publishProduct: unimplemented,
 };
 
 function makeApp(): ReturnType<typeof createApp> {

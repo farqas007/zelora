@@ -10,6 +10,7 @@ import { createD1AuthSessionRepository } from "../auth/d1-repository";
 import { createD1SellerRepository } from "../seller/d1-repository";
 import { createD1CatalogRepository } from "../catalog/d1-repository";
 import { createD1CartRepository } from "../cart/d1-repository";
+import { createD1ProductRepository } from "../products/d1-repository";
 import { createId } from "../ids";
 import * as schema from "../schema";
 import type { DatabaseSchema } from "../client";
@@ -539,6 +540,242 @@ describe("D1 catalog repository (real joins and keyset pagination)", () => {
     expect(item!.priceAmountCents).toBe(7_500);
     expect(item!.compareAtAmountCents).toBeNull();
     expect(item!.currency).toBe("GBP");
+  });
+});
+
+describe("D1 product repository (variant lifecycle, inventory and publish)", () => {
+  /** User + active seller profile + active store (no category). */
+  async function seedSeller(db: DrizzleD1Database<DatabaseSchema>, seed: number): Promise<string> {
+    const users = createD1UserRepository(db);
+    const sellers = createD1SellerRepository(db);
+
+    const user = await users.create({
+      email: `variant-${seed}@example.test`,
+      name: `Variant Seller ${seed}`,
+      passwordHash: tokenHash(70 + seed),
+    });
+    const onboarding = await sellers.createOnboarding({
+      userId: user.id,
+      profileSlug: `variant-profile-${seed}`,
+      displayName: `Variant Seller ${seed}`,
+      storeName: "Variant Storefront",
+      storeSlug: `variant-store-${seed}`,
+    });
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+    await sellers.activateSeller(user.id);
+    return onboarding.store.id;
+  }
+
+  async function seedProduct(
+    db: DrizzleD1Database<DatabaseSchema>,
+    storeId: string,
+    slug: string,
+  ): Promise<string> {
+    const row = await db
+      .insert(schema.products)
+      .values({ storeId, categoryId: null, name: "D1 Camera", slug, status: "draft" })
+      .returning()
+      .get();
+    return row.id;
+  }
+
+  it("creates an active variant and upserts inventory on the owner's draft product", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 1);
+    const productId = await seedProduct(db, storeId, "d1-camera");
+
+    const created = await repo.createVariant({
+      productId,
+      storeId,
+      sku: "d1-cam-body",
+      name: "Body Only",
+      priceAmountCents: 49900,
+      compareAtAmountCents: 59900,
+      currency: "USD",
+    });
+    expect(created.ok).toBe(true);
+    if (!created.ok) {
+      throw new Error("expected a successful variant create");
+    }
+    expect(created.variant).toMatchObject({
+      productId,
+      sku: "d1-cam-body",
+      name: "Body Only",
+      priceAmountCents: 49900,
+      compareAtAmountCents: 59900,
+      currency: "USD",
+      status: "active",
+    });
+
+    const first = await repo.setInventory({
+      productId,
+      variantId: created.variant.id,
+      storeId,
+      quantity: 7,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) {
+      throw new Error("expected a successful inventory upsert");
+    }
+    expect(first.inventory).toMatchObject({ variantId: created.variant.id, quantity: 7 });
+
+    const second = await repo.setInventory({
+      productId,
+      variantId: created.variant.id,
+      storeId,
+      quantity: 3,
+    });
+    expect(second.ok).toBe(true);
+    if (!second.ok) {
+      throw new Error("expected a successful inventory upsert");
+    }
+    expect(second.inventory.quantity).toBe(3);
+
+    const rows = await db
+      .select()
+      .from(schema.inventory)
+      .where(eq(schema.inventory.variantId, created.variant.id))
+      .all();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.quantity).toBe(3);
+  });
+
+  it("maps a global SKU collision to SKU_IN_USE on D1", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 2);
+    const otherStoreId = await seedSeller(db, 3);
+    const productId = await seedProduct(db, storeId, "d1-mine");
+    const otherProductId = await seedProduct(db, otherStoreId, "d1-theirs");
+
+    expect(
+      await repo.createVariant({
+        productId,
+        storeId,
+        sku: "SHARED",
+        name: "Mine",
+        priceAmountCents: 100,
+        compareAtAmountCents: null,
+        currency: "USD",
+      }),
+    ).toMatchObject({ ok: true });
+
+    expect(
+      await repo.createVariant({
+        productId: otherProductId,
+        storeId: otherStoreId,
+        sku: "SHARED",
+        name: "Theirs",
+        priceAmountCents: 100,
+        compareAtAmountCents: null,
+        currency: "USD",
+      }),
+    ).toEqual({ ok: false, reason: "SKU_IN_USE" });
+  });
+
+  it("only publishes the owner's product once it has a sellable variant with stock", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 4);
+    const productId = await seedProduct(db, storeId, "d1-publish");
+
+    expect(await repo.publishProduct(productId, storeId)).toEqual({ ok: false, reason: "NOT_PUBLISHABLE" });
+
+    const created = await repo.createVariant({
+      productId,
+      storeId,
+      sku: "d1-pub-body",
+      name: "Body Only",
+      priceAmountCents: 49900,
+      compareAtAmountCents: null,
+      currency: "USD",
+    });
+    if (!created.ok) {
+      throw new Error("expected a successful variant create");
+    }
+
+    expect(await repo.publishProduct(productId, storeId)).toEqual({ ok: false, reason: "NOT_PUBLISHABLE" });
+
+    await repo.setInventory({
+      productId,
+      variantId: created.variant.id,
+      storeId,
+      quantity: 2,
+    });
+
+    const published = await repo.publishProduct(productId, storeId);
+    expect(published.ok).toBe(true);
+    if (!published.ok) {
+      throw new Error("expected a successful publish");
+    }
+    expect(published.product.status).toBe("active");
+
+    expect(await repo.publishProduct(productId, storeId)).toMatchObject({ ok: true });
+  });
+
+  it("keeps the product invisible until published, then surfaces it on the catalog", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const catalogRepo = createD1CatalogRepository(db);
+    const storeId = await seedSeller(db, 5);
+    const productId = await seedProduct(db, storeId, "d1-visible");
+
+    const created = await repo.createVariant({
+      productId,
+      storeId,
+      sku: "d1-vis-body",
+      name: "Body Only",
+      priceAmountCents: 5_500,
+      compareAtAmountCents: null,
+      currency: "USD",
+    });
+    if (!created.ok) {
+      throw new Error("expected a successful variant create");
+    }
+    await repo.setInventory({
+      productId,
+      variantId: created.variant.id,
+      storeId,
+      quantity: 9,
+    });
+
+    const before = await catalogRepo.listActiveProducts({ limit: 50, cursor: null });
+    expect(before.items.map((item) => item.slug)).not.toContain("d1-visible");
+
+    await repo.publishProduct(productId, storeId);
+
+    const after = await catalogRepo.listActiveProducts({ limit: 50, cursor: null });
+    const item = after.items.find((candidate) => candidate.slug === "d1-visible");
+    expect(item).toBeDefined();
+    expect(item?.priceAmountCents).toBe(5_500);
+    expect(item?.currency).toBe("USD");
+  });
+
+  it("does not expose another store's product or variant on D1", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 6);
+    const otherStoreId = await seedSeller(db, 7);
+    const productId = await seedProduct(db, storeId, "d1-private");
+
+    expect(
+      await repo.createVariant({
+        productId,
+        storeId: otherStoreId,
+        sku: "SNEAKY",
+        name: "Sneaky",
+        priceAmountCents: 100,
+        compareAtAmountCents: null,
+        currency: "USD",
+      }),
+    ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+    expect(await repo.publishProduct(productId, otherStoreId)).toEqual({
+      ok: false,
+      reason: "PRODUCT_NOT_FOUND",
+    });
   });
 });
 

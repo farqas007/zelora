@@ -464,7 +464,6 @@ export function loadApiBinding(configUrl: URL = API_CONFIG_URL): WranglerD1Bindi
 }
 
 function writeSeedFiles(): string[] {
-  mkdirSync(SEED_OUTPUT_DIR, { recursive: true });
   const files = [
     writeSeedFile("apply.sql", toSqlFile(buildSeedStatements())),
     writeSeedFile("cleanup.sql", toSqlFile(buildCleanupStatements())),
@@ -475,6 +474,7 @@ function writeSeedFiles(): string[] {
 }
 
 function writeSeedFile(name: string, contents: string): string {
+  mkdirSync(SEED_OUTPUT_DIR, { recursive: true });
   const target = new URL(name, SEED_OUTPUT_DIR);
   writeFileSync(target, contents);
   return target.pathname;

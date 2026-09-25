@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import * as schema from "../src/schema";
 import { createLocalCatalogRepository } from "../src/catalog/local-repository";
 import { createTestDatabase, type TestDatabase } from "../src/test/helpers";
@@ -188,6 +188,75 @@ describe("dev seed (development/test data only)", () => {
     // The real row is untouched, and re-running is still safe.
     seedDev(db);
     expect(counts(db).users).toBe(3);
+  });
+
+  it("adopts a real product's existing primary image instead of crashing or duplicating", () => {
+    const { db } = createTestDatabase();
+    // A real marketplace row already claims every fixture natural key and that
+    // product already owns its own primary image (the partial unique index
+    // allows exactly one primary per product).
+    db.insert(schema.users)
+      .values({ email: "dev-customer@example.test", name: "Real Customer" })
+      .run();
+    db.insert(schema.users)
+      .values({ email: "dev-seller@example.test", name: "Real Seller" })
+      .run();
+    db.insert(schema.sellerProfiles)
+      .values({
+        userId: db.select({ id: schema.users.id }).from(schema.users).where(eq(schema.users.email, "dev-seller@example.test")).get()!.id,
+        slug: "zelora-test-seller",
+        displayName: "Real Seller",
+        status: "active",
+      })
+      .run();
+    const sellerProfile = db
+      .select()
+      .from(schema.sellerProfiles)
+      .where(eq(schema.sellerProfiles.slug, "zelora-test-seller"))
+      .get()!;
+    db.insert(schema.stores)
+      .values({ sellerProfileId: sellerProfile.id, name: "Real Store", slug: "zelora-test-store", status: "active" })
+      .run();
+    const store = db.select().from(schema.stores).where(eq(schema.stores.slug, "zelora-test-store")).get()!;
+    db.insert(schema.products)
+      .values({ storeId: store.id, name: "Real Headphones", slug: "wireless-headphones", status: "active" })
+      .run();
+    const product = db
+      .select()
+      .from(schema.products)
+      .where(eq(schema.products.slug, "wireless-headphones"))
+      .get()!;
+    db.insert(schema.productImages)
+      .values({
+        productId: product.id,
+        url: "https://real.test/real-primary.jpg",
+        altText: "Real Primary",
+        isPrimary: 1,
+        sortOrder: 0,
+      })
+      .run();
+
+    // Must not throw — the previous implementation crashed with
+    // "UNIQUE constraint failed: product_images.product_id".
+    expect(() => seedDev(db)).not.toThrow();
+
+    // The real primary image is untouched.
+    const realImage = db
+      .select()
+      .from(schema.productImages)
+      .where(eq(schema.productImages.url, "https://real.test/real-primary.jpg"))
+      .get();
+    expect(realImage).toMatchObject({ isPrimary: 1, altText: "Real Primary" });
+
+    // Exactly one primary image remains for the product — the fixture image was
+    // not inserted as a second primary row.
+    const primaryImages = db
+      .select()
+      .from(schema.productImages)
+      .where(and(eq(schema.productImages.productId, product.id), eq(schema.productImages.isPrimary, 1)))
+      .all();
+    expect(primaryImages).toHaveLength(1);
+    expect(primaryImages[0]!.url).toBe("https://real.test/real-primary.jpg");
   });
 
   it("refuses to run with NODE_ENV=production", () => {

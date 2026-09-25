@@ -15,6 +15,10 @@
     "db:generate": "pnpm --filter @zelora/db run db:generate",
     "db:migrate": "pnpm --filter @zelora/db run db:migrate",
     "db:seed": "pnpm --filter @zelora/db run db:seed",
+    "db:seed:d1": "pnpm --filter @zelora/db run db:seed:d1",
+    "db:seed:d1:plan": "pnpm --filter @zelora/db run db:seed:d1:plan",
+    "db:seed:d1:cleanup": "pnpm --filter @zelora/db run db:seed:d1:cleanup",
+    "db:seed:d1:verify": "pnpm --filter @zelora/db run db:seed:d1:verify",
     "db:studio": "pnpm --filter @zelora/db run db:studio",
     "lint": "eslint . --max-warnings 0",
     "typecheck": "pnpm -r run typecheck"

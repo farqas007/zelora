@@ -112,6 +112,10 @@
     "db:migrate": "mkdir -p .data && drizzle-kit migrate",
     "db:studio": "drizzle-kit studio --verbose",
     "db:seed": "npm run db:migrate && tsx seed/dev.ts",
+    "db:seed:d1": "tsx seed/d1.ts apply --database zelora --yes",
+    "db:seed:d1:plan": "tsx seed/d1.ts plan",
+    "db:seed:d1:cleanup": "tsx seed/d1.ts cleanup --database zelora --yes",
+    "db:seed:d1:verify": "tsx seed/d1.ts verify --database zelora",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },

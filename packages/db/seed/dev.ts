@@ -3,49 +3,50 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { createLocalClient, resolveDbPath, type LocalDatabase } from "../src/client";
 import { migrateLocal } from "../src/migrate";
 import * as schema from "../src/schema";
+import {
+  type FixtureVariant,
+  FIXTURE_CATEGORIES,
+  FIXTURE_CREATED_AT_MS,
+  FIXTURE_IMAGES,
+  FIXTURE_INVENTORY,
+  FIXTURE_ORDER_ADDRESSES,
+  FIXTURE_ORDER_ITEMS,
+  FIXTURE_ORDERS,
+  FIXTURE_PRODUCTS,
+  FIXTURE_SELLER_PROFILES,
+  FIXTURE_STORES,
+  FIXTURE_USERS,
+  FIXTURE_VARIANTS,
+  FIXTURE_ORDER_VARIANT_SKUS,
+  SEED_SUMMARY,
+  type SeedSummary,
+} from "./fixture";
+
+export { SEED_SUMMARY, type SeedSummary } from "./fixture";
 
 /**
  * DEVELOPMENT / TEST SEED DATA — never present in production.
  *
- * Idempotently populates a *local development* SQLite database with a small,
- * clearly fictional but realistic marketplace so the customer shopping
- * experience — public catalog, storefront, product detail — can be exercised
- * by hand and by tests. One approved test store ("Zelora Test Store") sells a
- * handful of products across three categories, each with priced variants,
- * inventory and a primary image, plus a single checkout spanning two of those
- * products so the order/address snapshot tables stay exercised.
+ * Idempotently populates a *local development* SQLite database with the shared
+ * fixture (`./fixture.ts`), a small, clearly fictional but realistic
+ * marketplace so the customer shopping experience — public catalog,
+ * storefront, product detail — can be exercised by hand and by tests. One
+ * approved test store ("Zelora Test Store") sells a handful of products across
+ * three categories, each with priced variants, inventory and a primary image,
+ * plus a single checkout spanning two of those products so the order/address
+ * snapshot tables stay exercised.
  *
  * Every fixture row is looked up by its natural key (email, slug or SKU)
  * before it is inserted, so running the seed twice never creates duplicate
  * test data and it can safely be re-run against a database that already holds
- * real marketplace rows. It is NOT real marketplace data and must never be
- * presented as such. The CLI entry refuses to run when `NODE_ENV = production`.
+ * real marketplace rows. The fixture is shared with the remote D1 SQL
+ * generator (`./d1.ts`), so both paths can never drift. It is NOT real
+ * marketplace data and must never be presented as such. The CLI entry refuses
+ * to run when `NODE_ENV = production`.
  */
 
-export interface SeedSummary {
-  users: number;
-  sellerProfiles: number;
-  stores: number;
-  categories: number;
-  products: number;
-  productVariants: number;
-  productImages: number;
-  orders: number;
-  orderItems: number;
-}
-
-/** The fixture's expected row counts after a completed (idempotent) run. */
-export const SEED_SUMMARY: SeedSummary = {
-  users: 2,
-  sellerProfiles: 1,
-  stores: 1,
-  categories: 3,
-  products: 4,
-  productVariants: 6,
-  productImages: 4,
-  orders: 1,
-  orderItems: 2,
-};
+const TS = FIXTURE_CREATED_AT_MS;
+const SEED_AT = new Date(TS);
 
 /**
  * Refuse to load dev/test fixture data when the runtime reports `production`.
@@ -60,160 +61,68 @@ export function assertSeedAllowed(env: Record<string, string | undefined> = proc
   }
 }
 
-/** Insert the fictional dev fixture inside a single transaction. Idempotent. */
+/**
+ * Insert the fictional dev fixture inside a single transaction. Idempotent.
+ *
+ * New rows always keep the fixture's deterministic ids (so local SQLite rows
+ * are byte-identical to the remote D1 generator's), but every parent foreign
+ * key is resolved from the database by its natural key first — exactly like
+ * the pre-fixture seed did — so a pre-existing real row that already claims a
+ * fixture natural key is adopted instead of crashing on a dangling key or
+ * silently writing children under an unrelated id.
+ */
 export function seedDev(db: LocalDatabase): SeedSummary {
   return db.transaction((tx) => {
     // Accounts: a test customer and the approved seller. Never a password hash.
-    const customer = upsertUser(tx, {
-      email: "dev-customer@example.test",
-      role: "customer",
-      name: "Dev Customer",
-    });
-    const seller = upsertUser(tx, {
-      email: "dev-seller@example.test",
-      role: "seller",
-      name: "Zelora Test Seller",
-    });
+    const customer = upsertUser(tx, FIXTURE_USERS[0]!);
+    const seller = upsertUser(tx, FIXTURE_USERS[1]!);
 
     // Approved seller profile (status `active`, mirrors a reviewed application)
     // and its store.
-    const sellerProfile = upsertSellerProfile(tx, {
-      userId: seller.id,
-      slug: "zelora-test-seller",
-      displayName: "Zelora Test Seller",
-      status: "active",
-    });
-    const store = upsertStore(tx, {
-      sellerProfileId: sellerProfile.id,
-      name: "Zelora Test Store",
-      slug: "zelora-test-store",
-      status: "active",
-      description:
-        "A clearly fictional store used to test the Zelora shopping experience in development. Not a real marketplace seller.",
-    });
+    const sellerProfile = upsertSellerProfile(tx, seller.id, FIXTURE_SELLER_PROFILES[0]!);
+    const store = upsertStore(tx, sellerProfile.id, FIXTURE_STORES[0]!);
 
     // Catalog tree: three root categories, four active products.
-    const audio = upsertCategory(tx, { name: "Audio", slug: "audio", status: "active" });
-    const gaming = upsertCategory(tx, { name: "Gaming", slug: "gaming", status: "active" });
-    const home = upsertCategory(tx, { name: "Home & Living", slug: "home-living", status: "active" });
-
-    const headphones = upsertProduct(tx, {
-      storeId: store.id,
-      categoryId: audio.id,
-      name: "Wireless Headphones",
-      slug: "wireless-headphones",
-      status: "active",
-      description: "Over-ear wireless headphones with active noise cancellation.",
-    });
-    const keyboard = upsertProduct(tx, {
-      storeId: store.id,
-      categoryId: gaming.id,
-      name: "Gaming Keyboard",
-      slug: "gaming-keyboard",
-      status: "active",
-      description: "Mechanical gaming keyboard with per-key RGB backlighting.",
-    });
-    const mouse = upsertProduct(tx, {
-      storeId: store.id,
-      categoryId: gaming.id,
-      name: "Gaming Mouse",
-      slug: "gaming-mouse",
-      status: "active",
-      description: "Precision optical gaming mouse with adjustable DPI.",
-    });
-    const lamp = upsertProduct(tx, {
-      storeId: store.id,
-      categoryId: home.id,
-      name: "LED Desk Lamp",
-      slug: "led-desk-lamp",
-      status: "active",
-      description: "Adjustable LED desk lamp with warm-white and daylight modes.",
-    });
+    const categoryById = new Map<string, typeof schema.categories.$inferSelect>(
+      FIXTURE_CATEGORIES.map((category) => [category.id, upsertCategory(tx, category)]),
+    );
+    const productById = new Map<string, typeof schema.products.$inferSelect>(
+      FIXTURE_PRODUCTS.map((product) => {
+        const category = categoryById.get(product.categoryId);
+        if (category === undefined) {
+          throw new Error(`[dev-seed] missing fixture category for product ${product.slug}`);
+        }
+        return [product.id, upsertProduct(tx, store.id, category.id, product)];
+      }),
+    );
 
     // Sellable variants (SKU is the idempotency key, price in integer cents).
-    const headphonesBlack = upsertVariant(tx, {
-      productId: headphones.id,
-      sku: "DEV-WH-BLK",
-      name: "Matte Black",
-      priceAmountCents: 129_99,
-      compareAtAmountCents: 159_99,
-      currency: "USD",
-      status: "active",
-    });
-    const headphonesCream = upsertVariant(tx, {
-      productId: headphones.id,
-      sku: "DEV-WH-CRM",
-      name: "Cream",
-      priceAmountCents: 129_99,
-      compareAtAmountCents: 159_99,
-      currency: "USD",
-      status: "active",
-    });
-    const keyboardTactile = upsertVariant(tx, {
-      productId: keyboard.id,
-      sku: "DEV-GK-TCT",
-      name: "Tactile switches",
-      priceAmountCents: 89_99,
-      currency: "USD",
-      status: "active",
-    });
-    const keyboardLinear = upsertVariant(tx, {
-      productId: keyboard.id,
-      sku: "DEV-GK-LIN",
-      name: "Linear switches",
-      priceAmountCents: 89_99,
-      currency: "USD",
-      status: "active",
-    });
-    const mouseWired = upsertVariant(tx, {
-      productId: mouse.id,
-      sku: "DEV-GM-RGB",
-      name: "Wired RGB",
-      priceAmountCents: 49_99,
-      currency: "USD",
-      status: "active",
-    });
-    const lampAdjustable = upsertVariant(tx, {
-      productId: lamp.id,
-      sku: "DEV-LD-ADJ",
-      name: "Adjustable white",
-      priceAmountCents: 39_99,
-      currency: "USD",
-      status: "active",
-    });
+    const variantById = upsertVariant(tx, productById, FIXTURE_VARIANTS);
 
-    upsertInventory(tx, { variantId: headphonesBlack.id, quantity: 25 });
-    upsertInventory(tx, { variantId: headphonesCream.id, quantity: 25 });
-    upsertInventory(tx, { variantId: keyboardTactile.id, quantity: 20 });
-    upsertInventory(tx, { variantId: keyboardLinear.id, quantity: 20 });
-    upsertInventory(tx, { variantId: mouseWired.id, quantity: 50 });
-    upsertInventory(tx, { variantId: lampAdjustable.id, quantity: 30 });
+    // Per-variant stock.
+    for (const inventory of FIXTURE_INVENTORY) {
+      const variant = variantById.get(inventory.variantId);
+      if (variant === undefined) {
+        throw new Error(`[dev-seed] missing fixture variant for inventory row ${inventory.variantId}`);
+      }
+      upsertInventory(tx, variant.id, inventory);
+    }
 
     // One primary image per product.
-    upsertPrimaryImage(tx, {
-      productId: headphones.id,
-      url: "https://example.test/wireless-headphones.jpg",
-      altText: "Wireless Headphones",
-    });
-    upsertPrimaryImage(tx, {
-      productId: keyboard.id,
-      url: "https://example.test/gaming-keyboard.jpg",
-      altText: "Gaming Keyboard",
-    });
-    upsertPrimaryImage(tx, {
-      productId: mouse.id,
-      url: "https://example.test/gaming-mouse.jpg",
-      altText: "Gaming Mouse",
-    });
-    upsertPrimaryImage(tx, {
-      productId: lamp.id,
-      url: "https://example.test/led-desk-lamp.jpg",
-      altText: "LED Desk Lamp",
-    });
+    for (const image of FIXTURE_IMAGES) {
+      const product = productById.get(image.productId);
+      if (product === undefined) {
+        throw new Error(`[dev-seed] missing fixture product for image ${image.url}`);
+      }
+      upsertPrimaryImage(tx, product.id, image);
+    }
 
     // One checkout exercising the order/address snapshot tables. Created only
     // when no existing order references any of the fixture variants.
-    upsertFixtureOrder(tx, customer.id, store.id, headphonesBlack, mouseWired);
+    const orderVariants = FIXTURE_ORDER_VARIANT_SKUS
+      .map((sku) => FIXTURE_VARIANTS.find((v) => v.sku === sku))
+      .filter((variant): variant is FixtureVariant => variant !== undefined);
+    upsertFixtureOrder(tx, customer, store.id, orderVariants);
 
     return { ...SEED_SUMMARY };
   });
@@ -221,138 +130,261 @@ export function seedDev(db: LocalDatabase): SeedSummary {
 
 function upsertUser(
   tx: LocalDatabase,
-  values: typeof schema.users.$inferInsert,
+  fixture: (typeof FIXTURE_USERS)[number],
 ): typeof schema.users.$inferSelect {
   const existing = tx
     .select()
     .from(schema.users)
-    .where(eq(schema.users.email, values.email!))
+    .where(eq(schema.users.email, fixture.email))
     .get();
   return existing !== undefined
     ? existing
-    : tx.insert(schema.users).values(values).returning().get();
+    : tx
+        .insert(schema.users)
+        .values({
+          id: fixture.id,
+          email: fixture.email,
+          role: fixture.role,
+          name: fixture.name,
+          createdAt: SEED_AT,
+          updatedAt: SEED_AT,
+        })
+        .returning()
+        .get();
 }
 
 function upsertSellerProfile(
   tx: LocalDatabase,
-  values: typeof schema.sellerProfiles.$inferInsert,
+  userId: string,
+  fixture: (typeof FIXTURE_SELLER_PROFILES)[number],
 ): typeof schema.sellerProfiles.$inferSelect {
   const existing = tx
     .select()
     .from(schema.sellerProfiles)
-    .where(eq(schema.sellerProfiles.userId, values.userId!))
+    .where(eq(schema.sellerProfiles.userId, userId))
     .get();
   return existing !== undefined
     ? existing
-    : tx.insert(schema.sellerProfiles).values(values).returning().get();
+    : tx
+        .insert(schema.sellerProfiles)
+        .values({
+          id: fixture.id,
+          userId,
+          slug: fixture.slug,
+          displayName: fixture.displayName,
+          status: fixture.status,
+          createdAt: SEED_AT,
+          updatedAt: SEED_AT,
+        })
+        .returning()
+        .get();
 }
 
 function upsertStore(
   tx: LocalDatabase,
-  values: typeof schema.stores.$inferInsert,
+  sellerProfileId: string,
+  fixture: (typeof FIXTURE_STORES)[number],
 ): typeof schema.stores.$inferSelect {
   const existing = tx
     .select()
     .from(schema.stores)
-    .where(eq(schema.stores.slug, values.slug!))
+    .where(eq(schema.stores.slug, fixture.slug))
     .get();
   return existing !== undefined
     ? existing
-    : tx.insert(schema.stores).values(values).returning().get();
+    : tx
+        .insert(schema.stores)
+        .values({
+          id: fixture.id,
+          sellerProfileId,
+          name: fixture.name,
+          slug: fixture.slug,
+          description: fixture.description,
+          status: fixture.status,
+          createdAt: SEED_AT,
+          updatedAt: SEED_AT,
+        })
+        .returning()
+        .get();
 }
 
 /** Root categories only: the fixture has no children, and the partial unique
  * index enforces one slug per root level. */
 function upsertCategory(
   tx: LocalDatabase,
-  values: typeof schema.categories.$inferInsert,
+  fixture: (typeof FIXTURE_CATEGORIES)[number],
 ): typeof schema.categories.$inferSelect {
   const existing = tx
     .select()
     .from(schema.categories)
-    .where(and(eq(schema.categories.slug, values.slug!), isNull(schema.categories.parentId)))
+    .where(and(eq(schema.categories.slug, fixture.slug), isNull(schema.categories.parentId)))
     .get();
   return existing !== undefined
     ? existing
-    : tx.insert(schema.categories).values(values).returning().get();
+    : tx
+        .insert(schema.categories)
+        .values({
+          id: fixture.id,
+          name: fixture.name,
+          slug: fixture.slug,
+          status: fixture.status,
+          createdAt: SEED_AT,
+          updatedAt: SEED_AT,
+        })
+        .returning()
+        .get();
 }
 
 function upsertProduct(
   tx: LocalDatabase,
-  values: typeof schema.products.$inferInsert,
+  storeId: string,
+  categoryId: string,
+  fixture: (typeof FIXTURE_PRODUCTS)[number],
 ): typeof schema.products.$inferSelect {
   const existing = tx
     .select()
     .from(schema.products)
-    .where(and(eq(schema.products.storeId, values.storeId!), eq(schema.products.slug, values.slug!)))
+    .where(and(eq(schema.products.storeId, storeId), eq(schema.products.slug, fixture.slug)))
     .get();
   return existing !== undefined
     ? existing
-    : tx.insert(schema.products).values(values).returning().get();
+    : tx
+        .insert(schema.products)
+        .values({
+          id: fixture.id,
+          storeId,
+          categoryId,
+          name: fixture.name,
+          slug: fixture.slug,
+          description: fixture.description,
+          status: fixture.status,
+          createdAt: SEED_AT,
+          updatedAt: SEED_AT,
+        })
+        .returning()
+        .get();
 }
 
 function upsertVariant(
   tx: LocalDatabase,
-  values: typeof schema.productVariants.$inferInsert,
-): typeof schema.productVariants.$inferSelect {
-  const existing =
-    values.sku == null
-      ? undefined
-      : tx
-          .select()
-          .from(schema.productVariants)
-          .where(eq(schema.productVariants.sku, values.sku))
-          .get();
-  return existing !== undefined
-    ? existing
-    : tx.insert(schema.productVariants).values(values).returning().get();
+  productById: Map<string, typeof schema.products.$inferSelect>,
+  fixtures: readonly FixtureVariant[],
+): Map<string, typeof schema.productVariants.$inferSelect> {
+  const resolved = new Map<string, typeof schema.productVariants.$inferSelect>();
+  for (const fixture of fixtures) {
+    const existing = tx
+      .select()
+      .from(schema.productVariants)
+      .where(eq(schema.productVariants.sku, fixture.sku))
+      .get();
+    if (existing !== undefined) {
+      resolved.set(fixture.id, existing);
+      continue;
+    }
+    const product = productById.get(fixture.productId);
+    if (product === undefined) {
+      throw new Error(`[dev-seed] missing fixture product for variant ${fixture.sku}`);
+    }
+    resolved.set(
+      fixture.id,
+      tx
+        .insert(schema.productVariants)
+        .values({
+          id: fixture.id,
+          productId: product.id,
+          sku: fixture.sku,
+          name: fixture.name,
+          priceAmountCents: fixture.priceAmountCents,
+          compareAtAmountCents: fixture.compareAtAmountCents,
+          currency: fixture.currency,
+          status: fixture.status,
+          createdAt: SEED_AT,
+          updatedAt: SEED_AT,
+        })
+        .returning()
+        .get(),
+    );
+  }
+  return resolved;
 }
 
 function upsertInventory(
   tx: LocalDatabase,
-  values: typeof schema.inventory.$inferInsert,
+  variantId: string,
+  fixture: (typeof FIXTURE_INVENTORY)[number],
 ): void {
   const existing = tx
     .select()
     .from(schema.inventory)
-    .where(eq(schema.inventory.variantId, values.variantId!))
+    .where(eq(schema.inventory.variantId, variantId))
     .get();
   if (existing === undefined) {
-    tx.insert(schema.inventory).values(values).run();
+    tx.insert(schema.inventory)
+      .values({ variantId, quantity: fixture.quantity, updatedAt: SEED_AT })
+      .run();
   }
 }
 
 function upsertPrimaryImage(
   tx: LocalDatabase,
-  values: typeof schema.productImages.$inferInsert,
+  productId: string,
+  fixture: (typeof FIXTURE_IMAGES)[number],
 ): void {
+  // A product may carry at most one primary image (partial unique index), so a
+  // real marketplace product that already owns its primary image is adopted as
+  // is — the seed never overwrites it or adds a second primary row.
+  const existingPrimary = tx
+    .select()
+    .from(schema.productImages)
+    .where(
+      and(
+        eq(schema.productImages.productId, productId),
+        eq(schema.productImages.isPrimary, 1),
+      ),
+    )
+    .get();
+  if (existingPrimary !== undefined) {
+    return;
+  }
+
+  // No primary image yet: adopt the fixture image only if it is not already
+  // present (idempotency), so a re-run never duplicates the row.
   const existing = tx
     .select()
     .from(schema.productImages)
     .where(
       and(
-        eq(schema.productImages.productId, values.productId!),
-        eq(schema.productImages.url, values.url!),
+        eq(schema.productImages.productId, productId),
+        eq(schema.productImages.url, fixture.url),
       ),
     )
     .get();
   if (existing === undefined) {
-    tx.insert(schema.productImages).values({ ...values, isPrimary: 1, sortOrder: 0 }).run();
+    tx.insert(schema.productImages)
+      .values({
+        id: fixture.id,
+        productId,
+        url: fixture.url,
+        altText: fixture.altText,
+        isPrimary: 1,
+        sortOrder: 0,
+        createdAt: SEED_AT,
+      })
+      .run();
   }
 }
 
 /** Create the fixture order once — only when no order references a fixture variant. */
 function upsertFixtureOrder(
   tx: LocalDatabase,
-  customerUserId: string,
+  customer: typeof schema.users.$inferSelect,
   storeId: string,
-  headphonesVariant: typeof schema.productVariants.$inferSelect,
-  mouseVariant: typeof schema.productVariants.$inferSelect,
+  orderVariants: readonly FixtureVariant[],
 ): void {
   const existing = tx
     .select({ id: schema.orderItems.id })
     .from(schema.orderItems)
-    .where(inArray(schema.orderItems.variantId, [headphonesVariant.id, mouseVariant.id]))
+    .where(inArray(schema.orderItems.variantId, orderVariants.map((v) => v.id)))
     .limit(1)
     .all();
   if (existing.length > 0) {
@@ -362,67 +394,55 @@ function upsertFixtureOrder(
   const order = tx
     .insert(schema.orders)
     .values({
-      customerUserId,
-      status: "confirmed",
-      currency: "USD",
-      subtotalAmountCents: 179_98,
-      shippingAmountCents: 0,
-      discountAmountCents: 0,
-      totalAmountCents: 179_98,
+      id: FIXTURE_ORDERS[0]!.id,
+      customerUserId: customer.id,
+      status: FIXTURE_ORDERS[0]!.status,
+      currency: FIXTURE_ORDERS[0]!.currency,
+      subtotalAmountCents: FIXTURE_ORDERS[0]!.subtotalAmountCents,
+      shippingAmountCents: FIXTURE_ORDERS[0]!.shippingAmountCents,
+      discountAmountCents: FIXTURE_ORDERS[0]!.discountAmountCents,
+      totalAmountCents: FIXTURE_ORDERS[0]!.totalAmountCents,
+      createdAt: SEED_AT,
+      updatedAt: SEED_AT,
     })
     .returning()
     .get();
 
   tx.insert(schema.orderAddresses)
-    .values([
-      {
+    .values(
+      FIXTURE_ORDER_ADDRESSES.map((address) => ({
+        id: address.id,
         orderId: order.id,
-        kind: "shipping",
-        recipientName: "Dev Customer",
-        line1: "1 Dev Lane",
-        city: "Testville",
-        countryCode: "US",
-      },
-      {
-        orderId: order.id,
-        kind: "billing",
-        recipientName: "Dev Customer",
-        line1: "1 Dev Lane",
-        city: "Testville",
-        countryCode: "US",
-      },
-    ])
+        kind: address.kind,
+        recipientName: address.recipientName,
+        line1: address.line1,
+        city: address.city,
+        countryCode: address.countryCode,
+        createdAt: SEED_AT,
+        updatedAt: SEED_AT,
+      })),
+    )
     .run();
 
   tx.insert(schema.orderItems)
-    .values([
-      {
+    .values(
+      FIXTURE_ORDER_ITEMS.map((item) => ({
+        id: item.id,
         orderId: order.id,
-        variantId: headphonesVariant.id,
+        variantId: item.variantId,
         storeId,
-        productName: "Wireless Headphones",
-        variantName: headphonesVariant.name,
-        sku: headphonesVariant.sku,
-        quantity: 1,
-        unitAmountCents: 129_99,
-        lineTotalAmountCents: 129_99,
-        currency: "USD",
-        status: "confirmed",
-      },
-      {
-        orderId: order.id,
-        variantId: mouseVariant.id,
-        storeId,
-        productName: "Gaming Mouse",
-        variantName: mouseVariant.name,
-        sku: mouseVariant.sku,
-        quantity: 1,
-        unitAmountCents: 49_99,
-        lineTotalAmountCents: 49_99,
-        currency: "USD",
-        status: "confirmed",
-      },
-    ])
+        productName: item.productName,
+        variantName: item.variantName,
+        sku: item.sku,
+        quantity: item.quantity,
+        unitAmountCents: item.unitAmountCents,
+        lineTotalAmountCents: item.lineTotalAmountCents,
+        currency: item.currency,
+        status: item.status,
+        createdAt: SEED_AT,
+        updatedAt: SEED_AT,
+      })),
+    )
     .run();
 }
 

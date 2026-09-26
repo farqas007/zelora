@@ -4,6 +4,7 @@ import * as schema from "../src/schema";
 import { createLocalCatalogRepository } from "../src/catalog/local-repository";
 import { createTestDatabase, type TestDatabase } from "../src/test/helpers";
 import { assertSeedAllowed, SEED_SUMMARY, seedDev } from "./dev";
+import { FIXTURE_IMAGES } from "./fixture";
 
 /**
  * Focused tests for the dev/test seed: the fixture that makes up the data,
@@ -124,7 +125,7 @@ describe("dev seed (development/test data only)", () => {
     expect(headphones?.priceAmountCents).toBe(129_99);
     expect(headphones?.currency).toBe("USD");
     expect(headphones?.image).toEqual({
-      url: "https://example.test/wireless-headphones.jpg",
+      url: "https://zelora-web.farqas007.workers.dev/images/products/wireless-headphones.jpg",
       altText: "Wireless Headphones",
     });
 
@@ -257,6 +258,31 @@ describe("dev seed (development/test data only)", () => {
       .all();
     expect(primaryImages).toHaveLength(1);
     expect(primaryImages[0]!.url).toBe("https://real.test/real-primary.jpg");
+  });
+
+  it("seeds browser-loadable, deterministic image URLs instead of dead placeholders", () => {
+    const { db } = createTestDatabase();
+    seedDev(db);
+
+    // The browser fetches `product_images.url` directly, with no proxy or
+    // rewrite in front. A reserved placeholder host (RFC 6761 — `.test`,
+    // `.example`, `.invalid`, `.localhost`) never resolves in DNS, so a single
+    // such URL ships a broken image to the storefront.
+    const reservedTlds = [".test", ".example", ".invalid", ".localhost"];
+    for (const image of FIXTURE_IMAGES) {
+      const host = new URL(image.url).hostname;
+      expect(image.url.startsWith("https://")).toBe(true);
+      expect(reservedTlds.some((tld) => host.endsWith(tld))).toBe(false);
+    }
+
+    // Every fixture URL is written verbatim, so a re-run resolves the same row
+    // and the local/D1 seeds stay byte-identical.
+    const seeded = db
+      .select({ url: schema.productImages.url, altText: schema.productImages.altText })
+      .from(schema.productImages)
+      .all();
+    expect(seeded.map((row) => row.url).sort()).toEqual(FIXTURE_IMAGES.map((i) => i.url).sort());
+    expect(seeded.every((row) => row.altText !== null)).toBe(true);
   });
 
   it("refuses to run with NODE_ENV=production", () => {

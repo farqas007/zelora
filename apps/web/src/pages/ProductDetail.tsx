@@ -34,6 +34,7 @@ export function ProductDetailPage() {
   const [state, setState] = useState<DetailState>({ status: "loading" });
   const [addingVariantId, setAddingVariantId] = useState<string | null>(null);
   const [addFeedback, setAddFeedback] = useState<AddToCartFeedback | null>(null);
+  const [imageFailed, setImageFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -78,6 +79,12 @@ export function ProductDetailPage() {
     const timer = window.setTimeout(() => setAddFeedback(null), 4000);
     return () => window.clearTimeout(timer);
   }, [addFeedback]);
+
+  // Navigating to another product must retry its artwork rather than inherit
+  // the previous product's failed image.
+  useEffect(() => {
+    setImageFailed(false);
+  }, [slug]);
 
   async function onAddToCart(variant: CatalogVariantDto): Promise<void> {
     if (status !== "authenticated" || addingVariantId !== null) {
@@ -136,10 +143,11 @@ export function ProductDetailPage() {
 
             <div className="product-detail-grid">
               <div className="product-detail-media">
-                {product.images.length > 0 ? (
+                {product.images.length > 0 && !imageFailed ? (
                   <img
                     src={product.images[0]!.url}
                     alt={product.images[0]!.altText ?? product.name}
+                    onError={() => setImageFailed(true)}
                   />
                 ) : (
                   <div className="product-media">

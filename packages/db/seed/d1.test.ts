@@ -11,11 +11,20 @@ import { createD1CatalogRepository } from "../src/catalog/d1-repository";
 import { isValidId } from "../src/ids";
 import {
   buildCleanupStatements,
+  buildImageUrlStatement,
   buildPreflightStatement,
+  buildRefreshImageStatements,
   buildSeedStatements,
+  buildStorefrontStatement,
   buildVerifyStatement,
+  buildVerifyStatements,
+  currentFixtureImageUrl,
   decidePreflight,
   EXPECTED_PREFLIGHT,
+  extractJsonArrayPayload,
+  fixtureImageUrls,
+  legacyFixtureImageUrls,
+  parsePreflightRow,
 } from "./d1";
 import {
   FIXTURE_CATEGORIES,
@@ -119,6 +128,210 @@ async function preflightRow(database: D1Binding): Promise<Record<string, number>
   const result = await database.prepare(statement).all<Record<string, number>>();
   const row = result.results[0] ?? {};
   return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Number(value ?? 0)]));
+}
+
+/**
+ * The URLs the fixture wrote for its images in every revision *before* the
+ * current one, keyed by product slug and ordered oldest generation first:
+ * `example.test` first, then `placehold.co`.
+ *
+ * Pinned here as literals, keyed by product slug, so the stale-URL tests build
+ * their input independently of `fixtureImageUrls` — otherwise they would just
+ * assert that the implementation equals itself and could not catch a wrong or
+ * over-broad allowlist. Both generations are listed because a real database can
+ * be sitting at either one, and the tooling has to migrate each of them.
+ */
+const LEGACY_IMAGE_URLS_BY_SLUG: Readonly<Record<string, readonly string[]>> = {
+  "wireless-headphones": [
+    "https://example.test/wireless-headphones.jpg",
+    "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Wireless+Headphones",
+  ],
+  "gaming-keyboard": [
+    "https://example.test/gaming-keyboard.jpg",
+    "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Gaming+Keyboard",
+  ],
+  "gaming-mouse": [
+    "https://example.test/gaming-mouse.jpg",
+    "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Gaming+Mouse",
+  ],
+  "led-desk-lamp": [
+    "https://example.test/led-desk-lamp.jpg",
+    "https://placehold.co/1200x900/ece6f8/1c1230.png?text=LED+Desk+Lamp",
+  ],
+};
+
+/** Every legacy generation for `image`, oldest first. */
+function legacyUrlsFor(image: (typeof FIXTURE_IMAGES)[number]): readonly string[] {
+  const product = FIXTURE_PRODUCTS.find((candidate) => candidate.id === image.productId);
+  const urls = product === undefined ? undefined : LEGACY_IMAGE_URLS_BY_SLUG[product.slug];
+  expect(urls, `no pinned legacy URLs for image ${image.id}`).toBeDefined();
+  return urls!;
+}
+
+/**
+ * The most recent legacy generation — the URL a database seeded one revision ago
+ * actually holds. This is the realistic live drift, so the bulk of the
+ * stale-URL tests stage exactly this generation.
+ */
+function legacyUrlFor(image: (typeof FIXTURE_IMAGES)[number]): string {
+  const urls = legacyUrlsFor(image);
+  expect(urls.length).toBeGreaterThan(0);
+  return urls[urls.length - 1]!;
+}
+
+/** The oldest legacy generation — the first URL this fixture ever wrote. */
+function oldestLegacyUrlFor(image: (typeof FIXTURE_IMAGES)[number]): string {
+  const urls = legacyUrlsFor(image);
+  expect(urls.length).toBeGreaterThan(0);
+  return urls[0]!;
+}
+
+/**
+ * The exact SQL literal list an allowlist clause should contain for `image`:
+ * every pinned legacy generation, then the current URL.
+ *
+ * Built from the pinned constants above and `FIXTURE_IMAGES`, never from
+ * `fixtureImageUrls`/`legacyFixtureImageUrls`, so asserting a generated
+ * statement contains this cannot degenerate into comparing the implementation
+ * with itself.
+ */
+function allowlistedUrlList(image: (typeof FIXTURE_IMAGES)[number]): string {
+  return [...legacyUrlsFor(image), image.url].map((url) => `'${url}'`).join(", ");
+}
+
+/**
+ * Reproduce the live-D1 drift exactly: the fixture's deterministic image rows
+ * present, but carrying an older fixture revision's URLs (the most recent one).
+ */
+async function rewriteImagesToLegacyUrls(database: D1Binding): Promise<void> {
+  for (const image of FIXTURE_IMAGES) {
+    await database
+      .prepare("UPDATE product_images SET url = ? WHERE id = ?")
+      .bind(legacyUrlFor(image), image.id)
+      .run();
+  }
+}
+
+/**
+ * The same drift, one revision further back: rows still carrying the fixture's
+ * original `example.test` URLs, which never resolved in DNS.
+ */
+async function rewriteImagesToOldestLegacyUrls(database: D1Binding): Promise<void> {
+  for (const image of FIXTURE_IMAGES) {
+    await database
+      .prepare("UPDATE product_images SET url = ? WHERE id = ?")
+      .bind(oldestLegacyUrlFor(image), image.id)
+      .run();
+  }
+}
+
+async function imageUrls(database: D1Binding): Promise<string[]> {
+  const result = await database
+    .prepare("SELECT url FROM product_images ORDER BY url")
+    .all<{ url: string }>();
+  return result.results.map((row: { url: string }) => row.url);
+}
+
+/** Every user table in the database, so nothing can hide from a full dump. */
+async function allTableNames(database: D1Binding): Promise<string[]> {
+  const result = await database
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+    .all<{ name: string }>();
+  return result.results
+    .map((row: { name: string }) => row.name)
+    // SQLite internals and D1's own `_cf_*` books are unreadable (SQLITE_AUTH)
+    // and are not user data in any case.
+    .filter((name: string) => !name.startsWith("sqlite_") && !name.startsWith("_"));
+}
+
+/** A stable serialisation of whole tables, for proving an operation is scoped. */
+async function dumpTables(database: D1Binding, tables: readonly string[]): Promise<string> {
+  const parts: string[] = [];
+  for (const table of tables) {
+    const result = await database
+      .prepare(`SELECT * FROM "${table}" ORDER BY 1, 2, 3`)
+      .all<Record<string, unknown>>();
+    parts.push(`${table} => ${JSON.stringify(result.results)}`);
+  }
+  return parts.join("\n");
+}
+
+/** Every `product_images` column except `url`, so a url-only write can be proven. */
+async function imageMetadataRows(database: D1Binding): Promise<string[]> {
+  const result = await database
+    .prepare(
+      "SELECT id, product_id, alt_text, sort_order, is_primary, created_at FROM product_images ORDER BY id",
+    )
+    .all<Record<string, unknown>>();
+  return result.results.map((row: Record<string, unknown>) => JSON.stringify(row));
+}
+
+/** Insert a non-fixture image row. `is_primary` must stay 0: the schema allows
+ * only one primary image per product, which the fixture rows already use. */
+async function insertRealImage(
+  database: D1Binding,
+  row: { id: string; productId: string; url: string },
+): Promise<void> {
+  await database
+    .prepare(
+      "INSERT INTO product_images (id, product_id, url, alt_text, sort_order, is_primary, created_at) VALUES (?, ?, ?, ?, 0, 0, ?)",
+    )
+    .bind(row.id, row.productId, row.url, "Real merchant photo", FIXTURE_CREATED_AT_MS)
+    .run();
+}
+
+/**
+ * Only the `product_images` DELETEs from the cleanup file.
+ *
+ * Used to exercise the image guard in isolation: a full cleanup also deletes the
+ * fixture products, and `product_images.product_id` is `ON DELETE CASCADE`, so
+ * running everything would remove any image row via cascade and prove nothing
+ * about the guard itself.
+ */
+function imageCleanupStatements(): string[] {
+  return buildCleanupStatements().filter((statement) => statement.startsWith("DELETE FROM product_images"));
+}
+
+const REAL_IDS = {
+  user: "0192a0ff-0000-7000-8000-0000000000b0",
+  profile: "0192a0ff-0000-7000-8000-0000000000b1",
+  store: "0192a0ff-0000-7000-8000-0000000000b2",
+  product: "0192a0ff-0000-7000-8000-0000000000b3",
+} as const;
+
+/**
+ * A real seller → store → product chain that no fixture guard matches, so
+ * images hung off it can only be removed by cascade (if its product were ever
+ * deleted) and never by a cleanup DELETE.
+ */
+async function insertRealProduct(database: D1Binding): Promise<string> {
+  const ts = FIXTURE_CREATED_AT_MS;
+  await database
+    .prepare(
+      "INSERT INTO users (id, email, role, status, name, password_hash, created_at, updated_at) VALUES (?, 'real-seller@zelora.example', 'seller', 'active', 'Real Seller', NULL, ?, ?)",
+    )
+    .bind(REAL_IDS.user, ts, ts)
+    .run();
+  await database
+    .prepare(
+      "INSERT INTO seller_profiles (id, user_id, slug, display_name, status, created_at, updated_at) VALUES (?, ?, 'real-seller-shop', 'Real Seller Shop', 'active', ?, ?)",
+    )
+    .bind(REAL_IDS.profile, REAL_IDS.user, ts, ts)
+    .run();
+  await database
+    .prepare(
+      "INSERT INTO stores (id, seller_profile_id, name, slug, description, status, created_at, updated_at) VALUES (?, ?, 'Real Store', 'real-store', 'Not the fixture', 'active', ?, ?)",
+    )
+    .bind(REAL_IDS.store, REAL_IDS.profile, ts, ts)
+    .run();
+  // category_id stays NULL so the row is coupled to no fixture category.
+  await database
+    .prepare(
+      "INSERT INTO products (id, store_id, category_id, name, slug, description, status, created_at, updated_at) VALUES (?, ?, NULL, 'Real Product', 'real-product', 'Not the fixture', 'active', ?, ?)",
+    )
+    .bind(REAL_IDS.product, REAL_IDS.store, ts, ts)
+    .run();
+  return REAL_IDS.product;
 }
 
 async function counts(database: D1Binding): Promise<typeof SEED_SUMMARY> {
@@ -279,7 +492,7 @@ describe("remote D1 seed tooling (rehearsal, generated SQL verbatim)", () => {
     expect(headphones?.category).toMatchObject({ slug: "audio", name: "Audio" });
     expect(headphones?.priceAmountCents).toBe(129_99);
     expect(headphones?.image).toEqual({
-      url: "https://example.test/wireless-headphones.jpg",
+      url: "https://zelora-web.farqas007.workers.dev/images/products/wireless-headphones.jpg",
       altText: "Wireless Headphones",
     });
 
@@ -411,6 +624,272 @@ describe("remote D1 seed tooling (rehearsal, generated SQL verbatim)", () => {
     expect(await count(binding, "users")).toBe(1);
   });
 
+  it("recognises stale-URL fixture image rows as the fixture's own rows", async () => {
+    await applySql(binding, buildSeedStatements());
+    await rewriteImagesToLegacyUrls(binding);
+    expect(await imageUrls(binding)).toEqual(FIXTURE_IMAGES.map((image) => legacyUrlFor(image)).sort());
+
+    // Every image row is the fixture's, just under an older URL. The preflight
+    // must count them as present: reading them as absent is what made the live
+    // database look "partially seeded" and blocked cleanup/apply.
+    const row = await preflightRow(binding);
+    expect(row.product_images_fixture).toBe(FIXTURE_IMAGES.length);
+    expect(row.product_images_fixture).toBe(EXPECTED_PREFLIGHT.product_images_fixture);
+    expect(decidePreflight(row)).toMatchObject({ alreadySeeded: true, partial: false, ready: false });
+  });
+
+  it("cleanup removes stale-URL fixture image rows, and a later apply restores the current URLs", async () => {
+    await applySql(binding, buildSeedStatements());
+    await rewriteImagesToLegacyUrls(binding);
+
+    await applySql(binding, buildCleanupStatements());
+
+    expect(decidePreflight(await preflightRow(binding)).ready).toBe(true);
+    expect(await count(binding, "product_images")).toBe(0);
+
+    // Re-applying is what converges the database onto the current URLs. It also
+    // proves the stale rows were genuinely gone: had any survived, the new
+    // primary image would collide with the one-primary-per-product index.
+    await applySql(binding, buildSeedStatements());
+    expect(await imageUrls(binding)).toEqual(FIXTURE_IMAGES.map((image) => image.url).sort());
+    expect(decidePreflight(await preflightRow(binding)).alreadySeeded).toBe(true);
+  });
+
+  it("cleanup removes the current fixture image rows too, without any legacy rewrite", async () => {
+    await applySql(binding, buildSeedStatements());
+    expect(await imageUrls(binding)).toEqual(FIXTURE_IMAGES.map((image) => image.url).sort());
+
+    await applySql(binding, buildCleanupStatements());
+
+    expect(await count(binding, "product_images")).toBe(0);
+    expect(decidePreflight(await preflightRow(binding)).ready).toBe(true);
+  });
+
+  it("never removes an image row that is not the fixture's own, whatever it happens to share", async () => {
+    // The decoys hang off a real (non-fixture) product on purpose.
+    // `product_images.product_id` is `ON DELETE CASCADE`, so a real image
+    // attached to a *fixture* product is unavoidably removed when cleanup
+    // deletes that product — that is the schema's cascade, not the image
+    // guard, and it would mask what these assertions are actually checking.
+    const realProductId = await insertRealProduct(binding);
+    await applySql(binding, buildSeedStatements());
+    await rewriteImagesToLegacyUrls(binding);
+
+    const legacyUrl = legacyUrlFor(FIXTURE_IMAGES[0]!);
+    // A real photo that reuses a legacy fixture URL verbatim but has its own id:
+    // only the id guard can keep it.
+    const realWithLegacyUrl = legacyUrl;
+    // A real photo on a host this fixture has used, but at a URL that is not
+    // itself allowlisted: only the closed equality allowlist can keep it.
+    const realOnLegacyHost = "https://example.test/merchant-real-photo.jpg";
+    // An ordinary real photo: shares nothing with the fixture.
+    const realPhoto = "https://cdn.zelora.example/merchant-headphones.jpg";
+
+    await insertRealImage(binding, {
+      id: FOREIGN_ROW_ID,
+      productId: realProductId,
+      url: realWithLegacyUrl,
+    });
+    await insertRealImage(binding, {
+      id: "0192a0ff-0000-7000-8000-0000000000c2",
+      productId: realProductId,
+      url: realOnLegacyHost,
+    });
+    await insertRealImage(binding, {
+      id: "0192a0ff-0000-7000-8000-0000000000c3",
+      productId: realProductId,
+      url: realPhoto,
+    });
+
+    await applySql(binding, buildCleanupStatements());
+
+    // Every real row survives, including the one whose URL is byte-identical to
+    // a legacy fixture URL: ownership is the id + product id pair, not the URL.
+    expect(await imageUrls(binding)).toEqual([legacyUrl, realOnLegacyHost, realPhoto].sort());
+    for (const image of FIXTURE_IMAGES) {
+      const remaining = await binding
+        .prepare("SELECT COUNT(*) AS n FROM product_images WHERE id = ?")
+        .bind(image.id)
+        .first<{ n: number }>();
+      expect(Number(remaining?.n ?? 0), `fixture image ${image.id} survived cleanup`).toBe(0);
+    }
+    // The real chain is intact, and the fixture keys are genuinely gone.
+    expect(await count(binding, "products")).toBe(1);
+    expect(decidePreflight(await preflightRow(binding)).ready).toBe(true);
+  });
+
+  it("leaves a row that claims a fixture image id but is not the fixture's, and fails closed", async () => {
+    const realProductId = await insertRealProduct(binding);
+    await applySql(binding, buildSeedStatements());
+
+    // Case A: the fixture's own id and product id, but a URL the fixture never
+    // wrote. Only the closed allowlist can keep it.
+    const squatted = "https://cdn.zelora.example/taken-over-headphones.jpg";
+    await binding
+      .prepare("UPDATE product_images SET url = ? WHERE id = ?")
+      .bind(squatted, FIXTURE_IMAGES[0]!.id)
+      .run();
+
+    // Case B: a fixture image id carrying a real fixture URL, but belonging to
+    // a different product. Only the id + product id pairing can keep it.
+    await binding
+      .prepare("UPDATE product_images SET product_id = ? WHERE id = ?")
+      .bind(realProductId, FIXTURE_IMAGES[1]!.id)
+      .run();
+
+    // Image guard only. A full cleanup also deletes the fixture products, and
+    // `product_images.product_id` is ON DELETE CASCADE, which would remove both
+    // rows regardless of the guard under test.
+    await applySql(binding, imageCleanupStatements());
+
+    expect(await imageUrls(binding)).toEqual([squatted, FIXTURE_IMAGES[1]!.url].sort());
+    expect(await count(binding, "product_images")).toBe(2);
+
+    // Failing closed is the point: the fixture's first image key is still
+    // claimed, so cleanup must not report success and let a later apply insert
+    // a second primary image for the same product.
+    const row = await preflightRow(binding);
+    expect(row.product_images_fixture).toBe(1);
+    expect(decidePreflight(row).ready).toBe(false);
+  });
+
+  it("refresh-images: rewrites a stale fixture image URL to the current one, and touches nothing else", async () => {
+    const otherTables = (await allTableNames(binding)).filter((name) => name !== "product_images");
+    await applySql(binding, buildSeedStatements());
+    await rewriteImagesToLegacyUrls(binding);
+
+    const beforeOtherTables = await dumpTables(binding, otherTables);
+    const beforeImageMetadata = await imageMetadataRows(binding);
+    expect(await imageUrls(binding)).toEqual(FIXTURE_IMAGES.map((image) => legacyUrlFor(image)).sort());
+
+    await applySql(binding, buildRefreshImageStatements());
+
+    expect(await imageUrls(binding)).toEqual(FIXTURE_IMAGES.map((image) => image.url).sort());
+    // Not one other table moved — critically, no product row was deleted, so
+    // nothing could reach a real merchant's images through ON DELETE CASCADE.
+    expect(await dumpTables(binding, otherTables)).toBe(beforeOtherTables);
+    // And within product_images, only the url column moved.
+    expect(await imageMetadataRows(binding)).toEqual(beforeImageMetadata);
+  });
+
+  it("refresh-images: migrates a database still on the oldest legacy generation, in one run", async () => {
+    // A database seeded from the fixture's *first* revision carries the original
+    // `example.test` URLs, not the later `placehold.co` ones. Both generations
+    // stay in the allowlist, so a single run converges either starting point
+    // rather than needing one run per revision.
+    await applySql(binding, buildSeedStatements());
+    await rewriteImagesToOldestLegacyUrls(binding);
+    expect(await imageUrls(binding)).toEqual(FIXTURE_IMAGES.map((image) => oldestLegacyUrlFor(image)).sort());
+
+    await applySql(binding, buildRefreshImageStatements());
+
+    expect(await imageUrls(binding)).toEqual(FIXTURE_IMAGES.map((image) => image.url).sort());
+    // Still a url-only write: no product deleted, so nothing could have reached
+    // a real merchant's images through ON DELETE CASCADE.
+    expect(await count(binding, "products")).toBe(FIXTURE_PRODUCTS.length);
+  });
+
+  it("cleanup removes fixture image rows at the oldest legacy generation too", async () => {
+    await applySql(binding, buildSeedStatements());
+    await rewriteImagesToOldestLegacyUrls(binding);
+
+    await applySql(binding, buildCleanupStatements());
+
+    expect(await count(binding, "product_images")).toBe(0);
+    expect(decidePreflight(await preflightRow(binding)).ready).toBe(true);
+  });
+
+  it("refresh-images: is a no-op when the URLs are already current, and stays a no-op when repeated", async () => {
+    await applySql(binding, buildSeedStatements());
+    const before = await imageUrls(binding);
+    expect(before).toEqual(FIXTURE_IMAGES.map((image) => image.url).sort());
+
+    // The guard admits only stale URLs, so these UPDATEs match nothing at all.
+    await applySql(binding, buildRefreshImageStatements());
+    expect(await imageUrls(binding)).toEqual(before);
+
+    await applySql(binding, buildRefreshImageStatements());
+    expect(await imageUrls(binding)).toEqual(before);
+  });
+
+  it("refresh-images: never touches a row that is not the fixture's own", async () => {
+    const realProductId = await insertRealProduct(binding);
+    await applySql(binding, buildSeedStatements());
+    await rewriteImagesToLegacyUrls(binding);
+
+    // (a) unrelated id, unrelated product, ordinary real photo.
+    const realPhoto = "https://cdn.zelora.example/merchant-headphones.jpg";
+    // (b) unrelated id and product, but reusing a legacy fixture URL verbatim:
+    // only the id + product id guard can keep it.
+    const realWithLegacyUrl = legacyUrlFor(FIXTURE_IMAGES[0]!);
+    await insertRealImage(binding, { id: FOREIGN_ROW_ID, productId: realProductId, url: realPhoto });
+    await insertRealImage(binding, {
+      id: "0192a0ff-0000-7000-8000-0000000000c1",
+      productId: realProductId,
+      url: realWithLegacyUrl,
+    });
+    // (c) the fixture's own image id carrying a URL the fixture never wrote:
+    // only the closed allowlist can keep it.
+    const squatted = "https://cdn.zelora.example/squatted-headphones.jpg";
+    await binding
+      .prepare("UPDATE product_images SET url = ? WHERE id = ?")
+      .bind(squatted, FIXTURE_IMAGES[0]!.id)
+      .run();
+    // (d) the fixture's own image id and legacy URL, but a real product:
+    // only the id + product id pairing can keep it.
+    await binding
+      .prepare("UPDATE product_images SET product_id = ? WHERE id = ?")
+      .bind(realProductId, FIXTURE_IMAGES[1]!.id)
+      .run();
+
+    await applySql(binding, buildRefreshImageStatements());
+
+    // Images 2 and 3 are the only rows that moved: (a)-(d) are all still exactly
+    // as they were, including the one whose URL matched the allowlist byte for byte.
+    expect(await imageUrls(binding)).toEqual(
+      [
+        squatted,
+        legacyUrlFor(FIXTURE_IMAGES[1]!),
+        realPhoto,
+        realWithLegacyUrl,
+        FIXTURE_IMAGES[2]!.url,
+        FIXTURE_IMAGES[3]!.url,
+      ].sort(),
+    );
+    // The real seller chain is intact and so is the whole fixture catalog:
+    // refreshing URLs must not have cost a single product, variant or store.
+    expect(await count(binding, "products")).toBe(FIXTURE_PRODUCTS.length + 1);
+    expect(await count(binding, "product_variants")).toBe(FIXTURE_VARIANTS.length);
+    expect(await count(binding, "stores")).toBe(FIXTURE_STORES.length + 1);
+    const row = await preflightRow(binding);
+    expect(row.products_fixture).toBe(FIXTURE_PRODUCTS.length);
+    // Case (d) moved one image row onto a real product, so the fixture owns
+    // three of its four image keys — down one, and only by that deliberate move.
+    expect(row.product_images_fixture).toBe(FIXTURE_IMAGES.length - 1);
+  });
+
+  it("refresh-images: reports every fixture image row individually, not as a count", async () => {
+    await applySql(binding, buildSeedStatements());
+    await rewriteImagesToLegacyUrls(binding);
+
+    const statement = buildImageUrlStatement();
+    expect(statement.trimStart().toUpperCase().startsWith("SELECT")).toBe(true);
+    const rows = await binding
+      .prepare(statement)
+      .all<{ id: string; product_id: string; url: string }>();
+
+    // One row per fixture image: a count could not tell "all four stale" from
+    // "one stale", which is exactly the distinction the refresh has to make.
+    expect(rows.results).toHaveLength(FIXTURE_IMAGES.length);
+    for (const row of rows.results) {
+      const image = FIXTURE_IMAGES.find((candidate) => candidate.id === row.id)!;
+      expect(image).toBeDefined();
+      expect(row.product_id).toBe(image.productId);
+      expect(row.url).toBe(legacyUrlFor(image));
+      expect(currentFixtureImageUrl(row.id)).toBe(image.url);
+    }
+  });
+
   it("surfaces a partial fixture after an interrupted apply and lets cleanup finish it", async () => {
     // Catalog row statements only — leave the order/address/item tail off, as
     // if the apply was interrupted mid-way.
@@ -469,6 +948,344 @@ describe("remote D1 seed tooling (rehearsal, generated SQL verbatim)", () => {
       presentKeys: ["users_fixture"],
     });
     expect(decidePreflight({ ...ready, tables_found: 10 })).toMatchObject({ tablesMissing: true });
+  });
+});
+
+/**
+ * Wrangler `--json` output handling.
+ *
+ * Regression coverage for the remote `verify` failure: `wrangler d1 execute
+ * --file … --json` prints its progress rendering (`├ Checking if file needs
+ * uploading`, `├ 🌀 Uploading …`) to **stdout** ahead of the payload, so
+ * `JSON.parse(stdout)` threw `Unexpected token '├'`. The fixture below is a
+ * verbatim capture of that real remote output.
+ *
+ * Pure string tests — no Miniflare, no wrangler, no network.
+ */
+describe("wrangler --json output parsing", () => {
+  const SPINNER_PREFIX =
+    "├ Checking if file needs uploading\n" +
+    "│\n" +
+    "├ 🌀 Uploading 245a64cf-0841-4faf-978c-171c03fd0dc8.29b09cf0cdd0e622.sql\n" +
+    "│ 🌀 Uploading complete.\n" +
+    "│\n";
+
+  /** The exact shape `d1 execute --file --json` returns: one entry, stats only. */
+  const FILE_STATS_STDOUT = `${SPINNER_PREFIX}${JSON.stringify(
+    [
+      {
+        results: [
+          {
+            "Total queries executed": 2,
+            "Rows read": 196,
+            "Rows written": 0,
+            "Database size (MB)": "0.32",
+          },
+        ],
+        success: true,
+        finalBookmark: "0000006e-00000004-000050f1-c95ee698aa55ad9f1295f4856311ca7f",
+        meta: { rows_read: 196, rows_written: 0 },
+      },
+    ],
+    null,
+    2,
+  )}\n`;
+
+  it("skips wrangler's spinner/progress lines written to stdout before the payload", () => {
+    const payload = extractJsonArrayPayload(FILE_STATS_STDOUT);
+    expect(payload.startsWith("[")).toBe(true);
+    expect(payload).not.toContain("Uploading");
+    expect(JSON.parse(payload)).toEqual([
+      expect.objectContaining({ success: true, finalBookmark: expect.any(String) }),
+    ]);
+  });
+
+  it("passes through a payload that already starts the stream", () => {
+    const bare = JSON.stringify([{ results: [{ a: 1 }] }]);
+    expect(extractJsonArrayPayload(bare)).toBe(bare);
+    expect(extractJsonArrayPayload(`  ${bare}\n`)).toBe(bare);
+  });
+
+  it("ignores anything printed after the payload and keeps nesting/string braces intact", () => {
+    const payload = JSON.stringify([
+      {
+        results: [{ url: "https://placehold.co/a.png?text=Wireless+[Headphones]", nested: [1, [2, 3]] }],
+      },
+    ]);
+    expect(extractJsonArrayPayload(`${SPINNER_PREFIX}${payload}\nDone in 42ms.\n`)).toBe(payload);
+  });
+
+  it("fails loudly when the stream holds no JSON array or is truncated", () => {
+    expect(() => extractJsonArrayPayload("")).toThrow(/no JSON output/);
+    expect(() => extractJsonArrayPayload("Error: something went wrong")).toThrow(/no JSON output/);
+    expect(() => extractJsonArrayPayload('[\n  { "results": [\n')).toThrow(/truncated JSON/);
+  });
+
+  it("parses a preflight row out of a spinner-prefixed stream", () => {
+    const row = Object.fromEntries([
+      ...Object.entries(EXPECTED_PREFLIGHT).map(([key, value]) => [key, value]),
+      ...Object.keys(EXPECTED_PREFLIGHT).map((key) => [key.replace(/_fixture$/, "_total"), 0]),
+      ["tables_found", 11],
+    ]);
+    const stdout = `${SPINNER_PREFIX}${JSON.stringify([{ results: [row], success: true }], null, 2)}\n`;
+    const parsed = parsePreflightRow(stdout);
+    expect(parsed.users_fixture).toBe(EXPECTED_PREFLIGHT.users_fixture);
+    expect(parsed.tables_found).toBe(11);
+    expect(decidePreflight(parsed)).toMatchObject({ alreadySeeded: true, partial: false });
+  });
+
+  it("refuses to read counts out of the aggregate stats a --file run returns", () => {
+    // Regression guard for the silent false negative: stats coerce to all-zero
+    // counts, which would read as "no fixture rows present" and could wrongly
+    // authorise a write. parsePreflightRow must fail closed instead.
+    expect(() => parsePreflightRow(FILE_STATS_STDOUT)).toThrow(/expected count columns/);
+  });
+});
+
+/**
+ * The generated `product_images` cleanup guard, checked on the SQL text alone.
+ *
+ * `product_images` is the one table whose natural key has changed across
+ * fixture revisions, so its guard is the one place where a stale row must still
+ * be removable. These assertions pin that the widened URL set is a *closed
+ * allowlist on top of* the deterministic id + product id — never a widening of
+ * ownership.
+ */
+describe("product_images cleanup guard (generated SQL, no database)", () => {
+  const imageDeletes = (): string[] =>
+    buildCleanupStatements().filter((statement) => statement.startsWith("DELETE FROM product_images"));
+
+  it("emits one guarded DELETE per fixture image", () => {
+    expect(imageDeletes()).toHaveLength(FIXTURE_IMAGES.length);
+  });
+
+  it("pins the deterministic image id and product id and admits only the known fixture URLs", () => {
+    for (const image of FIXTURE_IMAGES) {
+      const statement = imageDeletes().find((candidate) => candidate.includes(`id = '${image.id}'`));
+      expect(statement, `no DELETE for fixture image ${image.id}`).toBeDefined();
+      // Ownership is still the deterministic id + product id pair.
+      expect(statement).toContain(`id = '${image.id}'`);
+      expect(statement).toContain(`AND product_id = '${image.productId}'`);
+      // The URL set is exactly every legacy generation plus the current one,
+      // and nothing else.
+      expect(statement).toContain(`url IN (${allowlistedUrlList(image)})`);
+      expect(statement).not.toContain("example.test/merchant");
+    }
+  });
+
+  it("uses a closed equality allowlist, never a wildcard or an OR-chain", () => {
+    for (const statement of imageDeletes()) {
+      expect(statement).toContain("url IN (");
+      expect(statement).not.toContain("LIKE");
+      expect(statement).not.toContain("GLOB");
+      expect(statement).not.toContain("%");
+      // No OR-chain: each DELETE can only ever address its own one image.
+      expect(statement).not.toContain(" OR ");
+    }
+  });
+
+  it("fixtureImageUrls lists every legacy generation then the current one, per image", () => {
+    for (const image of FIXTURE_IMAGES) {
+      expect(fixtureImageUrls(image)).toEqual([...legacyUrlsFor(image), image.url]);
+    }
+  });
+
+  it("every legacy generation belongs to a fixture product, and the whole set is unique", () => {
+    const legacy = FIXTURE_IMAGES.flatMap((image) => legacyUrlsFor(image));
+    // Both past generations stay recognisable, so a database sitting at either
+    // one can still be migrated by refresh-images and cleaned up.
+    expect(legacy).toHaveLength(FIXTURE_IMAGES.length * 2);
+    for (const url of legacy) {
+      expect(url).toMatch(/^https:\/\/(placehold\.co|example\.test)\//);
+    }
+
+    const allowed = FIXTURE_IMAGES.flatMap((image) => fixtureImageUrls(image));
+    expect(new Set(allowed).size).toBe(allowed.length);
+  });
+
+  it("every current image URL is an absolute https URL on the deployed web Worker", () => {
+    // The demo artwork is served as static assets by the web Worker: the four
+    // files live in `apps/web/public/images/products/` and Vite copies `public/`
+    // to the build root, so each URL is that worker's origin plus the file's
+    // public path. A reserved host here would render a broken image, and a
+    // root-relative path would violate the "fetched directly, no rewrite"
+    // contract the catalog mapping relies on.
+    const seen = new Set<string>();
+    for (const image of FIXTURE_IMAGES) {
+      const url = new URL(image.url);
+      expect(url.protocol).toBe("https:");
+      expect(url.host).toBe("zelora-web.farqas007.workers.dev");
+      expect(url.pathname).toMatch(/^\/images\/products\/[a-z0-9-]+\.jpg$/);
+      seen.add(url.pathname);
+    }
+    // One distinct asset per fixture image — no two products share a file.
+    expect(seen.size).toBe(FIXTURE_IMAGES.length);
+  });
+
+  it("the preflight counts image rows by id + product id, never narrowed by URL", () => {
+    const line = buildPreflightStatement()
+      .split("\n")
+      .find((candidate) => candidate.includes("AS product_images_fixture"));
+    expect(line).toBeDefined();
+    for (const image of FIXTURE_IMAGES) {
+      expect(line).toContain(`(id = '${image.id}' AND product_id = '${image.productId}')`);
+    }
+    // A URL predicate here would hide a stale-URL row as "absent" again.
+    expect(line).not.toContain("url");
+  });
+
+  it("keeps the preflight and the cleanup in agreement about what a fixture image row is", () => {
+    // Both derive the same ownership pairs (the preflight parenthesises them for
+    // its OR-chain, the DELETE inlines them), so cleanup can never be blocked by
+    // a preflight that disagrees, nor pass a check it does not satisfy.
+    const preflight = buildPreflightStatement().replace(/\s+/g, " ");
+    for (const image of FIXTURE_IMAGES) {
+      const id = `id = '${image.id}'`;
+      const productId = `product_id = '${image.productId}'`;
+      expect(preflight).toContain(`(${id} AND ${productId})`);
+      const statement = imageDeletes().find((candidate) => candidate.includes(id));
+      expect(statement).toContain(`${id} AND ${productId}`);
+    }
+  });
+});
+
+/**
+ * The generated `refresh-images` SQL, checked on the text alone.
+ *
+ * `refresh-images` is the only builder in this file that writes an UPDATE, so
+ * its blast radius is asserted explicitly: one statement per fixture image, one
+ * column assigned, one table named, and a guard that is a closed conjunction.
+ */
+describe("refresh-images SQL (generated, no database)", () => {
+  const FORBIDDEN = [
+    "DELETE ",
+    "INSERT ",
+    "ALTER ",
+    "DROP ",
+    "CREATE ",
+    "TRUNCATE",
+    "REPLACE ",
+    "LIKE",
+    "GLOB",
+    "%",
+    " OR ",
+  ];
+
+  it("emits exactly one statement per fixture image", () => {
+    expect(buildRefreshImageStatements()).toHaveLength(FIXTURE_IMAGES.length);
+  });
+
+  it("assigns only product_images.url, on the exact id + product id + legacy URLs", () => {
+    for (const image of FIXTURE_IMAGES) {
+      const statement = buildRefreshImageStatements().find((candidate) => candidate.includes(`id = '${image.id}'`));
+      expect(statement, `no UPDATE for fixture image ${image.id}`).toBeDefined();
+      // Every past generation is admitted, so a database sitting at any of them
+      // converges in one run; the current URL is not among them.
+      expect(statement).toBe(
+        `UPDATE product_images SET url = '${image.url}' ` +
+          `WHERE id = '${image.id}' AND product_id = '${image.productId}' ` +
+          `AND url IN (${legacyUrlsFor(image).map((url) => `'${url}'`).join(", ")})`,
+      );
+    }
+  });
+
+  it("never writes a column other than url, nor touches another table", () => {
+    for (const statement of buildRefreshImageStatements()) {
+      const setList = statement.slice(statement.indexOf(" SET ") + 5, statement.indexOf(" WHERE "));
+      expect(setList).toMatch(/^url = '[^']*'$/);
+      expect(setList).not.toContain("alt_text");
+      expect(setList).not.toContain("sort_order");
+      expect(setList).not.toContain("is_primary");
+      // product_images is the only table named anywhere in the statement.
+      expect(statement.match(/product_images/g)).toHaveLength(1);
+    }
+  });
+
+  it("keeps every write keyword out of the statement but its single UPDATE", () => {
+    for (const statement of buildRefreshImageStatements()) {
+      const upper = statement.toUpperCase();
+      for (const token of FORBIDDEN) {
+        expect(upper, `token ${JSON.stringify(token)}`).not.toContain(token);
+      }
+      expect(upper.match(/UPDATE/g)).toHaveLength(1);
+    }
+  });
+
+  it("admits only stale URLs, so a row already on the current URL is never written", () => {
+    // This is the whole idempotency mechanism: the current URL is absent from
+    // every guard, so re-running matches zero rows without needing a check.
+    for (const image of FIXTURE_IMAGES) {
+      const guard = legacyFixtureImageUrls(image);
+      expect(guard).toEqual([...legacyUrlsFor(image)]);
+      expect(guard).not.toContain(image.url);
+      const statement = buildRefreshImageStatements().find((candidate) =>
+        candidate.includes(`id = '${image.id}'`),
+      )!;
+      const guardList = statement.slice(statement.indexOf("url IN (") + "url IN (".length);
+      expect(guardList).toBe(`${legacyUrlsFor(image).map((url) => `'${url}'`).join(", ")})`);
+      expect(guardList).not.toContain(image.url);
+    }
+  });
+
+  it("is the only builder that writes an UPDATE, leaving apply insert-only and cleanup delete-only", () => {
+    expect(buildRefreshImageStatements().every((s) => s.startsWith("UPDATE product_images"))).toBe(true);
+    expect(buildSeedStatements().every((s) => s.startsWith("INSERT INTO"))).toBe(true);
+    expect(buildCleanupStatements().every((s) => s.startsWith("DELETE FROM"))).toBe(true);
+    expect(buildSeedStatements().some((s) => s.toUpperCase().includes("UPDATE "))).toBe(false);
+  });
+
+  it("exposes the image URL report as a single read-only SELECT", () => {
+    const statement = buildImageUrlStatement();
+    expect(statement.trimStart().toUpperCase().startsWith("SELECT")).toBe(true);
+    const upper = statement.toUpperCase();
+    for (const token of ["UPDATE", "DELETE", "INSERT", "ALTER", "DROP", "CREATE"]) {
+      expect(upper).not.toContain(token);
+    }
+    // Filtered to the fixture's own rows, so the report can only ever see them.
+    for (const image of FIXTURE_IMAGES) {
+      expect(statement).toContain(`id = '${image.id}' AND product_id = '${image.productId}'`);
+    }
+  });
+
+  it("exposes the current URL per fixture image id and nothing else", () => {
+    for (const image of FIXTURE_IMAGES) {
+      expect(currentFixtureImageUrl(image.id)).toBe(image.url);
+    }
+    expect(currentFixtureImageUrl(FOREIGN_ROW_ID)).toBeUndefined();
+    expect(currentFixtureImageUrl("")).toBeUndefined();
+  });
+});
+
+/** The read-only shape of the two statements `verify` runs. */
+describe("verify statements", () => {
+  const FORBIDDEN = ["UPDATE ", "DELETE FROM", "INSERT INTO", "REPLACE INTO", "DROP ", "ALTER ", "CREATE ", "TRUNCATE"];
+
+  it("buildVerifyStatements returns the preflight and storefront SELECTs separately", () => {
+    const [preflight, storefront] = buildVerifyStatements();
+    expect(preflight).toBe(buildPreflightStatement());
+    expect(storefront).toBe(buildStorefrontStatement());
+    // Two discrete statements: `wrangler d1 execute --file` collapses a
+    // multi-statement file into one aggregate-stats entry, so verify must run
+    // them one `--command` at a time to get per-statement rows.
+    expect(buildVerifyStatements()).toHaveLength(2);
+  });
+
+  it("every verify statement is a single read-only SELECT", () => {
+    for (const statement of buildVerifyStatements()) {
+      expect(statement.trimStart().toUpperCase().startsWith("SELECT")).toBe(true);
+      expect(statement).not.toContain(";");
+      const upper = statement.toUpperCase();
+      for (const token of FORBIDDEN) {
+        expect(upper, `token ${token} in ${statement.slice(0, 40)}`).not.toContain(token);
+      }
+    }
+  });
+
+  it("the combined verify.sql artifact still contains both statements", () => {
+    const combined = buildVerifyStatement();
+    expect(combined).toContain(buildPreflightStatement());
+    expect(combined).toContain(buildStorefrontStatement());
+    expect(combined).toContain(";\n");
   });
 });
 

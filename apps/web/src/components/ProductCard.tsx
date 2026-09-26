@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import type { CatalogProductSummaryDto } from "@zelora/shared";
 import { formatCents } from "../lib/format";
@@ -5,8 +6,22 @@ import { formatCents } from "../lib/format";
 /**
  * Storefront card for a {@link CatalogProductSummaryDto}. The whole card is a
  * link to the product detail page so customers can tap anywhere on it.
+ *
+ * A product with no image falls back to the Zelora watermark. The same
+ * fallback covers an image row whose URL cannot be loaded (a dead or mistyped
+ * seller-supplied URL), so a failed fetch degrades to the placeholder instead of
+ * leaving a broken image in the grid.
  */
 export function ProductCard({ product }: { product: CatalogProductSummaryDto }) {
+  const imageUrl = product.image?.url ?? null;
+  const [imageFailed, setImageFailed] = useState(false);
+
+  // Reset when the card is reused for a different image so a previously failed
+  // URL does not suppress the next product's artwork.
+  useEffect(() => {
+    setImageFailed(false);
+  }, [imageUrl]);
+
   const price =
     product.priceAmountCents !== null && product.currency !== null
       ? formatCents(product.priceAmountCents, product.currency)
@@ -15,12 +30,13 @@ export function ProductCard({ product }: { product: CatalogProductSummaryDto }) 
   return (
     <Link className="product-card" to={`/catalog/products/${product.slug}`}>
       <div className="product-media">
-        {product.image !== null ? (
+        {imageUrl !== null && !imageFailed ? (
           <img
             className="product-image"
-            src={product.image.url}
-            alt={product.image.altText ?? product.name}
+            src={imageUrl}
+            alt={product.image!.altText ?? product.name}
             loading="lazy"
+            onError={() => setImageFailed(true)}
           />
         ) : (
           <img

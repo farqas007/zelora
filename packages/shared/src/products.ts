@@ -231,6 +231,32 @@ export interface ProductImageDto {
   createdAt: string;
 }
 
+/**
+ * Count/alt/url/byte limits for the seller product-image surface.
+ *
+ * `maxPerProduct`, `altTextMaxLength` and `urlMaxLength` govern stored rows.
+ * `maxFilesPerRequest` and `maxBytesPerFile` govern a single upload request
+ * and are the byte/count half of the upload contract: `5 MiB` per file and
+ * `8` files per request bound one request at `40 MiB` before any per-product
+ * cap is consulted.
+ *
+ * Deliberately **absent** here: a MIME allowlist. Which byte sequences count
+ * as an image is decided by content sniffing at upload time, not by a
+ * client-supplied `Content-Type`, so a published list of accepted types would
+ * describe a policy the API does not actually enforce. An unused limit that
+ * nothing enforces is worse than no limit at all.
+ */
+export const PRODUCT_IMAGE_LIMITS = {
+  /** Maximum images one product may hold, enforced on every add. */
+  maxPerProduct: 8,
+  /** Maximum image files one upload request may carry. */
+  maxFilesPerRequest: 8,
+  /** Maximum size of a single uploaded image file, in bytes (5 MiB). */
+  maxBytesPerFile: 5 * 1024 * 1024,
+  altTextMaxLength: 200,
+  urlMaxLength: 2048,
+} as const;
+
 /** One product's images, in the deterministic display order the API returns. */
 export interface SellerProductImageListData {
   productId: string;

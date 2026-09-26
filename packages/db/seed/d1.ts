@@ -20,7 +20,17 @@
  *     runs a read-only preflight and refuses to proceed unless the database is
  *     either fully free of the fixture keys or already fully seeded.
  *   - Cleanup is a separate opt-in SQL file that deletes ONLY rows matching the
- *     fixture's deterministic ids AND a natural key, children first.
+ *     fixture's deterministic ids AND a natural key, children first. Product
+ *     images are additionally restricted to the URLs this fixture has actually
+ *     written (the current one plus every entry in
+ *     `LEGACY_FIXTURE_IMAGE_URLS`, one per past revision), so a stale-URL row of
+ *     the fixture's own is removable while an unrelated row squatting a
+ *     fixture id is never matched.
+ *   - `refresh-images` is the narrow alternative to cleanup + apply when only the
+ *     fixture image URLs have drifted: it UPDATEs nothing but `product_images.url`,
+ *     and only on rows matching the deterministic image id AND product id AND a
+ *     legacy fixture URL. It never deletes a product, so it cannot reach a real
+ *     merchant's images through `product_images`' `ON DELETE CASCADE`.
  *
  * Never run by tests/CI: every exported builder is pure, and the CLI entry is
  * only active when the file is executed directly (`import.meta.url` check).
@@ -42,6 +52,7 @@ import {
   FIXTURE_STORES,
   FIXTURE_USERS,
   FIXTURE_VARIANTS,
+  type FixtureImage,
 } from "./fixture";
 
 const API_BINDING = "DB";
@@ -193,6 +204,92 @@ export function buildSeedStatements(): string[] {
 }
 
 /**
+ * Image URLs earlier fixture revisions wrote, keyed by product slug, oldest
+ * generation first.
+ *
+ * `FIXTURE_IMAGES` only carries the current URL, so a database seeded from an
+ * older revision still holds its image row under a legacy URL. Those rows are
+ * the fixture's own — same deterministic id, same deterministic product id —
+ * and cleanup must recognise them, otherwise they survive cleanup and a later
+ * apply inserts a *second* image per product, two `is_primary` rows each.
+ *
+ * Each slug lists *every* prior generation, because a database can be at any
+ * one of them: revision 1 wrote `example.test` (a reserved host that never
+ * resolved in DNS) and revision 2 wrote `placehold.co`. `refresh-images`
+ * migrates whichever it finds to the current URL, and cleanup removes rows at
+ * any generation. Generations are only ever appended — never edited or
+ * dropped — so an already-migrated row stays recognisable.
+ *
+ * This is an explicit allowlist, never a host or prefix pattern: a row that
+ * squats a fixture image id under any other URL is still left untouched, and
+ * the post-cleanup preflight then reports the fixture keys as still present
+ * (fail-closed) instead of quietly passing.
+ */
+const LEGACY_FIXTURE_IMAGE_URLS: Readonly<Record<string, readonly string[]>> = {
+  "wireless-headphones": [
+    "https://example.test/wireless-headphones.jpg",
+    "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Wireless+Headphones",
+  ],
+  "gaming-keyboard": [
+    "https://example.test/gaming-keyboard.jpg",
+    "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Gaming+Keyboard",
+  ],
+  "gaming-mouse": [
+    "https://example.test/gaming-mouse.jpg",
+    "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Gaming+Mouse",
+  ],
+  "led-desk-lamp": [
+    "https://example.test/led-desk-lamp.jpg",
+    "https://placehold.co/1200x900/ece6f8/1c1230.png?text=LED+Desk+Lamp",
+  ],
+};
+
+/**
+ * Stale URLs this fixture wrote for `image` in an earlier revision and no
+ * longer writes today, oldest first. Empty when the image's URL has never been
+ * revised.
+ *
+ * `refresh-images` rewrites exactly this set, so a row that already carries the
+ * current URL is never written at all (the UPDATE simply matches nothing). A
+ * generation that has since been reinstated as the current URL is dropped here
+ * rather than widening the guard to match both old and new.
+ */
+export function legacyFixtureImageUrls(image: FixtureImage): readonly string[] {
+  const product = FIXTURE_PRODUCTS.find((candidate) => candidate.id === image.productId);
+  if (!product) {
+    throw new Error(`[dev-seed] fixture image ${image.id} references unknown product ${image.productId}.`);
+  }
+  const legacy = LEGACY_FIXTURE_IMAGE_URLS[product.slug];
+  if (legacy === undefined) return [];
+  return legacy.filter((url) => url !== image.url);
+}
+
+/**
+ * Every URL this fixture has written for `image`, oldest first and the current
+ * one last. Cleanup deletes on this set; nothing outside it is ever matched.
+ */
+export function fixtureImageUrls(image: FixtureImage): readonly string[] {
+  return [...legacyFixtureImageUrls(image), image.url];
+}
+
+/**
+ * The rows this tooling claims as the fixture's own images: each deterministic
+ * image id paired with its deterministic product id.
+ *
+ * Shared by the preflight count and the cleanup DELETE so the two can never
+ * disagree about which rows are the fixture's. Deliberately URL-agnostic —
+ * recognising a stale-URL row as fixture-owned is what lets cleanup remove it
+ * and lets a later apply re-insert it with the current URL.
+ */
+export function fixtureImageOwnershipPredicate(): string {
+  const clauses = FIXTURE_IMAGES.map(
+    (image) => `(id = ${sqlStr(image.id)} AND product_id = ${sqlStr(image.productId)})`,
+  );
+  if (clauses.length === 0) throw new Error("[dev-seed] fixture defines no images.");
+  return clauses.join(" OR ");
+}
+
+/**
  * Read-only preflight: counts fixture-row presence by natural key plus the
  * total row count of every table involved (to detect foreign data), plus a
  * schema-existence check. Runs as a single SELECT so `wrangler d1 execute
@@ -205,10 +302,8 @@ export function buildPreflightStatement(): string {
   const productSlugs = FIXTURE_PRODUCTS.map((p) => sqlStr(p.slug)).join(", ");
   const skus = FIXTURE_VARIANTS.map((v) => sqlStr(v.sku)).join(", ");
   const variantIds = FIXTURE_VARIANTS.map((v) => sqlStr(v.id)).join(", ");
-  const productIds = FIXTURE_PRODUCTS.map((p) => sqlStr(p.id)).join(", ");
   const orderId = sqlStr(FIXTURE_ORDERS[0]!.id);
   const orderVariantIn = ORDER_VARIANT_IDS.map(sqlStr).join(", ");
-  const imageUrls = FIXTURE_IMAGES.map((i) => sqlStr(i.url)).join(", ");
 
   return [
     "SELECT",
@@ -219,7 +314,7 @@ export function buildPreflightStatement(): string {
     `  (SELECT COUNT(*) FROM products WHERE store_id = ${sqlStr(FIXTURE_STORES[0]!.id)} AND slug IN (${productSlugs})) AS products_fixture,`,
     `  (SELECT COUNT(*) FROM product_variants WHERE sku IN (${skus})) AS product_variants_fixture,`,
     `  (SELECT COUNT(*) FROM inventory WHERE variant_id IN (${variantIds})) AS inventory_fixture,`,
-    `  (SELECT COUNT(*) FROM product_images WHERE product_id IN (${productIds}) AND url IN (${imageUrls})) AS product_images_fixture,`,
+    `  (SELECT COUNT(*) FROM product_images WHERE ${fixtureImageOwnershipPredicate()}) AS product_images_fixture,`,
     `  (SELECT COUNT(*) FROM orders WHERE id = ${orderId}) AS orders_fixture,`,
     `  (SELECT COUNT(*) FROM order_addresses WHERE order_id = ${orderId}) AS order_addresses_fixture,`,
     `  (SELECT COUNT(*) FROM order_items WHERE variant_id IN (${orderVariantIn})) AS order_items_fixture,`,
@@ -302,28 +397,49 @@ export function decidePreflight(row: Record<string, number>): PreflightState {
  * use (active store + active profile + active products, cheapest active
  * variant, primary image).
  */
-export function buildVerifyStatement(): string {
-  const preflight = buildPreflightStatement();
-  return [
-    preflight,
-    ";",
+export function buildStorefrontStatement(): string {
+  return (
     `SELECT s.slug AS store, p.slug AS product, c.slug AS category, ` +
-      `MIN(v.price_amount_cents) AS cheapest_cents, COUNT(v.id) AS active_variants ` +
-      `FROM stores s ` +
-      `JOIN seller_profiles sp ON sp.id = s.seller_profile_id ` +
-      `JOIN products p ON p.store_id = s.id AND p.status = 'active' ` +
-      `JOIN categories c ON c.id = p.category_id AND c.status = 'active' ` +
-      `LEFT JOIN product_variants v ON v.product_id = p.id AND v.status = 'active' ` +
-      `WHERE s.slug = ${sqlStr(FIXTURE_STORES[0]!.slug)} AND s.status = 'active' ` +
-      `AND sp.status = 'active' ` +
-      `GROUP BY s.id, p.id ORDER BY p.slug`,
-  ].join("\n");
+    `MIN(v.price_amount_cents) AS cheapest_cents, COUNT(v.id) AS active_variants ` +
+    `FROM stores s ` +
+    `JOIN seller_profiles sp ON sp.id = s.seller_profile_id ` +
+    `JOIN products p ON p.store_id = s.id AND p.status = 'active' ` +
+    `JOIN categories c ON c.id = p.category_id AND c.status = 'active' ` +
+    `LEFT JOIN product_variants v ON v.product_id = p.id AND v.status = 'active' ` +
+    `WHERE s.slug = ${sqlStr(FIXTURE_STORES[0]!.slug)} AND s.status = 'active' ` +
+    `AND sp.status = 'active' ` +
+    `GROUP BY s.id, p.id ORDER BY p.slug`
+  );
+}
+
+/**
+ * The two read-only statements `verify` runs, in order.
+ *
+ * They are executed as two separate statements rather than as one multi
+ * statement `--file`: `wrangler d1 execute --file` collapses a file into a
+ * single result entry holding aggregate stats (`Total queries executed`,
+ * `Rows read`, ...) instead of per-statement rows, so a combined file can
+ * never yield the preflight counts or the storefront rows.
+ */
+export function buildVerifyStatements(): readonly [string, string] {
+  return [buildPreflightStatement(), buildStorefrontStatement()];
+}
+
+export function buildVerifyStatement(): string {
+  return [buildPreflightStatement(), ";", buildStorefrontStatement()].join("\n");
 }
 
 /**
  * Cleanup: delete ONLY fixture rows, children first, each guarded by the
  * fixture's deterministic id AND a natural key, so real marketplace rows are
  * never touched. Run as a standalone opt-in file.
+ *
+ * `product_images` is the one table where the natural key has changed across
+ * fixture revisions: the deterministic id + product id pin ownership, and the
+ * `url IN (...)` allowlist (`fixtureImageUrls`) admits the current URL plus any
+ * legacy URL, so a row seeded from an older fixture is still removed instead of
+ * being stranded. The allowlist is closed — a fixture id carrying any other URL
+ * is left alone and surfaces as a failed post-cleanup preflight.
  */
 export function buildCleanupStatements(): string[] {
   const statements: string[] = [];
@@ -350,7 +466,8 @@ export function buildCleanupStatements(): string[] {
   }
   for (const image of FIXTURE_IMAGES) {
     statements.push(
-      `DELETE FROM product_images WHERE id = ${sqlStr(image.id)} AND product_id = ${sqlStr(image.productId)} AND url = ${sqlStr(image.url)}`,
+      `DELETE FROM product_images WHERE id = ${sqlStr(image.id)} AND product_id = ${sqlStr(image.productId)} ` +
+        `AND url IN (${fixtureImageUrls(image).map(sqlStr).join(", ")})`,
     );
   }
   for (const variant of FIXTURE_VARIANTS) {
@@ -387,7 +504,76 @@ export function buildCleanupStatements(): string[] {
   return statements;
 }
 
+/**
+ * Targeted repair of the fixture's image rows: rewrite a stale fixture URL to
+ * the current one, touching nothing else.
+ *
+ * This is the narrow alternative to a full `cleanup` + `apply` cycle. Cleanup
+ * has to delete the fixture's products, and `product_images.product_id` is
+ * `ON DELETE CASCADE`, so a full cycle is the wrong tool for a database that
+ * also holds real sellers: it puts unrelated image rows at risk. This operation
+ * leaves every other table — and every other column of `product_images` —
+ * exactly as it found them.
+ *
+ * Each statement is guarded by all three ownership facts at once:
+ *
+ *   1. the exact deterministic image id,
+ *   2. the exact deterministic product id, and
+ *   3. a URL from `legacyFixtureImageUrls` — a stale URL this fixture wrote.
+ *
+ * Because the guard admits only stale URLs, a row that already carries the
+ * current URL matches nothing and is never written: the operation is idempotent
+ * by construction rather than by a follow-up check. A row with an unknown URL,
+ * a foreign id, or a foreign product id is likewise never matched. Only `url` is
+ * assigned; `alt_text`, `sort_order` and `is_primary` are left alone.
+ */
+export function buildRefreshImageStatements(): string[] {
+  const statements: string[] = [];
+  for (const image of FIXTURE_IMAGES) {
+    const legacyUrls = legacyFixtureImageUrls(image);
+    if (legacyUrls.length === 0) continue;
+    statements.push(
+      `UPDATE product_images SET url = ${sqlStr(image.url)} ` +
+        `WHERE id = ${sqlStr(image.id)} AND product_id = ${sqlStr(image.productId)} ` +
+        `AND url IN (${legacyUrls.map(sqlStr).join(", ")})`,
+    );
+  }
+  return statements;
+}
+
+/**
+ * Read-only per-image URL report for the fixture's deterministic image rows.
+ *
+ * The post-condition of `refresh-images` is "every fixture image row carries the
+ * current URL", which a count cannot express: a single stale row and a fully
+ * stale set both read as `4`. This returns one row per fixture image so each is
+ * checked individually, before and after the write.
+ */
+export function buildImageUrlStatement(): string {
+  return (
+    `SELECT id, product_id, url FROM product_images ` +
+    `WHERE ${fixtureImageOwnershipPredicate()} ORDER BY id`
+  );
+}
+
+/** The URL `FIXTURE_IMAGES` writes today for `id`, or undefined if not a fixture image id. */
+export function currentFixtureImageUrl(id: string): string | undefined {
+  return FIXTURE_IMAGES.find((image) => image.id === id)?.url;
+}
+
+/**
+ * A `product_images` row is up to date only when it is one of the fixture's own
+ * image ids (the report query already filters to those) AND its URL is the one
+ * the fixture writes today. An unknown id, or a null/absent URL, counts as
+ * stale so it is reported rather than silently accepted.
+ */
+function isCurrentFixtureImageUrl(row: Record<string, unknown>): boolean {
+  const expected = currentFixtureImageUrl(String(row.id));
+  return expected !== undefined && row.url === expected;
+}
+
 /** Join statements into a single SQL file (each statement on its own line). */
+
 export function toSqlFile(statements: readonly string[]): string {
   return `${statements.map((s) => `${s};`).join("\n")}\n`;
 }
@@ -469,6 +655,7 @@ function writeSeedFiles(): string[] {
     writeSeedFile("cleanup.sql", toSqlFile(buildCleanupStatements())),
     writeSeedFile("preflight.sql", buildPreflightStatement()),
     writeSeedFile("verify.sql", buildVerifyStatement()),
+    writeSeedFile("refresh-images.sql", toSqlFile(buildRefreshImageStatements())),
   ];
   return files;
 }
@@ -480,13 +667,104 @@ function writeSeedFile(name: string, contents: string): string {
   return target.pathname;
 }
 
-function parsePreflightRow(stdout: string): Record<string, number> {
-  const parsed = JSON.parse(stdout) as Array<{ results?: Array<Record<string, unknown>> }>;
-  const results = parsed[0]?.results ?? [];
-  const row = results[0] ?? {};
-  return Object.fromEntries(
+interface WranglerResultEntry {
+  results?: Array<Record<string, unknown>>;
+  success?: boolean;
+}
+
+/**
+ * Slice the JSON payload out of a `wrangler --json` stdout stream.
+ *
+ * Wrangler prints its progress/spinner rendering to **stdout** (not stderr) —
+ * e.g. `├ Checking if file needs uploading` / `├ 🌀 Uploading <db>.<hash>.sql`
+ * while it uploads a `--file` — so the stream cannot be parsed whole. Find the
+ * array that opens a line and return just that span, discarding anything
+ * printed before or after it.
+ */
+export function extractJsonArrayPayload(stdout: string): string {
+  const start = stdout.search(/^[\t ]*\[/m);
+  if (start === -1) {
+    throw new Error(`Wrangler produced no JSON output:\n${stdout}`);
+  }
+  const from = stdout.indexOf("[", start);
+  let depth = 0;
+  let inString = false;
+  for (let i = from; i < stdout.length; i += 1) {
+    const char = stdout[i]!;
+    if (inString) {
+      if (char === "\\") i += 1;
+      else if (char === '"') inString = false;
+      continue;
+    }
+    if (char === '"') inString = true;
+    else if (char === "[") depth += 1;
+    else if (char === "]") {
+      depth -= 1;
+      if (depth === 0) return stdout.slice(from, i + 1);
+    }
+  }
+  throw new Error(`Wrangler produced truncated JSON output:\n${stdout}`);
+}
+
+function parseWranglerEntries(stdout: string): WranglerResultEntry[] {
+  const parsed = JSON.parse(extractJsonArrayPayload(stdout)) as unknown;
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Unexpected wrangler JSON shape: ${JSON.stringify(parsed)}`);
+  }
+  return parsed as WranglerResultEntry[];
+}
+
+function resultRows(entries: readonly WranglerResultEntry[]): Array<Record<string, unknown>> {
+  return entries.flatMap((entry) => entry.results ?? []);
+}
+
+/**
+ * Fail closed when a preflight row is missing its count columns. An unexpected
+ * result shape (e.g. the aggregate stats that `wrangler d1 execute --file`
+ * reports instead of rows) would otherwise coerce every count to 0 and read as
+ * "no fixture rows present" — a silent false negative on a safety-critical
+ * decision.
+ */
+function assertPreflightColumns(row: Record<string, number>): void {
+  const required = [
+    ...Object.keys(EXPECTED_PREFLIGHT),
+    ...REQUIRED_TABLES.map((table) => `${table}_total`),
+    "tables_found",
+  ];
+  const missing = required.filter((column) => !(column in row));
+  if (missing.length > 0) {
+    throw new Error(
+      `[dev-seed] preflight did not return the expected count columns (missing: ${missing.join(", ")}). ` +
+        `Received: ${JSON.stringify(row)}. The query must run as a plain SELECT that returns the count columns.`,
+    );
+  }
+}
+
+export function parsePreflightRow(stdout: string): Record<string, number> {
+  const row = resultRows(parseWranglerEntries(stdout))[0] ?? {};
+  const counts = Object.fromEntries(
     Object.entries(row).map(([key, value]) => [key, Number(value ?? 0)]),
   );
+  assertPreflightColumns(counts);
+  return counts;
+}
+
+/**
+ * Run one read-only statement through `wrangler d1 execute --command` and
+ * return its result rows. `--command` is used instead of `--file` on purpose:
+ * it emits no progress rendering ahead of the `--json` payload and returns the
+ * statement's rows, whereas `--file` prints spinner output to stdout and
+ * collapses the file into one aggregate-stats entry.
+ */
+function runWranglerQuery(args: string[], sql: string, label: string): Array<Record<string, unknown>> {
+  const result = runWrangler([...args, "--command", sql], { json: true });
+  if (result.status !== 0) {
+    throw new Error(`${label} failed:\n${result.stderr}\n${result.stdout}`);
+  }
+  const entries = parseWranglerEntries(result.stdout);
+  const failed = entries.filter((entry) => entry.success === false);
+  if (failed.length > 0) throw new Error(`${label} failed: ${JSON.stringify(failed)}`);
+  return resultRows(entries);
 }
 
 function runWrangler(args: string[], opts: { json?: boolean } = {}): { stdout: string; stderr: string; status: number } {
@@ -520,7 +798,7 @@ function remoteGate(database: string, yes: boolean): void {
 }
 
 export interface CliOptions {
-  mode: "plan" | "apply" | "cleanup" | "verify";
+  mode: "plan" | "apply" | "cleanup" | "verify" | "refresh-images";
   local: boolean;
   database: string;
   yes: boolean;
@@ -540,6 +818,8 @@ function usage(): void {
       "  apply     run preflight then apply the fixture to the target database (remote unless --local)",
       "  cleanup   delete ONLY the fixture rows from the target database (children first, id+key guarded)",
       "  verify    run the read-only preflight + storefront verification",
+      "  refresh-images  rewrite ONLY stale fixture image URLs to the current ones (id + product id +",
+      "                 legacy URL guarded; touches no other table and no other column)",
       "",
       "Options:",
       "  --database zelora   target database name (must match the committed binding)",
@@ -582,7 +862,9 @@ function preflightOrThrow(
 /** CLI entry, only active when this file is executed directly. */
 function devCli(): void {
   const args = process.argv.slice(2);
-  const modeArg = args.find((a) => a === "plan" || a === "apply" || a === "cleanup" || a === "verify");
+  const modeArg = args.find(
+    (a) => a === "plan" || a === "apply" || a === "cleanup" || a === "verify" || a === "refresh-images",
+  );
   const mode: CliOptions["mode"] = (modeArg ?? "plan") as CliOptions["mode"];
   const local = args.includes("--local");
   const yes = args.includes("--yes");
@@ -621,15 +903,7 @@ function devCli(): void {
     const dbArg = ["d1", "execute", database];
 
     if (mode === "verify") {
-      const file = writeSeedFile(`verify-${Date.now()}.sql`, `${buildVerifyStatement()};`);
-      const result = runWrangler([...dbArg, ...locationArgs, "--file", file], { json: true });
-      if (result.status !== 0) throw new Error(`Verification failed:\n${result.stderr}`);
-      const parsed = JSON.parse(result.stdout) as Array<{ results?: Array<Record<string, unknown>>; success?: boolean }>;
-      const failed = parsed.filter((entry) => entry.success === false);
-      if (failed.length > 0) throw new Error(`Verification queries failed: ${JSON.stringify(failed)}`);
-      if (parsed.length < 2) throw new Error("Verification did not return the full result sets (preflight + storefront).");
-      const row = parsePreflightRow(result.stdout);
-      const state = decidePreflight(row);
+      const { row, state } = preflightOrThrow(dbArg, locationArgs);
       console.log(
         state.alreadySeeded
           ? "[dev-seed] verification: fixture fully present."
@@ -638,7 +912,11 @@ function devCli(): void {
             : `[dev-seed] verification: fixture keys partially present (${state.presentKeys.join(", ")}) — expected the full fixture.`,
       );
       printSummary(row);
-      const storefront = parsed[parsed.length - 1]?.results ?? [];
+      const storefront = runWranglerQuery(
+        [...dbArg, ...locationArgs],
+        buildStorefrontStatement(),
+        "Storefront verification",
+      );
       console.log("\nStorefront surface (catalog joins, active rows only):");
       if (storefront.length === 0) console.log("  (no visible products)");
       for (const product of storefront) {
@@ -646,6 +924,58 @@ function devCli(): void {
           `  ${product.store} / ${product.product} in ${product.category}: cheapest ${product.cheapest_cents}c, ${product.active_variants} active variant(s)`,
         );
       }
+      return;
+    }
+
+    if (mode === "refresh-images") {
+      const { state } = preflightOrThrow(dbArg, locationArgs);
+      if (state.tablesMissing) {
+        throw new Error(
+          `[dev-seed] target is missing required tables (found preflight where tables_found < ${REQUIRED_TABLES.length}). ` +
+            `Apply the committed migrations first: wrangler d1 migrations apply zelora ${location} --config apps/api/wrangler.jsonc`,
+        );
+      }
+
+      // Read-only per-image report first, so exactly what would change is
+      // visible before the write, and so "nothing to do" needs no write at all.
+      const before = runWranglerQuery(
+        [...dbArg, ...locationArgs],
+        buildImageUrlStatement(),
+        "Fixture image URL check",
+      );
+      const stale = before.filter((row) => !isCurrentFixtureImageUrl(row));
+      if (stale.length === 0) {
+        console.log(
+          `[dev-seed] all ${before.length} fixture image row(s) already carry the current URL; nothing to refresh.`,
+        );
+        return;
+      }
+      console.log(`[dev-seed] ${stale.length} fixture image row(s) carry a stale URL:`);
+      for (const row of stale) {
+        console.log(`  ${row.id} (product ${row.product_id}): ${row.url} -> ${currentFixtureImageUrl(String(row.id))}`);
+      }
+
+      const file = writeSeedFile(`refresh-images-${Date.now()}.sql`, toSqlFile(buildRefreshImageStatements()));
+      const result = runWrangler([...dbArg, ...locationArgs, "--file", file]);
+      if (result.status !== 0) throw new Error(`Image refresh failed:\n${result.stderr}`);
+
+      const after = runWranglerQuery(
+        [...dbArg, ...locationArgs],
+        buildImageUrlStatement(),
+        "Fixture image URL check",
+      );
+      // Fail closed on both halves of the post-condition: every fixture image
+      // row must exist, and each must carry the current URL. A row the guard
+      // declined to touch (a foreign URL squatting a fixture id) leaves this
+      // failing instead of being reported as a success.
+      const stillStale = after.filter((row) => !isCurrentFixtureImageUrl(row));
+      if (after.length !== FIXTURE_IMAGES.length || stillStale.length > 0) {
+        throw new Error(
+          `[dev-seed] post-refresh verification failed: expected ${FIXTURE_IMAGES.length} fixture image row(s) ` +
+            `on the current URL, found ${after.length}; still stale: ${JSON.stringify(stillStale)}.`,
+        );
+      }
+      console.log(`[dev-seed] refreshed ${stale.length} fixture image row(s) to the current URL; no other row changed.`);
       return;
     }
 

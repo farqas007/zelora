@@ -286,29 +286,56 @@ export interface FixtureImage {
   altText: string;
 }
 
+/**
+ * Demo product artwork, served as real static assets from this repository.
+ *
+ * The four files live in `apps/web/public/images/products/` and are named after
+ * the product slug they depict. Vite copies `public/**` verbatim to the build
+ * root, and `apps/web/wrangler.jsonc` deploys that root as a Workers Static
+ * Assets site, so each file is served from the deployed web Worker's origin at
+ * `/images/products/<slug>.jpg` (the same `public/` → root-URL mapping the
+ * `/assets/zelora-*.svg` logos already rely on).
+ *
+ * These URLs must be *loadable*: the browser fetches them directly from
+ * `product_images.url` with no proxy or rewrite in front, so a reserved
+ * placeholder host such as `example.test` (RFC 6761 — never resolves in DNS)
+ * renders as a broken image on the catalog. The URLs below are absolute `https`
+ * URLs on a host that actually resolves, so the same row renders identically in
+ * a browser, from the deployed Worker, and from the local dev server.
+ *
+ * They stay deterministic — same URL, same bytes, on every run — so local
+ * SQLite rows and the remote D1 seed remain byte-identical, exactly like the
+ * rest of this fixture. Nothing here is random or time-seeded.
+ *
+ * Every URL this fixture has ever written for an image is retained as a legacy
+ * generation in `LEGACY_FIXTURE_IMAGE_URLS` (`./d1.ts`) — first
+ * `example.test`, then `placehold.co` — so `refresh-images` can migrate a
+ * database holding any earlier revision, and `cleanup` can still recognise
+ * those rows as the fixture's own.
+ */
 export const FIXTURE_IMAGES: readonly FixtureImage[] = [
   {
     id: nextFixtureId(),
     productId: FIXTURE_PRODUCTS[0]!.id,
-    url: "https://example.test/wireless-headphones.jpg",
+    url: "https://zelora-web.farqas007.workers.dev/images/products/wireless-headphones.jpg",
     altText: "Wireless Headphones",
   },
   {
     id: nextFixtureId(),
     productId: FIXTURE_PRODUCTS[1]!.id,
-    url: "https://example.test/gaming-keyboard.jpg",
+    url: "https://zelora-web.farqas007.workers.dev/images/products/gaming-keyboard.jpg",
     altText: "Gaming Keyboard",
   },
   {
     id: nextFixtureId(),
     productId: FIXTURE_PRODUCTS[2]!.id,
-    url: "https://example.test/gaming-mouse.jpg",
+    url: "https://zelora-web.farqas007.workers.dev/images/products/gaming-mouse.jpg",
     altText: "Gaming Mouse",
   },
   {
     id: nextFixtureId(),
     productId: FIXTURE_PRODUCTS[3]!.id,
-    url: "https://example.test/led-desk-lamp.jpg",
+    url: "https://zelora-web.farqas007.workers.dev/images/products/led-desk-lamp.jpg",
     altText: "LED Desk Lamp",
   },
 ];

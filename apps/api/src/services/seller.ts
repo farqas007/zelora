@@ -7,8 +7,10 @@ import {
   type CreateProductVariantRequest,
   type InventoryDto,
   type ProductDto,
+  type ProductImageDto,
   type ProductVariantDto,
   type SellerProductDetailDto,
+  type SellerProductImageListData,
   type SellerProductListData,
   type SellerProductSummaryDto,
   type SellerProductVariantDetailDto,
@@ -29,6 +31,7 @@ import type { CatalogRepository } from "@zelora/db/catalog";
 import type {
   InventoryRecord,
   ProductDetailRecord,
+  ProductImageRecord,
   ProductRecord,
   ProductRepository,
   ProductVariantDetailRecord,
@@ -135,6 +138,25 @@ function mapSellerProductDetailToDto(product: ProductDetailRecord): SellerProduc
     ...mapSellerProductSummaryToDto(product),
     description: product.description,
     variants: product.variants.map(mapSellerProductVariantDetailToDto),
+    images: product.images.map(mapProductImageToDto),
+  };
+}
+
+/**
+ * Project a `product_images` record into the shared owner DTO. The `0`/`1`
+ * primary flag is already widened to a boolean by both repository drivers
+ * (the database keeps the integer so the one-primary-per-product partial index
+ * is enforced in SQL), so this is a straight field-for-field copy.
+ */
+function mapProductImageToDto(image: ProductImageRecord): ProductImageDto {
+  return {
+    id: image.id,
+    productId: image.productId,
+    url: image.url,
+    altText: image.altText,
+    sortOrder: image.sortOrder,
+    isPrimary: image.isPrimary,
+    createdAt: image.createdAt.toISOString(),
   };
 }
 
@@ -321,6 +343,51 @@ export class SellerService {
       );
     }
     return mapSellerProductDetailToDto(product);
+  }
+
+  /**
+   * Read every image belonging to one of the caller's own products.
+   *
+   * Ownership is resolved server-side exactly as it is for
+   * {@link getProduct}: the store comes from the authenticated user and the
+   * product id from the URL path, so a client cannot read another seller's
+   * media. A malformed id, an unknown product and a product owned by a
+   * different store all raise the *same* 404 `PRODUCT_NOT_FOUND`, so this
+   * endpoint never reveals whether a foreign product id exists.
+   *
+   * A real product with no images is a success with an empty list, not a 404:
+   * "no media yet" is a normal state for a fresh listing, and collapsing it
+   * into a not-found would make the response indistinguishable from the
+   * ownership failure the method is careful to hide.
+   *
+   * The repository returns the rows already ordered primary-first, then
+   * `sortOrder`, then `id`; the service only maps them and never re-sorts, so
+   * the ordering is decided in exactly one place per driver.
+   */
+  async listProductImages(user: UserRecord, productId: string): Promise<SellerProductImageListData> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    // Existence is settled by the same ownership-scoped product lookup the
+    // detail read uses, so "unknown or unowned" is one indistinguishable 404
+    // before the image list is ever consulted.
+    const product = await this.productRepository.findByStoreAndId(store.id, productId);
+    if (product === null) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    const images = await this.productRepository.listImagesByProduct(productId, store.id);
+    return { productId, images: images.map(mapProductImageToDto) };
   }
 
   /**

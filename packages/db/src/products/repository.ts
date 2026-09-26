@@ -64,6 +64,30 @@ export interface InventoryRecord {
   updatedAt: Date;
 }
 
+/**
+ * A persisted product image row, mirroring the `product_images` table.
+ *
+ * `isPrimary` is the stored `0`/`1` integer flag widened to a boolean by the
+ * drivers, matching the catalog repository's image record for the same column.
+ * The database keeps the flag as an integer so the `in (0, 1)` CHECK and the
+ * one-primary-per-product partial unique index are enforced in SQL; the widening
+ * happens once, at the read edge, so no caller has to remember the encoding.
+ *
+ *
+ * This table has no `updated_at`, so only `createdAt` exists. Phase 2A only
+ * inserts images; nothing updates one yet, so an `updated_at` that would always
+ * equal `created_at` was left out rather than added as dead weight.
+ */
+export interface ProductImageRecord {
+  id: string;
+  productId: string;
+  url: string;
+  altText: string | null;
+  sortOrder: number;
+  isPrimary: boolean;
+  createdAt: Date;
+}
+
 export interface ProductListQuery {
   limit: number;
   cursor: string | null;
@@ -80,6 +104,12 @@ export interface ProductVariantDetailRecord extends VariantRecord {
 
 export interface ProductDetailRecord extends ProductRecord {
   variants: ProductVariantDetailRecord[];
+  /**
+   * The product's images in the canonical order: primary first, then
+   * `sortOrder` ascending, then `id` ascending. Empty when the product has no
+   * media yet — a product with no images is a valid, fully-supported state.
+   */
+  images: ProductImageRecord[];
 }
 
 /**
@@ -147,6 +177,22 @@ export type PublishProductResult =
 export interface ProductRepository {
   listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage>;
   findByStoreAndId(storeId: string, productId: string): Promise<ProductDetailRecord | null>;
+  /**
+   * Every image of one product the caller owns, in the canonical display order:
+   * primary first, then `sortOrder` ascending, then `id` ascending. The final
+   * `id` tiebreak is what makes the order total — `sortOrder` is a plain
+   * caller-supplied integer with no uniqueness constraint, so two images may
+   * legitimately share one, and without the tiebreak the same request could
+   * return the same product's images in two different orders.
+   *
+   * Ownership is resolved through `products.storeId`, never from the image row.
+   * An unknown product and a product owned by another store are both
+   * indistinguishable here: they resolve to an **empty array**, not `null` and
+   * not a 404, so this method on its own leaks nothing. Callers that must
+   * distinguish "no images" from "no such product" pair it with
+   * `findByStoreAndId`, which is the single place existence is decided.
+   */
+  listImagesByProduct(productId: string, storeId: string): Promise<ProductImageRecord[]>;
   /**
    * Pre-check used by the service: resolve one product within a single store
    * by slug, or `null` when the store has no product with that slug. The real

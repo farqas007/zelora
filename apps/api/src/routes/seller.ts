@@ -7,6 +7,7 @@ import type {
   CreateProductEnvelope,
   CreateProductVariantEnvelope,
   GetSellerProductEnvelope,
+  ListSellerProductImagesEnvelope,
   ListSellerProductsEnvelope,
   PublishProductEnvelope,
   SellerOnboardingEnvelope,
@@ -43,6 +44,10 @@ import type { RateLimiter } from "../services/rate-limit";
  * delegates to {@link SellerService}. Ownership is resolved entirely
  * server-side by the service from the authenticated session, never from the
  * request body.
+ *
+ * `GET /api/seller/products/:id/images` is a read, so it runs behind
+ * authentication and the seller-role gate only — no CSRF check (it changes no
+ * state) and no write rate limit, matching the other seller reads above.
  *
  * Route modules stay edge-compatible: the seller repository is injected by the
  * application boundary and only its contract is referenced here as a type.
@@ -170,6 +175,12 @@ export function createSellerRoutes(dependencies: SellerRoutesDependencies): Hono
     const auth = c.get("auth");
     const data = await sellerService.getProduct(auth.user, c.req.param("id"));
     return c.json<GetSellerProductEnvelope>({ ok: true, data }, 200);
+  });
+
+  app.get("/products/:id/images", requireAuth, requireSellerRole(), async (c) => {
+    const auth = c.get("auth");
+    const data = await sellerService.listProductImages(auth.user, c.req.param("id"));
+    return c.json<ListSellerProductImagesEnvelope>({ ok: true, data }, 200);
   });
 
   app.post(

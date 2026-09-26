@@ -56,6 +56,7 @@ export type {
   CreateVariantConflictReason,
   CreateVariantResult,
   InventoryRecord,
+  ProductImageRecord,
   ProductListQuery,
   ProductListPage,
   ProductVariantDetailRecord,

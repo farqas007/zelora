@@ -15,6 +15,7 @@ import type {
   CreateProductVariantRequest,
   GetSellerProductEnvelope,
   HealthResponse,
+  ListSellerProductImagesEnvelope,
   ListSellerProductsEnvelope,
   LoginEnvelope,
   LoginRequest,
@@ -79,6 +80,7 @@ export interface ZeloraApi {
   onboardSeller(input: SellerOnboardingRequest): Promise<SellerOnboardingEnvelope>;
   listSellerProducts(input?: SellerListProductsRequest): Promise<ListSellerProductsEnvelope>;
   getSellerProduct(productId: string): Promise<GetSellerProductEnvelope>;
+  listSellerProductImages(productId: string): Promise<ListSellerProductImagesEnvelope>;
   createProduct(input: CreateProductRequest): Promise<CreateProductEnvelope>;
   createProductVariant(
     productId: string,
@@ -222,6 +224,11 @@ export function createApiClient(
     getSellerProduct: (productId) =>
       request<GetSellerProductEnvelope>(
         `/api/seller/products/${encodeURIComponent(productId)}`,
+        { method: "GET" },
+      ),
+    listSellerProductImages: (productId) =>
+      request<ListSellerProductImagesEnvelope>(
+        `/api/seller/products/${encodeURIComponent(productId)}/images`,
         { method: "GET" },
       ),
     createProduct: (input: CreateProductRequest) =>

@@ -1,9 +1,10 @@
 import { and, asc, desc, eq, gte, lt, or } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
 import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
-import { inventory, products, productVariants } from "../schema/catalog";
+import { inventory, products, productImages, productVariants } from "../schema/catalog";
 import type {
   ProductDetailRecord,
+  ProductImageRecord,
   ProductListPage,
   ProductListQuery,
   ProductRecord,
@@ -22,6 +23,9 @@ import type {
  * `createProduct` maps the `(store_id, slug)` UNIQUE constraint failure into
  * the driver-neutral {@link CreateProductConflictReason} value; anything else
  * propagates unchanged. No raw driver error is exposed as a conflict.
+ *
+ * Product images are read through one shared column projection and one
+ * ordering, so the dedicated list and the embedded detail can never drift.
  */
 export function createLocalProductRepository(db: LocalDatabase): ProductRepository {
   return {
@@ -31,6 +35,10 @@ export function createLocalProductRepository(db: LocalDatabase): ProductReposito
 
     async findByStoreAndId(storeId, productId) {
       return findProductDetail(db, storeId, productId);
+    },
+
+    async listImagesByProduct(productId, storeId) {
+      return loadProductImages(db, productId, storeId);
     },
 
     async findByStoreAndSlug(storeId, slug) {
@@ -173,6 +181,11 @@ export function createLocalProductRepository(db: LocalDatabase): ProductReposito
   };
 }
 
+/** Widen the stored `0`/`1` primary flag to a boolean, matching the read paths. */
+function toProductImageRecord(row: typeof productImages.$inferSelect): ProductImageRecord {
+  return { ...row, isPrimary: row.isPrimary === 1 };
+}
+
 function loadProductPage(
   db: LocalDatabase,
   storeId: string,
@@ -267,7 +280,46 @@ function findProductDetail(
           },
   }));
 
-  return { ...product, variants };
+  return { ...product, variants, images: loadProductImages(db, productId, storeId) };
+}
+
+/**
+ * Columns projected for a `product_images` row, shared by the detail loader and
+ * the dedicated image list so both return byte-identical records.
+ */
+const productImageColumns = {
+  id: productImages.id,
+  productId: productImages.productId,
+  url: productImages.url,
+  altText: productImages.altText,
+  sortOrder: productImages.sortOrder,
+  isPrimary: productImages.isPrimary,
+  createdAt: productImages.createdAt,
+} as const;
+
+/**
+ * Images of one product the caller owns, in the canonical display order:
+ * primary first, then `sortOrder` ascending, then `id` ascending.
+ *
+ * Ownership is verified by joining through `products.storeId` inside the same
+ * statement rather than by trusting a prior lookup, so the query is safe to
+ * call on its own: a product id belonging to another store contributes no rows
+ * at all. The `0`/`1` primary flag is widened to a boolean here, at the read
+ * edge, matching the public catalog projection.
+ */
+function loadProductImages(
+  db: LocalDatabase,
+  productId: string,
+  storeId: string,
+): ProductImageRecord[] {
+  return db
+    .select(productImageColumns)
+    .from(productImages)
+    .innerJoin(products, eq(products.id, productImages.productId))
+    .where(and(eq(productImages.productId, productId), eq(products.storeId, storeId)))
+    .orderBy(desc(productImages.isPrimary), asc(productImages.sortOrder), asc(productImages.id))
+    .all()
+    .map(toProductImageRecord);
 }
 
 /**

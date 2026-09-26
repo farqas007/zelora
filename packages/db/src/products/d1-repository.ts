@@ -2,11 +2,12 @@ import { and, asc, desc, eq, gte, lt, or } from "drizzle-orm";
 import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
 import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
-import { inventory, products, productVariants } from "../schema/catalog";
+import { inventory, products, productImages, productVariants } from "../schema/catalog";
 import type {
   CreateProductConflictReason,
   CreateVariantConflictReason,
   ProductDetailRecord,
+  ProductImageRecord,
   ProductListPage,
   ProductListQuery,
   ProductRecord,
@@ -23,6 +24,11 @@ import type {
  * `(store_id, slug)` UNIQUE constraint failure and `createVariant` maps the
  * global `product_variants.sku` constraint into driver-neutral results.
  *
+ * Product images behave exactly as on the local driver: ownership is resolved
+ * through `products.storeId` in the same statement, and the ordering is
+ * primary first, then `sortOrder` ascending, then `id` ascending. The shared
+ * helper below is the only place that ordering is written, so the D1 detail
+ * projection and the D1 image list cannot diverge from each other or from the
  * Worker-safe: only the Drizzle D1 driver and the product contract are
  * imported; the Node-only SQLite stack is never pulled into the Worker bundle.
  */
@@ -36,6 +42,10 @@ export function createD1ProductRepository(
 
     async findByStoreAndId(storeId, productId) {
       return findProductDetail(db, storeId, productId);
+    },
+
+    async listImagesByProduct(productId, storeId) {
+      return loadProductImages(db, productId, storeId);
     },
 
     async findByStoreAndSlug(storeId, slug) {
@@ -178,6 +188,11 @@ export function createD1ProductRepository(
   };
 }
 
+/** Widen the stored `0`/`1` primary flag to a boolean, matching the read paths. */
+function toProductImageRecord(row: typeof productImages.$inferSelect): ProductImageRecord {
+  return { ...row, isPrimary: row.isPrimary === 1 };
+}
+
 async function loadProductPage(
   db: DrizzleD1Database<DatabaseSchema>,
   storeId: string,
@@ -270,7 +285,45 @@ async function findProductDetail(
           },
   }));
 
-  return { ...product, variants };
+  return { ...product, variants, images: await loadProductImages(db, productId, storeId) };
+}
+
+/**
+ * Columns projected for a `product_images` row, shared by the detail loader and
+ * the dedicated image list so both return byte-identical records.
+ */
+const productImageColumns = {
+  id: productImages.id,
+  productId: productImages.productId,
+  url: productImages.url,
+  altText: productImages.altText,
+  sortOrder: productImages.sortOrder,
+  isPrimary: productImages.isPrimary,
+  createdAt: productImages.createdAt,
+} as const;
+
+/**
+ * Images of one product the caller owns, in the canonical display order:
+ * primary first, then `sortOrder` ascending, then `id` ascending.
+ *
+ * Ownership is verified by joining through `products.storeId` inside the same
+ * statement rather than by trusting a prior lookup, so a product id belonging
+ * to another store contributes no rows and is indistinguishable from a product
+ * that does not exist. The `0`/`1` primary flag is widened to a boolean here,
+ * at the read edge, matching the public catalog projection and the local twin.
+ */
+async function loadProductImages(
+  db: DrizzleD1Database<DatabaseSchema>,
+  productId: string,
+  storeId: string,
+): Promise<ProductImageRecord[]> {
+  const rows = await db
+    .select(productImageColumns)
+    .from(productImages)
+    .innerJoin(products, eq(products.id, productImages.productId))
+    .where(and(eq(productImages.productId, productId), eq(products.storeId, storeId)))
+    .orderBy(desc(productImages.isPrimary), asc(productImages.sortOrder), asc(productImages.id));
+  return rows.map(toProductImageRecord);
 }
 
 /**

@@ -209,9 +209,42 @@ export interface SellerProductVariantDetailDto extends ProductVariantDto {
   inventory: InventoryDto | null;
 }
 
+/**
+ * Owner view of one product image, mirroring a `product_images` row.
+ *
+ * The field set is deliberately identical to the public
+ * {@link CatalogProductImageDto}: an owner sees exactly what a customer sees,
+ * so the media record carries no privileged data and needs no separate
+ * owner-only variant. `isPrimary` is the DB flag widened to a real boolean —
+ * the `product_images_product_primary_unique` partial index guarantees at most
+ * one `true` per product.
+ */
+export interface ProductImageDto {
+  id: string;
+  productId: string;
+  url: string;
+  altText: string | null;
+  /** Display position within the product, ascending. */
+  sortOrder: number;
+  isPrimary: boolean;
+  /** ISO 8601 timestamp. */
+  createdAt: string;
+}
+
+/** One product's images, in the deterministic display order the API returns. */
+export interface SellerProductImageListData {
+  productId: string;
+  images: ProductImageDto[];
+}
+
+/** Success payload for `GET /api/seller/products/:id/images`. */
+export type ListSellerProductImagesEnvelope = ApiEnvelope<SellerProductImageListData>;
+
 export interface SellerProductDetailDto extends SellerProductSummaryDto {
   description: string | null;
   variants: SellerProductVariantDetailDto[];
+  /** The product's images, in the same order `GET .../images` returns. */
+  images: ProductImageDto[];
 }
 
 export type GetSellerProductEnvelope = ApiEnvelope<SellerProductDetailDto>;

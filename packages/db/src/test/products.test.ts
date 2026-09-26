@@ -340,3 +340,106 @@ describe("product repository: seller reads", () => {
     ).toBeNull();
   });
 });
+
+describe("product repository: product images", () => {
+  /** Insert a product owned by `storeId` and return its id. */
+  function seedProduct(storeId: string, slug: string): string {
+    return db
+      .insert(schema.products)
+      .values({ storeId, name: slug, slug })
+      .returning()
+      .get().id;
+  }
+
+  it("returns images primary-first, then by sortOrder, then by id, with the flag as a boolean", async () => {
+    const productId = seedProduct(scaffold.storeId, "media-order");
+    db.insert(schema.productImages)
+      .values([
+        { productId, url: "https://cdn.test/hero.jpg", sortOrder: 9, isPrimary: 1 },
+        { productId, url: "https://cdn.test/c.jpg", sortOrder: 2, isPrimary: 0 },
+        { productId, url: "https://cdn.test/b.jpg", sortOrder: 2, isPrimary: 0 },
+        { productId, url: "https://cdn.test/front.jpg", sortOrder: 0, isPrimary: 0 },
+      ])
+      .run();
+    // The two `sortOrder: 2` rows tie, so their relative order is decided by id.
+    const tiedIds = db
+      .select({ id: schema.productImages.id, url: schema.productImages.url })
+      .from(schema.productImages)
+      .where(eq(schema.productImages.productId, productId))
+      .all()
+      .filter((row) => row.url.endsWith("b.jpg") || row.url.endsWith("c.jpg"))
+      .sort((left, right) => left.id.localeCompare(right.id));
+    const tiedUrls = tiedIds.map((row) => row.url);
+
+    const listed = await repo.listImagesByProduct(productId, scaffold.storeId);
+
+    expect(listed.map((image) => image.url)).toEqual([
+      "https://cdn.test/hero.jpg",
+      "https://cdn.test/front.jpg",
+      ...tiedUrls,
+    ]);
+    expect(listed.map((image) => image.isPrimary)).toEqual([true, false, false, false]);
+    expect(listed[0]).toMatchObject({ productId, sortOrder: 9, altText: null });
+  });
+
+  it("returns another product's images never, and hides images of a product in another store", async () => {
+    const ownProductId = seedProduct(scaffold.storeId, "media-own");
+    const otherProductId = seedProduct(scaffold.storeId, "media-sibling");
+    const foreignProductId = seedProduct(scaffold.otherStoreId, "media-foreign");
+    db.insert(schema.productImages)
+      .values([
+        { productId: otherProductId, url: "https://cdn.test/sibling.jpg", isPrimary: 1 },
+        { productId: foreignProductId, url: "https://cdn.test/foreign.jpg", isPrimary: 1 },
+      ])
+      .run();
+    db.insert(schema.productImages)
+      .values({ productId: ownProductId, url: "https://cdn.test/own.jpg", isPrimary: 1 })
+      .run();
+
+    expect(
+      (await repo.listImagesByProduct(ownProductId, scaffold.storeId)).map((image) => image.url),
+    ).toEqual(["https://cdn.test/own.jpg"]);
+    expect(
+      (await repo.listImagesByProduct(foreignProductId, scaffold.storeId)).map((image) => image.url),
+    ).toEqual([]);
+    expect(
+      (await repo.listImagesByProduct(
+        "01955f00-0000-7000-8000-000000000001",
+        scaffold.storeId,
+      )).map((image) => image.url),
+    ).toEqual([]);
+  });
+
+  it("returns an empty list for a product that has no images", async () => {
+    const productId = seedProduct(scaffold.storeId, "media-empty");
+
+    expect(await repo.listImagesByProduct(productId, scaffold.storeId)).toEqual([]);
+  });
+
+  it("embeds the same ordered images in owned product detail", async () => {
+    const productId = seedProduct(scaffold.storeId, "media-detail");
+    db.insert(schema.productImages)
+      .values([
+        { productId, url: "https://cdn.test/second.jpg", sortOrder: 1, isPrimary: 0 },
+        { productId, url: "https://cdn.test/primary.jpg", sortOrder: 5, isPrimary: 1, altText: "Hero" },
+      ])
+      .run();
+
+    const detail = await repo.findByStoreAndId(scaffold.storeId, productId);
+
+    expect(detail?.images.map((image) => image.url)).toEqual([
+      "https://cdn.test/primary.jpg",
+      "https://cdn.test/second.jpg",
+    ]);
+    expect(detail?.images[0]?.altText).toBe("Hero");
+    expect(detail?.images[0]?.isPrimary).toBe(true);
+  });
+
+  it("returns an empty image list in detail for a product with no images", async () => {
+    const productId = seedProduct(scaffold.storeId, "media-detail-empty");
+
+    const detail = await repo.findByStoreAndId(scaffold.storeId, productId);
+
+    expect(detail?.images).toEqual([]);
+  });
+});

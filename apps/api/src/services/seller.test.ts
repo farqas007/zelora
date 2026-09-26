@@ -22,6 +22,7 @@ import type {
   CreateProductInput,
   CreateProductResult,
   ProductDetailRecord,
+  ProductImageRecord,
   ProductListPage,
   ProductListQuery,
   ProductRecord,
@@ -170,6 +171,7 @@ class FakeProductRepository implements ProductRepository {
   private products: Map<string, ProductRecord> = new Map();
   private variants: Map<string, VariantRecord> = new Map();
   private inventory: Map<string, InventoryRecord> = new Map();
+  private images: Map<string, ProductImageRecord> = new Map();
   private nextId = 1;
 
   forceCreateConflict: boolean = false;
@@ -178,6 +180,7 @@ class FakeProductRepository implements ProductRepository {
   createVariantCalls: CreateVariantInput[] = [];
   setInventoryCalls: SetInventoryInput[] = [];
   listCalls: Array<{ storeId: string; query: ProductListQuery }> = [];
+  listImagesCalls: Array<{ productId: string; storeId: string }> = [];
 
   async listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage> {
     this.listCalls.push({ storeId, query });
@@ -211,7 +214,32 @@ class FakeProductRepository implements ProductRepository {
         ...variant,
         inventory: this.inventory.get(variant.id) ?? null,
       }));
-    return { ...product, variants };
+    return { ...product, variants, images: this.collectImages(productId, storeId) };
+  }
+
+  async listImagesByProduct(productId: string, storeId: string): Promise<ProductImageRecord[]> {
+    this.listImagesCalls.push({ productId, storeId });
+    return this.collectImages(productId, storeId);
+  }
+
+  /**
+   * Mirrors the real drivers: ownership resolves through `products.storeId` and
+   * the order is primary first, then `sortOrder` ascending, then `id` ascending.
+   * A product owned by another store yields nothing at all.
+   */
+  private collectImages(productId: string, storeId: string): ProductImageRecord[] {
+    const product = this.products.get(productId);
+    if (product === undefined || product.storeId !== storeId) {
+      return [];
+    }
+    return Array.from(this.images.values())
+      .filter((image) => image.productId === productId)
+      .sort(
+        (left, right) =>
+          Number(right.isPrimary) - Number(left.isPrimary) ||
+          left.sortOrder - right.sortOrder ||
+          left.id.localeCompare(right.id),
+      );
   }
 
   async findByStoreAndSlug(storeId: string, slug: string): Promise<ProductRecord | null> {
@@ -337,6 +365,10 @@ class FakeProductRepository implements ProductRepository {
   seedInventory(inventory: InventoryRecord): void {
     this.inventory.set(inventory.variantId, inventory);
   }
+
+  seedImage(image: ProductImageRecord): void {
+    this.images.set(image.id, image);
+  }
 }
 
 /** Minimal catalog-repository fake: only the active-category list is used. */
@@ -396,6 +428,25 @@ const validBody = {
  */
 function fakeId(seq: number): string {
   return `01955f00-0000-7000-8000-${seq.toString(16).padStart(12, "0")}`;
+}
+
+/** Build a `product_images` row for the fake repository; `url` defaults off the id. */
+function imageRecord(input: {
+  id: string;
+  productId: string;
+  sortOrder?: number;
+  isPrimary?: boolean;
+  altText?: string | null;
+}): ProductImageRecord {
+  return {
+    id: input.id,
+    productId: input.productId,
+    url: `https://cdn.test/${input.id}.jpg`,
+    altText: input.altText ?? null,
+    sortOrder: input.sortOrder ?? 0,
+    isPrimary: input.isPrimary ?? false,
+    createdAt: new Date("2026-06-01T00:00:00.000Z"),
+  };
 }
 
 async function expectSellerError(
@@ -1002,6 +1053,161 @@ describe("SellerService", () => {
           404,
         );
       }
+    });
+
+    it("embeds the product's images in the repository's canonical order", async () => {
+      seedApprovedSellerForProductReads();
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      products.seedProduct({
+        id: fakeId(35),
+        storeId: "st-reads",
+        slug: "detail-with-media",
+        name: "Detail With Media",
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      products.seedImage(imageRecord({ id: fakeId(36), productId: fakeId(35), sortOrder: 0 }));
+      products.seedImage(
+        imageRecord({ id: fakeId(37), productId: fakeId(35), sortOrder: 4, isPrimary: true }),
+      );
+
+      const result = await service.getProduct(makeUser({ role: "seller" }), fakeId(35));
+
+      expect(result.images.map((image) => image.id)).toEqual([fakeId(37), fakeId(36)]);
+      expect(result.images[0]).toMatchObject({
+        productId: fakeId(35),
+        url: "https://cdn.test/01955f00-0000-7000-8000-000000000025.jpg",
+        isPrimary: true,
+        altText: null,
+        sortOrder: 4,
+        createdAt: "2026-06-01T00:00:00.000Z",
+      });
+    });
+
+    it("returns an empty image list in detail for a product with no images", async () => {
+      seedApprovedSellerForProductReads();
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      products.seedProduct({
+        id: fakeId(38),
+        storeId: "st-reads",
+        slug: "detail-without-media",
+        name: "Detail Without Media",
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+
+      const result = await service.getProduct(makeUser({ role: "seller" }), fakeId(38));
+
+      expect(result.images).toEqual([]);
+    });
+  });
+
+  describe("listProductImages", () => {
+    /** Seed an approved-seller-owned product, returning its id. */
+    function seedOwnedProduct(seq: number): string {
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      const productId = fakeId(seq);
+      products.seedProduct({
+        id: productId,
+        storeId: "st-reads",
+        slug: `owned-product-${seq}`,
+        name: `Owned Product ${seq}`,
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      return productId;
+    }
+
+    it("returns the owned product's images in canonical order and resolves the store from the session", async () => {
+      seedApprovedSellerForProductReads();
+      const productId = seedOwnedProduct(40);
+      // Inserted out of order: the service must not re-sort, it forwards the
+      // driver's order verbatim.
+      products.seedImage(imageRecord({ id: fakeId(42), productId, sortOrder: 2 }));
+      products.seedImage(
+        imageRecord({
+          id: fakeId(43),
+          productId,
+          sortOrder: 7,
+          isPrimary: true,
+          altText: "Hero shot",
+        }),
+      );
+      products.seedImage(imageRecord({ id: fakeId(41), productId, sortOrder: 2 }));
+      const siblingProductId = seedOwnedProduct(44);
+      products.seedImage(
+        imageRecord({ id: fakeId(45), productId: siblingProductId, sortOrder: 0, isPrimary: true }),
+      );
+
+      const result = await service.listProductImages(makeUser({ role: "seller" }), productId);
+
+      expect(result.productId).toBe(productId);
+      expect(result.images.map((image) => image.id)).toEqual([fakeId(43), fakeId(41), fakeId(42)]);
+      expect(result.images[0]?.isPrimary).toBe(true);
+      expect(result.images[0]?.altText).toBe("Hero shot");
+      // `storeId` is taken from the authenticated seller's store, never input.
+      expect(products.listImagesCalls).toEqual([{ productId, storeId: "st-reads" }]);
+    });
+
+    it("returns an empty list for an owned product with no images", async () => {
+      seedApprovedSellerForProductReads();
+      const productId = seedOwnedProduct(50);
+
+      const result = await service.listProductImages(makeUser({ role: "seller" }), productId);
+
+      expect(result).toEqual({ productId, images: [] });
+    });
+
+    it("returns the same 404 for malformed, unknown, and cross-store product ids", async () => {
+      seedApprovedSellerForProductReads();
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      const foreignProductId = fakeId(60);
+      products.seedProduct({
+        id: foreignProductId,
+        storeId: "st-other",
+        slug: "foreign-images",
+        name: "Foreign Images",
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      products.seedImage(
+        imageRecord({ id: fakeId(61), productId: foreignProductId, isPrimary: true }),
+      );
+      const user = makeUser({ role: "seller" });
+
+      for (const productId of ["not-an-id", fakeId(62), foreignProductId]) {
+        await expectSellerError(
+          () => service.listProductImages(user, productId),
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          404,
+        );
+      }
+      // The product lookup settles the 404 before images are ever read, so a
+      // foreign product's rows cannot leak through the image list.
+      expect(products.listImagesCalls).toHaveLength(0);
+    });
+
+    it("requires an approved seller before any product lookup happens", async () => {
+      const customer = makeUser();
+
+      await expectSellerError(
+        () => service.listProductImages(customer, fakeId(70)),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+      expect(products.listImagesCalls).toHaveLength(0);
     });
   });
 

@@ -393,6 +393,9 @@ const inertProductRepository: ProductRepository = {
   findByStoreAndId: () => {
     throw new Error("unexpected product call");
   },
+  listImagesByProduct: () => {
+    throw new Error("unexpected product call");
+  },
   findByStoreAndSlug: () => {
     throw new Error("unexpected product call");
   },

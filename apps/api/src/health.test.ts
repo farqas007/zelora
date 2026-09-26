@@ -83,6 +83,7 @@ const cartRepository: CartRepository = {
 const productRepository: ProductRepository = {
   listByStore: unimplemented,
   findByStoreAndId: unimplemented,
+  listImagesByProduct: unimplemented,
   findByStoreAndSlug: unimplemented,
   createProduct: unimplemented,
   createVariant: unimplemented,

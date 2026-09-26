@@ -132,6 +132,8 @@ function SellerProductDetail({ product }: { product: SellerProductDetailDto }) {
         <p>{product.description ?? "No description added."}</p>
       </section>
 
+      <SellerProductImages product={product} />
+
       <section className="user-card" aria-labelledby="variants-heading">
         <div className="section-heading">
           <h2 id="variants-heading">Variants and inventory</h2>
@@ -178,5 +180,78 @@ function SellerProductDetail({ product }: { product: SellerProductDetailDto }) {
         )}
       </ul>
     </article>
+  );
+}
+
+/**
+ * Read-only view of the product's image gallery.
+ *
+ * The images arrive on the product detail payload, already ordered by the API
+ * (primary first, then `sortOrder`, then `id`), so this renders the array as
+ * given and never re-sorts it — reordering is a server concern, and doing it
+ * here would let the two disagree.
+ *
+ * An image whose URL cannot be loaded degrades to the Zelora watermark rather
+ * than leaving a broken image behind, matching the catalog card and public
+ * product detail. Failures are tracked per image id (not with one page-wide
+ * boolean) so a single dead URL cannot blank out the rest of the gallery.
+ */
+function SellerProductImages({ product }: { product: SellerProductDetailDto }) {
+  const [failedImageIds, setFailedImageIds] = useState<ReadonlySet<string>>(() => new Set());
+
+  // A different product must get a clean slate: a URL that failed on the
+  // previous listing should not suppress artwork on this one.
+  useEffect(() => {
+    setFailedImageIds(new Set());
+  }, [product.id, product.images]);
+
+  return (
+    <section className="user-card" aria-labelledby="images-heading">
+      <div className="section-heading">
+        <h2 id="images-heading">Images</h2>
+        <span className="muted">
+          {product.images.length === 1 ? "1 image" : `${product.images.length} images`}
+        </span>
+      </div>
+      {product.images.length === 0 ? (
+        <p className="muted">No images have been added yet.</p>
+      ) : (
+        <ul className="seller-image-grid">
+          {product.images.map((image, index) => (
+            <li key={image.id} className="seller-image-tile">
+              <div className="seller-image-frame">
+                {failedImageIds.has(image.id) ? (
+                  <img
+                    className="product-watermark"
+                    src="/assets/zelora-mark.svg"
+                    alt=""
+                    aria-hidden="true"
+                    width="96"
+                    height="96"
+                  />
+                ) : (
+                  <img
+                    className="seller-image-img"
+                    src={image.url}
+                    alt={image.altText ?? product.name}
+                    loading="lazy"
+                    onError={() =>
+                      setFailedImageIds((current) => new Set(current).add(image.id))
+                    }
+                  />
+                )}
+              </div>
+              <div className="seller-image-meta">
+                {image.isPrimary ? (
+                  <span className="badge">Primary</span>
+                ) : (
+                  <span className="muted">Image {index + 1}</span>
+                )}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }

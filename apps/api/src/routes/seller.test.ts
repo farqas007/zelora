@@ -16,6 +16,7 @@ import type {
   CreateVariantInput,
   CreateVariantResult,
   ProductDetailRecord,
+  ProductImageRecord,
   ProductListPage,
   ProductListQuery,
   ProductRepository,
@@ -313,12 +314,14 @@ class FakeProductRepository implements ProductRepository {
   private products: Map<string, ProductRecord> = new Map();
   private variants: Map<string, VariantRecord> = new Map();
   private inventory: Map<string, InventoryRecord> = new Map();
+  private images: Map<string, ProductImageRecord> = new Map();
   private nextId = 1;
 
   createCalls: CreateProductInput[] = [];
   createVariantCalls: CreateVariantInput[] = [];
   setInventoryCalls: SetInventoryInput[] = [];
   listCalls: Array<{ storeId: string; query: ProductListQuery }> = [];
+  listImagesCalls: Array<{ productId: string; storeId: string }> = [];
   forceCreateConflict: boolean = false;
   forceSkuConflict: boolean = false;
 
@@ -351,7 +354,33 @@ class FakeProductRepository implements ProductRepository {
           left.createdAt.getTime() - right.createdAt.getTime() || left.id.localeCompare(right.id),
       )
       .map((variant) => ({ ...variant, inventory: this.inventory.get(variant.id) ?? null }));
-    return { ...product, variants };
+    return { ...product, variants, images: this.collectImages(productId, storeId) };
+  }
+
+  async listImagesByProduct(productId: string, storeId: string): Promise<ProductImageRecord[]> {
+    this.listImagesCalls.push({ productId, storeId });
+    return this.collectImages(productId, storeId);
+  }
+
+  /**
+   * Mirrors the real drivers: ownership is resolved by joining through
+   * `products.storeId`, and the order is primary first, then `sortOrder`
+   * ascending, then `id` ascending. A product owned by another store yields
+   * nothing at all.
+   */
+  private collectImages(productId: string, storeId: string): ProductImageRecord[] {
+    const product = this.products.get(productId);
+    if (product === undefined || product.storeId !== storeId) {
+      return [];
+    }
+    return Array.from(this.images.values())
+      .filter((image) => image.productId === productId)
+      .sort(
+        (left, right) =>
+          Number(right.isPrimary) - Number(left.isPrimary) ||
+          left.sortOrder - right.sortOrder ||
+          left.id.localeCompare(right.id),
+      );
   }
 
   async findByStoreAndSlug(storeId: string, slug: string): Promise<ProductRecord | null> {
@@ -479,15 +508,21 @@ class FakeProductRepository implements ProductRepository {
     this.inventory.set(inventory.variantId, inventory);
   }
 
+  seedImage(image: ProductImageRecord): void {
+    this.images.set(image.id, image);
+  }
+
   clear(): void {
     this.products.clear();
     this.variants.clear();
     this.inventory.clear();
+    this.images.clear();
     this.nextId = 1;
     this.createCalls = [];
     this.createVariantCalls = [];
     this.setInventoryCalls = [];
     this.listCalls = [];
+    this.listImagesCalls = [];
     this.forceCreateConflict = false;
     this.forceSkuConflict = false;
   }
@@ -613,6 +648,9 @@ describe("POST /api/seller/onboarding", () => {
       throw new Error("unexpected product call");
     },
     findByStoreAndId: () => {
+      throw new Error("unexpected product call");
+    },
+    listImagesByProduct: () => {
       throw new Error("unexpected product call");
     },
     findByStoreAndSlug: () => {
@@ -1277,6 +1315,44 @@ describe("/api/seller/products", () => {
     categoryId: "01955f00-0000-7000-8000-000000000001",
   };
 
+  /** Seed a draft product owned by the approved store, returning its id. */
+  function seedOwnedProduct(seq: number): string {
+    const now = new Date("2026-06-01T00:00:00.000Z");
+    const productId = fakeId(seq);
+    productRepository.seedProduct({
+      id: productId,
+      storeId: "st-approved",
+      slug: `product-${seq}`,
+      name: `Product ${seq}`,
+      description: null,
+      categoryId: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return productId;
+  }
+
+  /** Seed one image row; `url` and `altText` are derived from the id by default. */
+  function seedImage(input: {
+    id: string;
+    productId: string;
+    sortOrder: number;
+    isPrimary: boolean;
+    url?: string;
+    altText?: string | null;
+  }): void {
+    productRepository.seedImage({
+      id: input.id,
+      productId: input.productId,
+      url: input.url ?? `https://cdn.test/${input.id}.jpg`,
+      altText: input.altText ?? null,
+      sortOrder: input.sortOrder,
+      isPrimary: input.isPrimary,
+      createdAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
+  }
+
   it("GET list rejects unauthenticated callers with 401", async () => {
     await expectCreateFailure(
       await get("/api/seller/products"),
@@ -1452,6 +1528,213 @@ describe("/api/seller/products", () => {
     expect(body.data.variants).toHaveLength(1);
     expect(body.data.variants[0]?.inventory).toMatchObject({ quantity: 3 });
     expect(JSON.stringify(body)).not.toContain("storeId");
+  });
+
+  it("GET detail embeds the product's images in canonical order", async () => {
+    const session = await registerApprovedSeller();
+    const now = new Date("2026-06-01T00:00:00.000Z");
+    const productId = fakeId(60);
+    productRepository.seedProduct({
+      id: productId,
+      storeId: "st-approved",
+      slug: "detail-images",
+      name: "Detail Images",
+      description: null,
+      categoryId: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    seedImage({ id: fakeId(61), productId, sortOrder: 1, isPrimary: false });
+    seedImage({ id: fakeId(62), productId, sortOrder: 0, isPrimary: true });
+
+    const response = await get(`/api/seller/products/${productId}`, session.cookie);
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: true;
+      data: { images: Array<{ id: string; isPrimary: boolean }> };
+    };
+    expect(body.data.images.map((image) => image.id)).toEqual([fakeId(62), fakeId(61)]);
+    expect(body.data.images[0]?.isPrimary).toBe(true);
+  });
+
+  it("GET images rejects unauthenticated callers with 401", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(70);
+
+    await expectCreateFailure(
+      await get(`/api/seller/products/${productId}/images`),
+      "SESSION_EXPIRED",
+      401,
+    );
+    expect(productRepository.listImagesCalls).toHaveLength(0);
+    void session;
+  });
+
+  it("GET images rejects authenticated customers with 403 FORBIDDEN", async () => {
+    const session = await registerUser();
+    const productId = seedOwnedProduct(71);
+
+    await expectCreateFailure(
+      await get(`/api/seller/products/${productId}/images`, session.cookie),
+      "FORBIDDEN",
+      403,
+    );
+    expect(productRepository.listImagesCalls).toHaveLength(0);
+  });
+
+  it("GET images rejects a pending seller with SELLER_NOT_APPROVED", async () => {
+    const session = await registerUser();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, role: "seller" });
+    const now = new Date();
+    sellerRepository.seedProfile({
+      id: "sp-pending-images",
+      userId: session.userId,
+      slug: "pending-images",
+      displayName: "Pending Seller",
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: "st-pending-images",
+      sellerProfileId: "sp-pending-images",
+      name: "Pending Store",
+      slug: "pending-images",
+      description: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const productId = seedOwnedProduct(72);
+
+    await expectCreateFailure(
+      await get(`/api/seller/products/${productId}/images`, session.cookie),
+      "SELLER_NOT_APPROVED",
+      403,
+    );
+    expect(productRepository.listImagesCalls).toHaveLength(0);
+  });
+
+  it("GET images returns the seller's own images ordered primary-first, then sortOrder, then id", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(80);
+    // Seeded out of order on purpose: the response order must come from the
+    // canonical sort, not from insertion order.
+    seedImage({ id: fakeId(82), productId, sortOrder: 2, isPrimary: false, url: "https://cdn.test/c.jpg" });
+    seedImage({ id: fakeId(81), productId, sortOrder: 2, isPrimary: false, url: "https://cdn.test/b.jpg" });
+    seedImage({ id: fakeId(84), productId, sortOrder: 0, isPrimary: false, url: "https://cdn.test/front.jpg" });
+    seedImage({ id: fakeId(83), productId, sortOrder: 9, isPrimary: true, url: "https://cdn.test/hero.jpg" });
+
+    const otherProductId = seedOwnedProduct(85);
+    seedImage({ id: fakeId(86), productId: otherProductId, sortOrder: 0, isPrimary: true });
+    productRepository.seedImage({
+      id: fakeId(87),
+      productId: fakeId(88),
+      url: "https://cdn.test/other-store.jpg",
+      altText: "another store's product",
+      sortOrder: 0,
+      isPrimary: true,
+      createdAt: new Date("2026-06-02T00:00:00.000Z"),
+    });
+
+    const response = await get(`/api/seller/products/${productId}/images`, session.cookie);
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: true;
+      data: { productId: string; images: Array<{ id: string; url: string; isPrimary: boolean }> };
+    };
+    expect(body.data.productId).toBe(productId);
+    expect(body.data.images.map((image) => image.id)).toEqual([
+      fakeId(83),
+      fakeId(84),
+      fakeId(81),
+      fakeId(82),
+    ]);
+    expect(body.data.images.map((image) => image.url)).toEqual([
+      "https://cdn.test/hero.jpg",
+      "https://cdn.test/front.jpg",
+      "https://cdn.test/b.jpg",
+      "https://cdn.test/c.jpg",
+    ]);
+    expect(body.data.images[0]?.isPrimary).toBe(true);
+    // Ownership is resolved server-side and never taken from the request.
+    expect(productRepository.listImagesCalls).toEqual([{ productId, storeId: "st-approved" }]);
+    expect(JSON.stringify(body)).not.toContain("storeId");
+    expect(JSON.stringify(body)).not.toContain("another store's product");
+  });
+
+  it("GET images returns an empty list for an owned product with no images", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(90);
+
+    const response = await get(`/api/seller/products/${productId}/images`, session.cookie);
+
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as {
+      ok: true;
+      data: { productId: string; images: unknown[] };
+    };
+    expect(body.data).toEqual({ productId, images: [] });
+  });
+
+  it("GET images hides a foreign product behind the same 404 as an unknown id", async () => {
+    const session = await registerApprovedSeller();
+    const now = new Date("2026-06-01T00:00:00.000Z");
+    const foreignProductId = fakeId(100);
+    productRepository.seedProduct({
+      id: foreignProductId,
+      storeId: "st-other",
+      slug: "foreign",
+      name: "Foreign Product",
+      description: "someone else's draft",
+      categoryId: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    productRepository.seedImage({
+      id: fakeId(101),
+      productId: foreignProductId,
+      url: "https://cdn.test/foreign.jpg",
+      altText: "someone else's image",
+      sortOrder: 0,
+      isPrimary: true,
+      createdAt: now,
+    });
+
+    const foreignResponse = await get(
+      `/api/seller/products/${foreignProductId}/images`,
+      session.cookie,
+    );
+    const unknownResponse = await get(
+      `/api/seller/products/${fakeId(102)}/images`,
+      session.cookie,
+    );
+
+    expect(foreignResponse.status).toBe(404);
+    expect(unknownResponse.status).toBe(404);
+    const foreignBody = await foreignResponse.json();
+    const unknownBody = await unknownResponse.json();
+    expect(foreignBody).toEqual(unknownBody);
+    expect((foreignBody as ApiFailure).error.code).toBe("PRODUCT_NOT_FOUND");
+    expect(JSON.stringify(foreignBody)).not.toContain("someone else's image");
+    // The product lookup rejects the id before the image list is consulted.
+    expect(productRepository.listImagesCalls).toHaveLength(0);
+  });
+
+  it("GET images rejects a malformed product id with 404 without reading images", async () => {
+    const session = await registerApprovedSeller();
+
+    await expectCreateFailure(
+      await get(`/api/seller/products/not-a-uuid/images`, session.cookie),
+      "PRODUCT_NOT_FOUND",
+      404,
+    );
+    expect(productRepository.listImagesCalls).toHaveLength(0);
   });
 
   it("GET detail returns the same safe 404 for malformed, unknown, and cross-store ids", async () => {

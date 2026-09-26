@@ -310,6 +310,8 @@ const baseConfig: AppConfig = {
   sessionLastUsedThrottleSeconds: 300,
   sessionPurgeIntervalSeconds: 3_600,
   adminBootstrapSecret: null,
+  mediaPublicBaseUrl: null,
+  mediaLocalRoot: ".data/media",
 };
 
 function extractSessionCookie(response: Response): string {
@@ -409,6 +411,9 @@ const inertProductRepository: ProductRepository = {
     throw new Error("unexpected product call");
   },
   publishProduct: () => {
+    throw new Error("unexpected product call");
+  },
+  addProductImages: () => {
     throw new Error("unexpected product call");
   },
 };

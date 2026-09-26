@@ -877,6 +877,165 @@ describe("D1 product repository (variant lifecycle, inventory and publish)", () 
   });
 });
 
+describe("D1 product repository: addProductImages", () => {
+  /**
+   * Two independent sellers, so ownership can be checked against a real
+   * `products.storeId` rather than a fabricated id.
+   */
+  async function seedSeller(db: DrizzleD1Database<DatabaseSchema>, seed: number): Promise<string> {
+    const users = createD1UserRepository(db);
+    const sellers = createD1SellerRepository(db);
+    const user = await users.create({
+      email: `append-${seed}@example.test`,
+      name: `Append Seller ${seed}`,
+      passwordHash: tokenHash(90 + seed),
+    });
+    const onboarding = await sellers.createOnboarding({
+      userId: user.id,
+      profileSlug: `append-profile-${seed}`,
+      displayName: `Append Seller ${seed}`,
+      storeName: "Append Storefront",
+      storeSlug: `append-store-${seed}`,
+    });
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+    return onboarding.store.id;
+  }
+
+  async function seedProduct(
+    db: DrizzleD1Database<DatabaseSchema>,
+    storeId: string,
+    slug: string,
+  ): Promise<string> {
+    const row = await db
+      .insert(schema.products)
+      .values({ storeId, categoryId: null, name: "D1 Camera", slug, status: "draft" })
+      .returning()
+      .get();
+    return row.id;
+  }
+
+  async function countImages(db: DrizzleD1Database<DatabaseSchema>, productId: string): Promise<number> {
+    const rows = await db
+      .select({ id: schema.productImages.id })
+      .from(schema.productImages)
+      .where(eq(schema.productImages.productId, productId));
+    return rows.length;
+  }
+
+  it("persists url and storage key, forcing every appended row non-primary", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 1);
+    const productId = await seedProduct(db, storeId, "append-d1");
+
+    const result = await repo.addProductImages({
+      productId,
+      storeId,
+      images: [
+        {
+          url: "https://media.test/products/p/front.jpg",
+          storageKey: "products/p/front.jpg",
+          altText: "Front",
+          sortOrder: 0,
+        },
+        {
+          url: "https://media.test/products/p/back.jpg",
+          storageKey: "products/p/back.jpg",
+          altText: null,
+          sortOrder: 1,
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.images.map((image) => image.storageKey)).toEqual([
+      "products/p/front.jpg",
+      "products/p/back.jpg",
+    ]);
+    expect(result.images.every((image) => image.isPrimary === false)).toBe(true);
+    expect(await countImages(db, productId)).toBe(2);
+  });
+
+  it("round-trips an explicit null storage key for a URL-only image", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 2);
+    const productId = await seedProduct(db, storeId, "append-d1-url-only");
+
+    await repo.addProductImages({
+      productId,
+      storeId,
+      images: [{ url: "https://cdn.test/external.jpg", storageKey: null, altText: null, sortOrder: 0 }],
+    });
+
+    const listed = await repo.listImagesByProduct(productId, storeId);
+    expect(listed[0]?.storageKey).toBeNull();
+  });
+
+  it("appends beside an existing primary without disturbing it", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 3);
+    const productId = await seedProduct(db, storeId, "append-d1-primary");
+    await db
+      .insert(schema.productImages)
+      .values({ productId, url: "https://cdn.test/hero.jpg", isPrimary: 1 });
+
+    await repo.addProductImages({
+      productId,
+      storeId,
+      images: [{ url: "https://media.test/new.jpg", storageKey: "new.jpg", altText: null, sortOrder: 0 }],
+    });
+
+    const listed = await repo.listImagesByProduct(productId, storeId);
+    // Same canonical ordering as the local driver: primary first, then sortOrder.
+    expect(listed.map((image) => image.url)).toEqual([
+      "https://cdn.test/hero.jpg",
+      "https://media.test/new.jpg",
+    ]);
+    expect(listed.map((image) => image.isPrimary)).toEqual([true, false]);
+    expect(listed[1]?.storageKey).toBe("new.jpg");
+  });
+
+  it("rejects a foreign product and writes nothing", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const ownStoreId = await seedSeller(db, 4);
+    const foreignStoreId = await seedSeller(db, 5);
+    const foreignProductId = await seedProduct(db, foreignStoreId, "append-d1-foreign");
+
+    const result = await repo.addProductImages({
+      productId: foreignProductId,
+      storeId: ownStoreId,
+      images: [{ url: "https://media.test/x.jpg", storageKey: "x.jpg", altText: null, sortOrder: 0 }],
+    });
+
+    expect(result).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+    expect(await countImages(db, foreignProductId)).toBe(0);
+  });
+
+  it("makes an empty batch a checked no-op, so a foreign product is still rejected", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const ownStoreId = await seedSeller(db, 6);
+    const foreignStoreId = await seedSeller(db, 7);
+    const ownProductId = await seedProduct(db, ownStoreId, "append-d1-empty-own");
+    const foreignProductId = await seedProduct(db, foreignStoreId, "append-d1-empty-foreign");
+
+    expect(
+      await repo.addProductImages({ productId: ownProductId, storeId: ownStoreId, images: [] }),
+    ).toEqual({ ok: true, images: [] });
+    expect(
+      await repo.addProductImages({ productId: foreignProductId, storeId: ownStoreId, images: [] }),
+    ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+  });
+});
+
 describe("D1 cart repository (unique conflicts + cascade)", () => {
   /**
    * A user with an active store and one sellable variant plus a fresh cart,

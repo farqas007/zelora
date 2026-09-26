@@ -443,3 +443,178 @@ describe("product repository: product images", () => {
     expect(detail?.images).toEqual([]);
   });
 });
+
+describe("product repository: addProductImages", () => {
+  /** Insert a product owned by `storeId` and return its id. */
+  function seedProduct(storeId: string, slug: string): string {
+    return db
+      .insert(schema.products)
+      .values({ storeId, name: slug, slug })
+      .returning()
+      .get().id;
+  }
+
+  /** Count rows directly, so "wrote nothing" is asserted against the table. */
+  function countImages(productId: string): number {
+    return db
+      .select({ id: schema.productImages.id })
+      .from(schema.productImages)
+      .where(eq(schema.productImages.productId, productId))
+      .all().length;
+  }
+
+  it("inserts every submitted image with its url and storage key, all non-primary", async () => {
+    const productId = seedProduct(scaffold.storeId, "append-basic");
+
+    const result = await repo.addProductImages({
+      productId,
+      storeId: scaffold.storeId,
+      images: [
+        {
+          url: "https://media.test/products/p/front.jpg",
+          storageKey: "products/p/front.jpg",
+          altText: "Front",
+          sortOrder: 0,
+        },
+        {
+          url: "https://media.test/products/p/back.jpg",
+          storageKey: "products/p/back.jpg",
+          altText: null,
+          sortOrder: 1,
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.images).toHaveLength(2);
+    expect(result.images.map((image) => image.storageKey)).toEqual([
+      "products/p/front.jpg",
+      "products/p/back.jpg",
+    ]);
+    expect(result.images.map((image) => image.url)).toEqual([
+      "https://media.test/products/p/front.jpg",
+      "https://media.test/products/p/back.jpg",
+    ]);
+    // isPrimary is not expressible by the caller, so every row is non-primary
+    // and the one-primary-per-product partial unique index is never at risk.
+    expect(result.images.every((image) => image.isPrimary === false)).toBe(true);
+    expect(result.images.every((image) => image.productId === productId)).toBe(true);
+    expect(countImages(productId)).toBe(2);
+  });
+
+  it("stores an explicit null storage key for a URL-only image", async () => {
+    const productId = seedProduct(scaffold.storeId, "append-url-only");
+
+    const result = await repo.addProductImages({
+      productId,
+      storeId: scaffold.storeId,
+      images: [{ url: "https://cdn.test/external.jpg", storageKey: null, altText: null, sortOrder: 0 }],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    expect(result.images[0]?.storageKey).toBeNull();
+  });
+
+  it("returns the rows in submission order, not the canonical read order", async () => {
+    const productId = seedProduct(scaffold.storeId, "append-order");
+
+    const result = await repo.addProductImages({
+      productId,
+      storeId: scaffold.storeId,
+      images: [
+        { url: "https://media.test/c.jpg", storageKey: "c.jpg", altText: null, sortOrder: 2 },
+        { url: "https://media.test/a.jpg", storageKey: "a.jpg", altText: null, sortOrder: 0 },
+        { url: "https://media.test/b.jpg", storageKey: "b.jpg", altText: null, sortOrder: 1 },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      return;
+    }
+    // The read path owns the ordering rule; the insert path must not
+    // second-guess it or renumber the caller's sortOrder values.
+    expect(result.images.map((image) => image.storageKey)).toEqual(["c.jpg", "a.jpg", "b.jpg"]);
+    expect(result.images.map((image) => image.sortOrder)).toEqual([2, 0, 1]);
+  });
+
+  it("appends to existing images and exposes both through the ownership-scoped read", async () => {
+    const productId = seedProduct(scaffold.storeId, "append-existing");
+    db.insert(schema.productImages)
+      .values({ productId, url: "https://cdn.test/existing.jpg", isPrimary: 1 })
+      .run();
+
+    await repo.addProductImages({
+      productId,
+      storeId: scaffold.storeId,
+      images: [{ url: "https://media.test/new.jpg", storageKey: "new.jpg", altText: null, sortOrder: 0 }],
+    });
+
+    const listed = await repo.listImagesByProduct(productId, scaffold.storeId);
+    expect(listed.map((image) => image.url)).toEqual([
+      "https://cdn.test/existing.jpg",
+      "https://media.test/new.jpg",
+    ]);
+    // The pre-existing primary keeps the flag; the appended row stays non-primary.
+    expect(listed.map((image) => image.isPrimary)).toEqual([true, false]);
+    // A pre-existing URL-only row reads back as null, never as a fabricated "".
+    expect(listed[0]?.storageKey).toBeNull();
+    expect(listed[1]?.storageKey).toBe("new.jpg");
+  });
+
+  it("rejects a product owned by another store and writes nothing", async () => {
+    const foreignProductId = seedProduct(scaffold.otherStoreId, "append-foreign");
+
+    const result = await repo.addProductImages({
+      productId: foreignProductId,
+      storeId: scaffold.storeId,
+      images: [{ url: "https://media.test/x.jpg", storageKey: "x.jpg", altText: null, sortOrder: 0 }],
+    });
+
+    expect(result).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+    expect(countImages(foreignProductId)).toBe(0);
+  });
+
+  it("rejects an unknown product id without writing anything", async () => {
+    const result = await repo.addProductImages({
+      productId: "01955f00-0000-7000-8000-000000000001",
+      storeId: scaffold.storeId,
+      images: [{ url: "https://media.test/x.jpg", storageKey: "x.jpg", altText: null, sortOrder: 0 }],
+    });
+
+    expect(result).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+  });
+
+  it("makes an empty batch a checked no-op, so a foreign product is still rejected", async () => {
+    const ownProductId = seedProduct(scaffold.storeId, "append-empty-own");
+    const foreignProductId = seedProduct(scaffold.otherStoreId, "append-empty-foreign");
+
+    expect(await repo.addProductImages({ productId: ownProductId, storeId: scaffold.storeId, images: [] }))
+      .toEqual({ ok: true, images: [] });
+    expect(
+      await repo.addProductImages({ productId: foreignProductId, storeId: scaffold.storeId, images: [] }),
+    ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+  });
+
+  it("does not disturb another product's images", async () => {
+    const productId = seedProduct(scaffold.storeId, "append-isolated-a");
+    const siblingId = seedProduct(scaffold.storeId, "append-isolated-b");
+    db.insert(schema.productImages)
+      .values({ productId: siblingId, url: "https://cdn.test/sibling.jpg", isPrimary: 1 })
+      .run();
+
+    await repo.addProductImages({
+      productId,
+      storeId: scaffold.storeId,
+      images: [{ url: "https://media.test/a.jpg", storageKey: "a.jpg", altText: null, sortOrder: 0 }],
+    });
+
+    expect(countImages(siblingId)).toBe(1);
+  });
+});

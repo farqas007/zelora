@@ -48,5 +48,27 @@
       // resolved relative to this config file (apps/api).
       "migrations_dir": "../../packages/db/migrations"
     }
+  ],
+  "r2_buckets": [
+    {
+      // Raw R2 binding name, exposed to the Worker as `env.MEDIA`. Holds
+      // seller-uploaded product images; see src/services/media/r2.ts.
+      //
+      // Creating the bucket is a one-off operator step and is NOT part of this
+      // repository's scripts (nothing here touches remote infrastructure):
+      //
+      //   wrangler r2 bucket create zelora-media
+      //
+      // Media storage stays OFF until BOTH this binding and
+      // MEDIA_PUBLIC_BASE_URL are configured (set the latter in `vars` above, or
+      // as a deployment variable). Either one alone is inert rather than an
+      // error: because this binding is declared here, `env.MEDIA` is always
+      // present after a deploy, so an operator who has not chosen a public base
+      // yet can still deploy and serve every other endpoint. Media operations
+      // then fail loudly instead of storing objects whose URLs resolve to
+      // nothing. See `createWorkerMediaStorage` in src/worker.ts.
+      "binding": "MEDIA",
+      "bucket_name": "zelora-media"
+    }
   ]
 }

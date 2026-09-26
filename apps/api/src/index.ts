@@ -16,6 +16,7 @@ import {
   normalizeClientIp,
   type ClientIpResolver,
 } from "./services/client-ip";
+import { createLocalFileMediaStorage } from "./services/media/local-fs";
 
 const config = loadConfig();
 const logger = createLogger("server");
@@ -44,6 +45,23 @@ const { db } = createLocalClient(resolveDbPath());
 const userRepository = createLocalUserRepository(db);
 const sessionRepository = createLocalAuthSessionRepository(db);
 
+/**
+ * Media storage is opt-in and Node-specific, so it is wired here rather than in
+ * `app.ts`: this is the only production import site of the filesystem driver,
+ * which keeps `node:fs` out of the edge-compatible module graph (and out of the
+ * Worker bundle, which `scripts/check-worker-bundle.mjs` enforces).
+ *
+ * `createApp` substitutes a fail-closed implementation when this is `undefined`,
+ * so an unconfigured local server rejects media operations loudly instead of
+ * writing bytes somewhere the browser cannot read them.
+ */
+const mediaStorage = config.mediaPublicBaseUrl
+  ? createLocalFileMediaStorage({
+      root: config.mediaLocalRoot,
+      publicBaseUrl: config.mediaPublicBaseUrl,
+    })
+  : undefined;
+
 const app = createApp({
   config,
   userRepository,
@@ -56,6 +74,7 @@ const app = createApp({
   passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
   clock: systemClock,
   clientIpResolver,
+  mediaStorage,
 });
 
 const server = serve(

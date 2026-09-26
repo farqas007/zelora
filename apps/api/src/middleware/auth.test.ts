@@ -203,6 +203,8 @@ describe("auth middleware", () => {
         sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
+    mediaPublicBaseUrl: null,
+    mediaLocalRoot: ".data/media",
   };
 
   let clock: FakeClock;

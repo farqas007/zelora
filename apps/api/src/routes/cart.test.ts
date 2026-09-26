@@ -297,6 +297,8 @@ describe("cart routes", () => {
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
+    mediaPublicBaseUrl: null,
+    mediaLocalRoot: ".data/media",
   };
 
   let userRepository: FakeUserRepository;
@@ -334,6 +336,7 @@ describe("cart routes", () => {
         createVariant: inert,
         setInventory: inert,
         publishProduct: inert,
+        addProductImages: inert,
       } satisfies ProductRepository,
       cartRepository,
       auditLogRepository: {

@@ -1,0 +1,1 @@
+ALTER TABLE `product_images` ADD `storage_key` text;

@@ -3,6 +3,7 @@ import type { LocalDatabase } from "../client";
 import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
 import { inventory, products, productImages, productVariants } from "../schema/catalog";
 import type {
+  AddProductImageInput,
   ProductDetailRecord,
   ProductImageRecord,
   ProductListPage,
@@ -26,6 +27,10 @@ import type {
  *
  * Product images are read through one shared column projection and one
  * ordering, so the dedicated list and the embedded detail can never drift.
+ * `addProductImages` is the only image write: it resolves ownership through
+ * `products.storeId` in the same statement as the insert's guard and always
+ * writes `is_primary = 0`, so the one-primary-per-product partial unique index
+ * is never at risk from this path.
  */
 export function createLocalProductRepository(db: LocalDatabase): ProductRepository {
   return {
@@ -178,6 +183,47 @@ export function createLocalProductRepository(db: LocalDatabase): ProductReposito
       }
       return { ok: true, product: updated };
     },
+
+    async addProductImages(input) {
+      // Ownership is checked before anything is written, so a foreign or
+      // unknown product id can never leave rows behind — including for an
+      // empty batch, which stays a checked no-op.
+      const product = findOwnedProduct(db, input.productId, input.storeId);
+      if (product === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      if (input.images.length === 0) {
+        return { ok: true, images: [] };
+      }
+
+      const rows = db
+        .insert(productImages)
+        .values(input.images.map((image) => toProductImageValues(input.productId, image)))
+        .returning()
+        .all();
+      return { ok: true, images: rows.map(toProductImageRecord) };
+    },
+  };
+}
+
+/**
+ * Project one submitted image onto an insertable `product_images` row.
+ *
+ * `isPrimary: 0` is hard-coded rather than accepted: the caller cannot
+ * express primary intent, so the `product_images_product_primary_unique`
+ * partial unique index cannot be violated from this path.
+ */
+function toProductImageValues(
+  productId: string,
+  image: AddProductImageInput,
+): typeof productImages.$inferInsert {
+  return {
+    productId,
+    url: image.url,
+    storageKey: image.storageKey,
+    altText: image.altText,
+    sortOrder: image.sortOrder,
+    isPrimary: 0,
   };
 }
 
@@ -291,6 +337,7 @@ const productImageColumns = {
   id: productImages.id,
   productId: productImages.productId,
   url: productImages.url,
+  storageKey: productImages.storageKey,
   altText: productImages.altText,
   sortOrder: productImages.sortOrder,
   isPrimary: productImages.isPrimary,

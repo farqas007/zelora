@@ -34,6 +34,25 @@ export interface AppConfig {
    * value and never echoed by any read path.
    */
   adminBootstrapSecret: string | null;
+  /**
+   * Absolute `http(s)` origin that uploaded media is publicly readable from,
+   * or `null` when no media storage is configured. Media storage is opt-in:
+   * an unset value leaves the storage port fail-closed rather than guessing
+   * an origin that would produce dead image URLs.
+   *
+   * Always absolute (never a root-relative path) because a stored
+   * `product_images.url` is loaded directly as an `<img src>` by the browser,
+   * which may be served from a different origin than the API. Trailing
+   * slashes are stripped so URL joining is unambiguous.
+   */
+  mediaPublicBaseUrl: string | null;
+  /**
+   * Filesystem directory the Node runtime writes uploaded media into. Only
+   * read by the Node-only local filesystem driver; the Worker runtime never
+   * touches it (it has no filesystem). Relative paths resolve against the
+   * process working directory, matching `ZELORA_DB_PATH`.
+   */
+  mediaLocalRoot: string;
 }
 
 const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
@@ -61,6 +80,14 @@ const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
   rateLimitProductCreateIpWindowSeconds: 3_600,
   /** Admin bootstrap is opt-in: disabled unless a secret is provided. */
   adminBootstrapSecret: null,
+  /**
+   * Media storage is opt-in: no public base URL means the storage port stays
+   * fail-closed. The local filesystem root mirrors the `.data/zelora.db`
+   * default of `ZELORA_DB_PATH` so both live-development artifacts sit
+   * together under `.data/`.
+   */
+  mediaPublicBaseUrl: null,
+  mediaLocalRoot: ".data/media",
 };
 
 function parsePort(value: string | undefined): number {
@@ -170,6 +197,42 @@ function parseAdminBootstrapSecret(value: string | undefined): string | null {
 }
 
 /**
+ * Parse the media public base URL. Unset/empty disables media storage
+ * (`null`); a set value must be an absolute `http`/`https` URL with a host,
+ * and any trailing slashes are stripped so a driver's URL join can never
+ * produce a double slash. The value is not otherwise normalized: a
+ * `r2.dev` development base, a custom domain and a proxied media route are
+ * all legitimate, and the API must not second-guess which one is deployed.
+ */
+function parseMediaPublicBaseUrl(value: string | undefined): string | null {
+  if (value === undefined || value === "") {
+    return null;
+  }
+  const trimmed = value.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new AppError(
+      "APP_CONFIG_INVALID",
+      `MEDIA_PUBLIC_BASE_URL must be an absolute http(s) URL, received "${value}".`,
+      500,
+    );
+  }
+  if ((parsed.protocol !== "http:" && parsed.protocol !== "https:") || parsed.host === "") {
+    throw new AppError(
+      "APP_CONFIG_INVALID",
+      `MEDIA_PUBLIC_BASE_URL must be an absolute http(s) URL with a host, received "${value}".`,
+      500,
+    );
+  }
+  return trimmed.replace(/\/+$/, "");
+}
+
+/**
  * Load application configuration from the environment.
  * A specific map can be injected for tests.
  */
@@ -275,5 +338,11 @@ export function loadConfig(
       "RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS",
     ),
     adminBootstrapSecret: parseAdminBootstrapSecret(env.ADMIN_BOOTSTRAP_SECRET),
+    mediaPublicBaseUrl: parseMediaPublicBaseUrl(env.MEDIA_PUBLIC_BASE_URL),
+    mediaLocalRoot: parseNonEmptyString(
+      env.ZELORA_MEDIA_ROOT,
+      DEFAULT_CONFIG.mediaLocalRoot,
+      "ZELORA_MEDIA_ROOT",
+    ),
   };
 }

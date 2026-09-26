@@ -12,6 +12,8 @@ import type {
 } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type {
+  AddProductImagesInput,
+  AddProductImagesResult,
   InventoryRecord,
   CreateVariantInput,
   CreateVariantResult,
@@ -496,6 +498,34 @@ class FakeProductRepository implements ProductRepository {
     return { ok: true, product: updated };
   }
 
+  /**
+   * Mirrors both real drivers: ownership is resolved before anything is
+   * written, and every inserted row is forced non-primary so the
+   * one-primary-per-product invariant can never be violated from this path.
+   */
+  async addProductImages(input: AddProductImagesInput): Promise<AddProductImagesResult> {
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    const createdAt = new Date();
+    const images = input.images.map((image) => {
+      const record: ProductImageRecord = {
+        id: fakeId(this.nextId++),
+        productId: input.productId,
+        url: image.url,
+        storageKey: image.storageKey,
+        altText: image.altText,
+        sortOrder: image.sortOrder,
+        isPrimary: false,
+        createdAt,
+      };
+      this.images.set(record.id, record);
+      return record;
+    });
+    return { ok: true, images };
+  }
+
   seedProduct(product: ProductRecord): void {
     this.products.set(product.id, product);
   }
@@ -587,6 +617,8 @@ describe("POST /api/seller/onboarding", () => {
         sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
+    mediaPublicBaseUrl: null,
+    mediaLocalRoot: ".data/media",
   };
 
   const headerIpResolver: ClientIpResolver = {
@@ -666,6 +698,9 @@ describe("POST /api/seller/onboarding", () => {
       throw new Error("unexpected product call");
     },
     publishProduct: () => {
+      throw new Error("unexpected product call");
+    },
+    addProductImages: () => {
       throw new Error("unexpected product call");
     },
   };
@@ -1141,6 +1176,8 @@ describe("/api/seller/products", () => {
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
+    mediaPublicBaseUrl: null,
+    mediaLocalRoot: ".data/media",
   };
 
   const headerIpResolver: ClientIpResolver = {
@@ -1341,11 +1378,13 @@ describe("/api/seller/products", () => {
     isPrimary: boolean;
     url?: string;
     altText?: string | null;
+    storageKey?: string | null;
   }): void {
     productRepository.seedImage({
       id: input.id,
       productId: input.productId,
       url: input.url ?? `https://cdn.test/${input.id}.jpg`,
+      storageKey: input.storageKey ?? null,
       altText: input.altText ?? null,
       sortOrder: input.sortOrder,
       isPrimary: input.isPrimary,
@@ -1634,6 +1673,7 @@ describe("/api/seller/products", () => {
       id: fakeId(87),
       productId: fakeId(88),
       url: "https://cdn.test/other-store.jpg",
+      storageKey: null,
       altText: "another store's product",
       sortOrder: 0,
       isPrimary: true,
@@ -1700,6 +1740,7 @@ describe("/api/seller/products", () => {
       id: fakeId(101),
       productId: foreignProductId,
       url: "https://cdn.test/foreign.jpg",
+      storageKey: null,
       altText: "someone else's image",
       sortOrder: 0,
       isPrimary: true,
@@ -2148,6 +2189,8 @@ describe("POST /api/seller/products/:id variants, inventory and publish", () => 
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
+    mediaPublicBaseUrl: null,
+    mediaLocalRoot: ".data/media",
   };
 
   const headerIpResolver: ClientIpResolver = {

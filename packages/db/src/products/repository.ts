@@ -73,6 +73,11 @@ export interface InventoryRecord {
  * one-primary-per-product partial unique index are enforced in SQL; the widening
  * happens once, at the read edge, so no caller has to remember the encoding.
  *
+ * `storageKey` is the server-side handle for the stored object and is `null`
+ * for every URL-only image (externally hosted or seeded demo data). It is
+ * deliberately **not** part of the shared `ProductImageDto`: the owner DTO is
+ * documented to be identical to the public catalog DTO, so a delete handle has
+ * no business crossing the API boundary.
  *
  * This table has no `updated_at`, so only `createdAt` exists. Phase 2A only
  * inserts images; nothing updates one yet, so an `updated_at` that would always
@@ -82,6 +87,7 @@ export interface ProductImageRecord {
   id: string;
   productId: string;
   url: string;
+  storageKey: string | null;
   altText: string | null;
   sortOrder: number;
   isPrimary: boolean;
@@ -174,6 +180,53 @@ export type PublishProductResult =
   | { ok: true; product: ProductRecord }
   | { ok: false; reason: PublishProductConflictReason };
 
+/**
+ * One image to append to a product.
+ *
+ * `isPrimary` is intentionally **absent**: every inserted image is
+ * non-primary, so a caller can never trip the
+ * `product_images_product_primary_unique` partial unique index, and the
+ * one-primary-per-product invariant stays owned by the database rather than by
+ * a write path that has no primary-management endpoint yet. Promoting an
+ * image to primary is a separate, later operation.
+ *
+ * `url` and `storageKey` are both required from the caller even though the
+ * column is nullable: a caller that wrote an object to storage passes its key,
+ * and a caller inserting a URL-only row passes `null` explicitly. Making the
+ * distinction impossible to skip by accident is worth one extra field.
+ */
+export interface AddProductImageInput {
+  url: string;
+  storageKey: string | null;
+  altText: string | null;
+  sortOrder: number;
+}
+
+/**
+ * Everything required to append images to one owned product. Ownership
+ * (`storeId`) is derived by the service from the authenticated seller;
+ * `productId` comes from the URL path and is never taken from client input.
+ */
+export interface AddProductImagesInput {
+  productId: string;
+  storeId: string;
+  images: AddProductImageInput[];
+}
+
+/** Driver-neutral rejection reasons for appending images. */
+export type AddProductImagesConflictReason = "PRODUCT_NOT_FOUND";
+
+/**
+ * The inserted rows, in the same order as the submitted `images`. This is
+ * insertion order, deliberately *not* the canonical read order: no re-sorting
+ * happens here, so the ordering rule stays written down in exactly one place
+ * per driver (the read paths). Callers that need canonical order re-read
+ * through {@link ProductRepository.listImagesByProduct}.
+ */
+export type AddProductImagesResult =
+  | { ok: true; images: ProductImageRecord[] }
+  | { ok: false; reason: AddProductImagesConflictReason };
+
 export interface ProductRepository {
   listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage>;
   findByStoreAndId(storeId: string, productId: string): Promise<ProductDetailRecord | null>;
@@ -225,4 +278,17 @@ export interface ProductRepository {
    * thrown, so callers can map them without inspecting driver errors.
    */
   publishProduct(productId: string, storeId: string): Promise<PublishProductResult>;
+  /**
+   * Append images to a product the caller owns. Ownership is resolved through
+   * `products.storeId`, so an unknown product and a product owned by another
+   * store are indistinguishable: both resolve to `PRODUCT_NOT_FOUND` and write
+   * nothing. Every inserted row is non-primary (see
+   * {@link AddProductImageInput}), and one multi-row `INSERT` keeps the batch
+   * atomic without an explicit transaction.
+   *
+   * An empty `images` array is a successful no-op that still performs the
+   * ownership check, so a foreign product with an empty batch is rejected
+   * exactly like a foreign product with files.
+   */
+  addProductImages(input: AddProductImagesInput): Promise<AddProductImagesResult>;
 }

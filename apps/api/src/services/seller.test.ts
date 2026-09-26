@@ -16,6 +16,8 @@ import {
   SELLER_PRODUCT_PAGE_LIMITS,
 } from "@zelora/shared";
 import type {
+  AddProductImagesInput,
+  AddProductImagesResult,
   CreateVariantInput,
   CreateVariantResult,
   InventoryRecord,
@@ -33,6 +35,7 @@ import type {
   SetInventoryResult,
   VariantRecord,
 } from "@zelora/db/products";
+import type { MediaObjectInput, MediaStorage } from "./media/storage";
 import { SellerService } from "./seller";
 
 /**
@@ -354,6 +357,35 @@ class FakeProductRepository implements ProductRepository {
     return { ok: true, product: updated };
   }
 
+  /**
+   * Mirrors both real drivers: ownership is resolved before anything is
+   * written, and every inserted row is forced non-primary so the
+   * one-primary-per-product invariant can never be violated from this path.
+   */
+  async addProductImages(input: AddProductImagesInput): Promise<AddProductImagesResult> {
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    const createdAt = new Date();
+    const images = input.images.map((image) => {
+      const record: ProductImageRecord = {
+        id: fakeId(this.nextId),
+        productId: input.productId,
+        url: image.url,
+        storageKey: image.storageKey,
+        altText: image.altText,
+        sortOrder: image.sortOrder,
+        isPrimary: false,
+        createdAt,
+      };
+      this.nextId += 1;
+      this.images.set(record.id, record);
+      return record;
+    });
+    return { ok: true, images };
+  }
+
   seedProduct(product: ProductRecord): void {
     this.products.set(product.id, product);
   }
@@ -437,16 +469,41 @@ function imageRecord(input: {
   sortOrder?: number;
   isPrimary?: boolean;
   altText?: string | null;
+  storageKey?: string | null;
 }): ProductImageRecord {
   return {
     id: input.id,
     productId: input.productId,
     url: `https://cdn.test/${input.id}.jpg`,
+    storageKey: input.storageKey ?? null,
     altText: input.altText ?? null,
     sortOrder: input.sortOrder ?? 0,
     isPrimary: input.isPrimary ?? false,
     createdAt: new Date("2026-06-01T00:00:00.000Z"),
   };
+}
+
+/**
+ * In-memory media storage fake. Seller service tests do not exercise media
+ * operations in Phase 2A (the upload route is Phase 2B), but the service takes
+ * the port as a required dependency, so a recording fake is supplied to keep
+ * the construction honest and to let Phase 2B tests assert on it directly.
+ */
+class FakeMediaStorage implements MediaStorage {
+  readonly putCalls: Array<{ key: string; object: MediaObjectInput }> = [];
+  readonly deleteCalls: string[] = [];
+
+  async put(key: string, object: MediaObjectInput): Promise<void> {
+    this.putCalls.push({ key, object });
+  }
+
+  async delete(key: string): Promise<void> {
+    this.deleteCalls.push(key);
+  }
+
+  publicUrl(key: string): string {
+    return `https://media.test/${key}`;
+  }
 }
 
 async function expectSellerError(
@@ -471,16 +528,19 @@ describe("SellerService", () => {
   let repository: FakeSellerRepository;
   let products: FakeProductRepository;
   let catalog: FakeCatalogRepository;
+  let mediaStorage: FakeMediaStorage;
   let service: SellerService;
 
   beforeEach(() => {
     repository = new FakeSellerRepository();
     products = new FakeProductRepository();
     catalog = new FakeCatalogRepository();
+    mediaStorage = new FakeMediaStorage();
     service = new SellerService({
       sellerRepository: repository,
       productRepository: products,
       catalogRepository: catalog,
+      mediaStorage,
     });
   });
 

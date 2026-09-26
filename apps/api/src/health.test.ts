@@ -89,6 +89,7 @@ const productRepository: ProductRepository = {
   createVariant: unimplemented,
   setInventory: unimplemented,
   publishProduct: unimplemented,
+  addProductImages: unimplemented,
 };
 
 function makeApp(): ReturnType<typeof createApp> {

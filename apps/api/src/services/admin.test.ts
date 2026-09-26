@@ -55,6 +55,8 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: BOOTSTRAP_SECRET,
+    mediaPublicBaseUrl: null,
+    mediaLocalRoot: ".data/media",
     ...overrides,
   };
 }

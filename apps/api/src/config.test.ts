@@ -198,6 +198,11 @@ describe("loadConfig invalid values", () => {
     { name: "non-numeric session purge interval", env: { SESSION_PURGE_INTERVAL_SECONDS: "hourly" } },
     { name: "unparsable rate-limit enabled flag", env: { RATE_LIMIT_ENABLED: "maybe" } },
     { name: "non-1/0 trust proxy shorthand", env: { RATE_LIMIT_TRUST_PROXY: "yes" } },
+    { name: "root-relative media base", env: { MEDIA_PUBLIC_BASE_URL: "/media" } },
+    { name: "media base without a scheme", env: { MEDIA_PUBLIC_BASE_URL: "127.0.0.1:3001/media" } },
+    { name: "media base with an unsupported scheme", env: { MEDIA_PUBLIC_BASE_URL: "ftp://cdn.test" } },
+    { name: "media base that is not a URL at all", env: { MEDIA_PUBLIC_BASE_URL: "not a url" } },
+    { name: "whitespace-only media local root", env: { ZELORA_MEDIA_ROOT: "   " } },
   ])("rejects $name with APP_CONFIG_INVALID", ({ env }) => {
     expectConfigRejected(env);
   });
@@ -213,5 +218,81 @@ describe("loadConfig invalid values", () => {
     expect(config.sessionTtlSeconds).toBe(2_592_000);
     expect(config.pbkdf2Iterations).toBe(210_000);
     expect(config.sessionCookieName).toBe("zelora_session");
+  });
+});
+
+describe("loadConfig media storage", () => {
+  it("disables media storage by default", () => {
+    const config = loadConfig({ NODE_ENV: "test" });
+
+    expect(config.mediaPublicBaseUrl).toBeNull();
+    expect(config.mediaLocalRoot).toBe(".data/media");
+  });
+
+  it("treats an empty or whitespace-only public base as unset", () => {
+    expect(loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "" }).mediaPublicBaseUrl).toBeNull();
+    expect(loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "   " }).mediaPublicBaseUrl).toBeNull();
+  });
+
+  it("accepts an absolute http(s) base and strips trailing slashes", () => {
+    // Trailing slashes are stripped so a driver's URL join can never emit a
+    // double slash, and so the stored URL shape is stable no matter how the
+    // operator wrote the value.
+    expect(
+      loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "https://media.test" }).mediaPublicBaseUrl,
+    ).toBe("https://media.test");
+    expect(
+      loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "https://media.test/" }).mediaPublicBaseUrl,
+    ).toBe("https://media.test");
+    expect(
+      loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "https://media.test/media///" })
+        .mediaPublicBaseUrl,
+    ).toBe("https://media.test/media");
+  });
+
+  it("keeps a base path, so a proxied media route works as-is", () => {
+    // A reverse-proxied media route is a legitimate base; the config must not
+    // flatten it away.
+    expect(
+      loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "https://api.test/media" })
+        .mediaPublicBaseUrl,
+    ).toBe("https://api.test/media");
+  });
+
+  it("trims surrounding whitespace before validating", () => {
+    expect(
+      loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "  https://media.test/  " })
+        .mediaPublicBaseUrl,
+    ).toBe("https://media.test");
+  });
+
+  it("accepts plain http for local development", () => {
+    expect(
+      loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "http://127.0.0.1:3001/media" })
+        .mediaPublicBaseUrl,
+    ).toBe("http://127.0.0.1:3001/media");
+  });
+
+  it("names the offending variable in the rejection message", () => {
+    try {
+      loadConfig({ NODE_ENV: "test", MEDIA_PUBLIC_BASE_URL: "/media" });
+      expect.unreachable("expected loadConfig to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AppError);
+      expect((error as AppError).code).toBe("APP_CONFIG_INVALID");
+      expect(String((error as AppError).message)).toContain("MEDIA_PUBLIC_BASE_URL");
+    }
+  });
+
+  it("parses an explicit local media root and keeps it verbatim", () => {
+    const config = loadConfig({ NODE_ENV: "test", ZELORA_MEDIA_ROOT: "/var/lib/zelora/media" });
+
+    expect(config.mediaLocalRoot).toBe("/var/lib/zelora/media");
+  });
+
+  it("keeps the local root on its default when explicitly empty", () => {
+    // The default is inert unless a public base is configured, so an empty
+    // value must not become an empty (cwd-relative) root.
+    expect(loadConfig({ NODE_ENV: "test", ZELORA_MEDIA_ROOT: "" }).mediaLocalRoot).toBe(".data/media");
   });
 });

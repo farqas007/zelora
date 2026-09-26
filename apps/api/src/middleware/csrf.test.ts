@@ -197,6 +197,8 @@ describe("csrf middleware", () => {
         sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
+    mediaPublicBaseUrl: null,
+    mediaLocalRoot: ".data/media",
   };
 
   const expectedCsrfToken = "expected-csrf-token";

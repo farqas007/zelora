@@ -125,6 +125,7 @@ describe("storefront routes", () => {
         createVariant: inert,
         setInventory: inert,
         publishProduct: inert,
+        addProductImages: inert,
       } satisfies ProductRepository,
       auditLogRepository: {
         create: inert,

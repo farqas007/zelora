@@ -4,6 +4,7 @@ import type { DatabaseSchema } from "../client";
 import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
 import { inventory, products, productImages, productVariants } from "../schema/catalog";
 import type {
+  AddProductImageInput,
   CreateProductConflictReason,
   CreateVariantConflictReason,
   ProductDetailRecord,
@@ -29,6 +30,10 @@ import type {
  * primary first, then `sortOrder` ascending, then `id` ascending. The shared
  * helper below is the only place that ordering is written, so the D1 detail
  * projection and the D1 image list cannot diverge from each other or from the
+ * local twin. `addProductImages` mirrors the local write exactly, including the
+ * hard-coded non-primary flag, so the two drivers cannot drift on insert
+ * semantics either.
+ *
  * Worker-safe: only the Drizzle D1 driver and the product contract are
  * imported; the Node-only SQLite stack is never pulled into the Worker bundle.
  */
@@ -185,6 +190,46 @@ export function createD1ProductRepository(
       }
       return { ok: true, product: updated };
     },
+
+    async addProductImages(input) {
+      // Ownership is checked before anything is written, so a foreign or
+      // unknown product id can never leave rows behind — including for an
+      // empty batch, which stays a checked no-op.
+      const product = await findOwnedProduct(db, input.productId, input.storeId);
+      if (product === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      if (input.images.length === 0) {
+        return { ok: true, images: [] };
+      }
+
+      const rows = await db
+        .insert(productImages)
+        .values(input.images.map((image) => toProductImageValues(input.productId, image)))
+        .returning();
+      return { ok: true, images: rows.map(toProductImageRecord) };
+    },
+  };
+}
+
+/**
+ * Project one submitted image onto an insertable `product_images` row.
+ *
+ * `isPrimary: 0` is hard-coded rather than accepted: the caller cannot
+ * express primary intent, so the `product_images_product_primary_unique`
+ * partial unique index cannot be violated from this path.
+ */
+function toProductImageValues(
+  productId: string,
+  image: AddProductImageInput,
+): typeof productImages.$inferInsert {
+  return {
+    productId,
+    url: image.url,
+    storageKey: image.storageKey,
+    altText: image.altText,
+    sortOrder: image.sortOrder,
+    isPrimary: 0,
   };
 }
 
@@ -296,6 +341,7 @@ const productImageColumns = {
   id: productImages.id,
   productId: productImages.productId,
   url: productImages.url,
+  storageKey: productImages.storageKey,
   altText: productImages.altText,
   sortOrder: productImages.sortOrder,
   isPrimary: productImages.isPrimary,

@@ -37,6 +37,7 @@ import type {
   ProductVariantDetailRecord,
   VariantRecord,
 } from "@zelora/db/products";
+import type { MediaStorage } from "./media/storage";
 import {
   parseAddProductVariantRequest,
   parseCreateProductRequest,
@@ -82,6 +83,13 @@ export interface SellerServiceDependencies {
   sellerRepository: SellerRepository;
   productRepository: ProductRepository;
   catalogRepository: CatalogRepository;
+  /**
+   * Storage port for seller-uploaded product images. Supplied by
+   * `createApp`, which substitutes a fail-closed implementation when the
+   * deployment has no media storage configured — so this field is always a
+   * usable value and never `undefined`.
+   */
+  mediaStorage: MediaStorage;
 }
 
 export interface ListSellerProductsParams {
@@ -219,11 +227,23 @@ export class SellerService {
   private readonly sellerRepository: SellerRepository;
   private readonly productRepository: ProductRepository;
   private readonly catalogRepository: CatalogRepository;
+  /**
+   * Media storage port, held here because product images belong to the seller
+   * domain. Public and `readonly` so it reads as the injected dependency it is,
+   * rather than as private state awaiting a reader.
+   *
+   * Nothing in Phase 2A calls it yet — the seller upload route and its
+   * multipart/validation handling are Phase 2B — but the dependency is resolved
+   * and validated at composition time, so a misconfigured deployment fails when
+   * the app is built rather than on the first upload.
+   */
+  readonly mediaStorage: MediaStorage;
 
   constructor(dependencies: SellerServiceDependencies) {
     this.sellerRepository = dependencies.sellerRepository;
     this.productRepository = dependencies.productRepository;
     this.catalogRepository = dependencies.catalogRepository;
+    this.mediaStorage = dependencies.mediaStorage;
   }
 
   /**

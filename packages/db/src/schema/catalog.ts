@@ -88,6 +88,21 @@ export const productImages = sqliteTable("product_images", {
   id: idColumn(),
   productId: text("product_id").notNull().references(() => products.id, { onDelete: "cascade" }),
   url: text("url").notNull(),
+  /**
+   * Storage object key for images this platform uploaded, or `null` for a
+   * URL-only image (externally hosted, seeded demo data, or any row written
+   * before uploads existed). Nullable with no default so the column was added
+   * to existing rows as a metadata-only `ALTER TABLE` with nothing to
+   * backfill, and so "no key" stays the honest answer for every pre-existing
+   * image instead of a fabricated empty string.
+   *
+   * `url` remains the single public read path for every consumer; this column
+   * is the *server-side handle* that makes deleting or re-keying an object
+   * possible later, which is what keeps the public-URL decision reversible.
+   * Deliberately unindexed and unconstrained: nothing queries by it yet, and
+   * the value is opaque server-generated key material.
+   */
+  storageKey: text("storage_key"),
   altText: text("alt_text"),
   sortOrder: integer("sort_order").notNull().default(0),
   isPrimary: flagColumn("is_primary"),

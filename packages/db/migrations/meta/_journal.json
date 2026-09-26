@@ -43,6 +43,13 @@
       "when": 1790232854606,
       "tag": "0005_nappy_screwball",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790418387059,
+      "tag": "0006_lovely_arachne",
+      "breakpoints": true
     }
   ]
 }

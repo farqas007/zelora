@@ -209,6 +209,7 @@ const inertProductRepository: ProductRepository = {
   createVariant: unimplementedSeller,
   setInventory: unimplementedSeller,
   publishProduct: unimplementedSeller,
+  addProductImages: unimplementedSeller,
 };
 
 const inertCartRepository: CartRepository = {
@@ -258,6 +259,8 @@ describe("auth routes", () => {
         sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
+    mediaPublicBaseUrl: null,
+    mediaLocalRoot: ".data/media",
   };
 
   let clock: FakeClock;

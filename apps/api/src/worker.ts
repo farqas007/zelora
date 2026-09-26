@@ -11,6 +11,8 @@ import { createD1AuditLogRepository } from "@zelora/db/audit/d1";
 import { createApp } from "./app";
 import { systemClock } from "./services/clock";
 import { normalizeClientIp, type ClientIpResolver } from "./services/client-ip";
+import { createR2MediaStorage, type R2BucketLike } from "./services/media/r2";
+import type { MediaStorage } from "./services/media/storage";
 
 /**
  * Cloudflare Workers runtime boundary for the Zelora API.
@@ -24,13 +26,25 @@ import { normalizeClientIp, type ClientIpResolver } from "./services/client-ip";
  * Edge-safety rules are enforced structurally:
  * - no `@hono/node-server` (the Worker exposes the standard `fetch` handler),
  * - no `better-sqlite3` (the D1 repositories are the only data layer here),
- * - no `process.env` (configuration comes from the `env` bindings below).
+ * - no `process.env` (configuration comes from the `env` bindings below),
+ * - no `services/media/local-fs` (the Worker has no filesystem, so uploaded
+ *   media goes to the `MEDIA` R2 bucket through the edge-safe R2 driver).
  */
 
 /** Bindings the Zelora Worker actually reads from `env`. */
 export interface Env {
   /** Cloudflare D1 database binding — the Worker's only database. */
   DB: D1DatabaseLike;
+  /**
+   * Cloudflare R2 bucket binding for seller-uploaded product images.
+   *
+   * Media storage is opt-in and requires **both** this binding and
+   * `MEDIA_PUBLIC_BASE_URL`; either one alone leaves media storage off, and
+   * media operations fail loudly. Declared with the same hand-written
+   * structural approach as {@link D1DatabaseLike}, so
+   * `@cloudflare/workers-types` stays out of the dependency tree.
+   */
+  MEDIA?: R2BucketLike;
   /** `development` | `test` | `production`; defaults to `production`. */
   NODE_ENV?: string;
   /** Allowed browser origin for the API's CORS policy. */
@@ -68,6 +82,15 @@ export interface Env {
    * never visible in the dashboard vars or `wrangler.jsonc`).
    */
   ADMIN_BOOTSTRAP_SECRET?: string;
+  /**
+   * Absolute `http(s)` base the `MEDIA` bucket's objects are publicly readable
+   * from. A `r2.dev` development base, a custom domain, or a proxied media
+   * route are all valid.
+   *
+   * Required **together with** the `MEDIA` binding; setting only one of the two
+   * leaves media storage off (see `createWorkerMediaStorage`).
+   */
+  MEDIA_PUBLIC_BASE_URL?: string;
 }
 
 /**
@@ -95,6 +118,7 @@ const WORKER_CONFIG_KEYS = [
   "RATE_LIMIT_PRODUCT_CREATE_IP_MAX",
   "RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS",
   "ADMIN_BOOTSTRAP_SECRET",
+  "MEDIA_PUBLIC_BASE_URL",
 ] as const;
 
 /**
@@ -196,7 +220,41 @@ function createWorkerApp(env: Env): Hono {
     passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
     clock: systemClock,
     clientIpResolver,
+    mediaStorage: createWorkerMediaStorage(env, config),
   });
+}
+
+/**
+ * Build the Worker's R2-backed media storage, or `undefined` to let `createApp`
+ * install the fail-closed default.
+ *
+ * Media storage is enabled only when **both** halves of the capability are
+ * present: the `MEDIA` R2 bucket binding *and* `MEDIA_PUBLIC_BASE_URL`. Anything
+ * less is treated as "media storage is not configured" and returns `undefined`,
+ * which makes every media operation fail loudly instead of silently doing the
+ * wrong thing:
+ *
+ * - binding without a public base: objects could be written but every URL
+ *   handed to a browser would be unresolvable,
+ * - public base without a binding: there would be nowhere to write.
+ *
+ * Half-configured is therefore *additive and inert*, never an error. This
+ * matters for deployment: `wrangler.jsonc` declares the `MEDIA` binding, so a
+ * default deployment always has `env.MEDIA` present, and an operator who has
+ * not yet chosen a public base (or created the bucket) must still be able to
+ * deploy and serve every other endpoint. Media stays off until they configure
+ * the base; it is opt-in, so nothing that currently works changes.
+ *
+ * `MEDIA_PUBLIC_BASE_URL` is still fully validated by `loadConfig` before it
+ * reaches here — this function only decides *whether* to build a storage, never
+ * *what* a base URL is allowed to be.
+ */
+export function createWorkerMediaStorage(env: Env, config: AppConfig): MediaStorage | undefined {
+  const publicBaseUrl = config.mediaPublicBaseUrl;
+  if (env.MEDIA === undefined || publicBaseUrl === null) {
+    return undefined;
+  }
+  return createR2MediaStorage({ bucket: env.MEDIA, publicBaseUrl });
 }
 
 /** Lazily built app, reused across requests within an isolate. */

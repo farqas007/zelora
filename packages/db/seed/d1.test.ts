@@ -83,6 +83,8 @@ const REVERSE_DEPENDENCY_ORDER = [
   "order_addresses",
   "orders",
   "addresses",
+  "product_media",
+  "media_objects",
   "product_images",
   "inventory",
   "product_variants",

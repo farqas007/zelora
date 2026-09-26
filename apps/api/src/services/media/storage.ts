@@ -2,17 +2,17 @@
  * Media storage port for seller-uploaded product images.
  *
  * This module is the runtime-neutral contract every storage implementation
- * satisfies. It is deliberately tiny — write one object, delete one object,
- * derive its public URL — because that is the whole surface Phase 2A needs and
- * anything larger would be speculative.
+ * satisfies. It is deliberately tiny — write one object, read one object, delete
+ * one object, derive its public URL — because that is the whole surface the
+ * media phases need and anything larger would be speculative.
  *
  * Design notes that are load-bearing rather than stylistic:
  *
  * - **`publicUrl` is synchronous and pure.** It is string composition over a
  *   configured base and is needed both on the write path (to persist
  *   `product_images.url`) and on any future read/repair path. Making it async
- *   would only tempt callers to `await` it inside record mappers, and making
- *   it responsible for anything more would turn a pure function into I/O.
+ *   would only tempt callers to `await` it inside record mappers, and making it
+ *   responsible for anything more would turn a pure function into I/O.
  * - **`put` returns nothing.** The only way to obtain a URL is
  *   `publicUrl(key)`, so exactly one function owns URL shape and changing the
  *   base URL is a one-line change in one place.
@@ -23,11 +23,15 @@
  * - **`delete` must be idempotent.** Callers use it to compensate after a
  *   partially completed upload, where the object may legitimately be absent
  *   already; a missing key is a success.
+ * - **`get` reports absence as `null`, never as an error.** A read is the one
+ *   operation where "not there" is a normal answer rather than a fault, and it
+ *   has to be expressible so a repair or verification pass can distinguish a
+ *   missing object from a failing backend.
  *
  * Edge-compatible: this module imports nothing at all, so it is safe in the
  * Cloudflare Worker module graph. The concrete drivers live beside it —
- * `r2.ts` (Worker-safe) and `local-fs.ts` (Node-only, imported exclusively by
- * `src/index.ts` and tests).
+ * `r2.ts` and `d1.ts` (Worker-safe) and `local-fs.ts` (Node-only, imported
+ * exclusively by `src/index.ts` and tests).
  */
 
 /** The bytes and metadata of one object to store. */
@@ -53,9 +57,30 @@ export interface MediaObjectInput {
   size: number;
 }
 
+/**
+ * The bytes and metadata of one stored object.
+ *
+ * `contentType` is nullable because the port's contract only requires every
+ * driver to *accept* a type, not to persist one: R2 keeps it in HTTP metadata
+ * and the filesystem driver has nowhere to record it. `null` therefore means
+ * "this driver cannot tell you", which is why it is a `null` and not an empty
+ * string or a guess.
+ */
+export interface MediaObjectOutput {
+  /** The stored bytes, in a buffer the caller owns. */
+  bytes: ArrayBuffer;
+  /** The stored content type, or `null` when the driver does not record one. */
+  contentType: string | null;
+}
+
 export interface MediaStorage {
   /** Store `object` under `key`, replacing any object already at that key. */
   put(key: string, object: MediaObjectInput): Promise<void>;
+  /**
+   * Read the object at `key`, or resolve `null` when there is nothing stored
+   * under it.
+   */
+  get(key: string): Promise<MediaObjectOutput | null>;
   /** Remove the object at `key`. Resolves successfully when it is absent. */
   delete(key: string): Promise<void>;
   /** The absolute, publicly readable URL the object at `key` is served from. */
@@ -115,6 +140,7 @@ export function createUnavailableMediaStorage(reason: string): MediaStorage {
     put: async (): Promise<void> => {
       fail("put an object");
     },
+    get: async (): Promise<null> => fail("read an object"),
     delete: async (): Promise<void> => {
       fail("delete an object");
     },

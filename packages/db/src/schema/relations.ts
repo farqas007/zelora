@@ -4,6 +4,7 @@ import { authSessions } from "./auth";
 import { cartItems, carts } from "./cart";
 import { categories, inventory, productImages, products, productVariants } from "./catalog";
 import { sellerProfiles, stores, users } from "./identities";
+import { mediaObjects, productMedia } from "./media";
 import { orderAddresses, orderItems, orders } from "./orders";
 
 /**
@@ -43,6 +44,7 @@ export const productsRelations = relations(products, ({ many, one }) => ({
   store: one(stores, { fields: [products.storeId], references: [stores.id] }),
   category: one(categories, { fields: [products.categoryId], references: [categories.id] }),
   images: many(productImages),
+  media: many(productMedia),
   variants: many(productVariants),
 }));
 
@@ -68,6 +70,21 @@ export const inventoryRelations = relations(inventory, ({ one }) => ({
 
 export const productImagesRelations = relations(productImages, ({ one }) => ({
   product: one(products, { fields: [productImages.productId], references: [products.id] }),
+}));
+
+export const mediaObjectsRelations = relations(mediaObjects, ({ many }) => ({
+  productMedia: many(productMedia),
+}));
+
+/**
+ * The join row is relational, not transactional: it carries only the two
+ * foreign keys and `created_at`, so there is no owning side to name and the
+ * map stops at the two `one`s. The `productMedia` list on `products` (and on
+ * `mediaObjects`) is where the traversal starts.
+ */
+export const productMediaRelations = relations(productMedia, ({ one }) => ({
+  product: one(products, { fields: [productMedia.productId], references: [products.id] }),
+  mediaObject: one(mediaObjects, { fields: [productMedia.mediaObjectId], references: [mediaObjects.id] }),
 }));
 
 export const addressesRelations = relations(addresses, ({ one }) => ({

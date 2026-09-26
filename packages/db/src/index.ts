@@ -81,3 +81,9 @@ export type {
   AddCartItemResult,
   CartRepository,
 } from "./cart/repository";
+export type { MediaByteSource } from "./media/bytes";
+export type {
+  MediaObjectRecord,
+  MediaObjectRepository,
+  CreateMediaObjectInput,
+} from "./media/repository";

@@ -23,6 +23,7 @@ import {
   assertMediaObjectSize,
   joinMediaPublicUrl,
   type MediaObjectInput,
+  type MediaObjectOutput,
   type MediaStorage,
 } from "./storage";
 
@@ -42,12 +43,24 @@ export interface R2PutResultLike {
 }
 
 /**
+ * The body R2 returns from `get`. Declared minimally: only the bytes and the
+ * content type are read, and `httpMetadata` is optional because R2 only
+ * populates it for objects that were `put` with one.
+ */
+export interface R2ObjectBodyLike {
+  arrayBuffer(): Promise<ArrayBuffer>;
+  httpMetadata?: {
+    contentType?: string;
+  };
+}
+
+/**
  * Minimal structural view of a Cloudflare R2 bucket binding.
  *
- * Only `put` and `delete` are declared because only those two are called;
- * `get`/`head`/`list` are deliberately absent so the port cannot grow a
- * read-back dependency on the bucket that the local filesystem driver would
- * then have to imitate.
+ * Only `put`, `get` and `delete` are declared because only those three are
+ * called; `head`/`list` stay absent so the port cannot grow a dependency on
+ * bucket-wide operations the local filesystem driver would then have to
+ * imitate.
  */
 export interface R2BucketLike {
   put(
@@ -55,6 +68,8 @@ export interface R2BucketLike {
     value: ArrayBuffer,
     options?: R2PutOptionsLike,
   ): Promise<R2PutResultLike | null>;
+  /** Resolves `null` when the key holds no object, which the port maps to `null`. */
+  get(key: string): Promise<R2ObjectBodyLike | null>;
   delete(key: string): Promise<void>;
 }
 
@@ -84,6 +99,20 @@ export function createR2MediaStorage(options: R2MediaStorageOptions): MediaStora
       await bucket.put(key, object.bytes, {
         httpMetadata: { contentType: object.contentType },
       });
+    },
+
+    async get(key: string) {
+      const object = await bucket.get(key);
+      if (object === null) {
+        return null;
+      }
+      return {
+        bytes: await object.arrayBuffer(),
+        // Absent rather than an empty string when the object was stored without
+        // metadata, so the port's `null` keeps meaning "this driver cannot tell
+        // you" instead of silently becoming a claim of an empty type.
+        contentType: object.httpMetadata?.contentType ?? null,
+      } satisfies MediaObjectOutput;
     },
 
     async delete(key: string) {

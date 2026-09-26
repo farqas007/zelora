@@ -144,7 +144,15 @@ describe("worker config: media storage", () => {
 
 describe("worker media storage composition", () => {
   function fakeBucket(): R2BucketLike {
-    return { async put() { return null; }, async delete() {} };
+    return {
+      async put() {
+        return null;
+      },
+      async get() {
+        return null;
+      },
+      async delete() {},
+    };
   }
 
   it("returns undefined when the bucket and the public base are both absent", () => {
@@ -174,5 +182,54 @@ describe("worker media storage composition", () => {
   it("leaves media storage off when a public base is configured but no bucket is bound", () => {
     const env = { DB: {}, MEDIA_PUBLIC_BASE_URL: "https://media.test" } as Env;
     expect(createWorkerMediaStorage(env, loadWorkerConfig(env))).toBeUndefined();
+  });
+
+  it("defaults to the R2 backend, so an existing deployment is unchanged", () => {
+    const env = { DB: {}, MEDIA: fakeBucket() } as Env;
+    const withDefault = createWorkerMediaStorage(env, loadWorkerConfig(env));
+    const withExplicit = createWorkerMediaStorage(
+      { ...env, MEDIA_BACKEND: "r2" } as Env,
+      loadWorkerConfig(env),
+    );
+
+    expect(withDefault?.publicUrl("products/a.jpg")).toBe(
+      withExplicit?.publicUrl("products/a.jpg"),
+    );
+  });
+
+  it("builds D1 storage from the database binding alone, with no bucket", () => {
+    const env = {
+      DB: {},
+      MEDIA_BACKEND: "d1",
+      MEDIA_PUBLIC_BASE_URL: "https://media.test/",
+    } as Env;
+    const storage = createWorkerMediaStorage(env, loadWorkerConfig(env));
+
+    expect(storage).toBeDefined();
+    expect(storage?.publicUrl("products/a.jpg")).toBe("https://media.test/products/a.jpg");
+  });
+
+  it("leaves D1 media storage off when no public base is configured", () => {
+    const env = { DB: {}, MEDIA_BACKEND: "d1" } as Env;
+    expect(createWorkerMediaStorage(env, loadWorkerConfig(env))).toBeUndefined();
+  });
+
+  it("rejects an unrecognised backend rather than silently falling back", () => {
+    // A typo must not quietly send an operator's uploads to the wrong backend.
+    const env = {
+      DB: {},
+      MEDIA: fakeBucket(),
+      MEDIA_BACKEND: "d1i",
+      MEDIA_PUBLIC_BASE_URL: "https://media.test",
+    } as Env;
+
+    try {
+      createWorkerMediaStorage(env, loadWorkerConfig(env));
+      expect.unreachable("expected createWorkerMediaStorage to throw");
+    } catch (error) {
+      expect(error).toBeInstanceOf(AppError);
+      expect((error as AppError).code).toBe("APP_CONFIG_INVALID");
+      expect(String((error as AppError).message)).toContain("MEDIA_BACKEND");
+    }
   });
 });

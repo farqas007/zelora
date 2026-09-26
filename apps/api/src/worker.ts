@@ -8,10 +8,12 @@ import { createD1CatalogRepository } from "@zelora/db/catalog/d1";
 import { createD1ProductRepository } from "@zelora/db/products/d1";
 import { createD1CartRepository } from "@zelora/db/cart/d1";
 import { createD1AuditLogRepository } from "@zelora/db/audit/d1";
+import { createD1MediaObjectRepository } from "@zelora/db/media/d1";
 import { createApp } from "./app";
 import { systemClock } from "./services/clock";
 import { normalizeClientIp, type ClientIpResolver } from "./services/client-ip";
 import { createR2MediaStorage, type R2BucketLike } from "./services/media/r2";
+import { createD1MediaStorage } from "./services/media/d1";
 import type { MediaStorage } from "./services/media/storage";
 
 /**
@@ -91,6 +93,16 @@ export interface Env {
    * leaves media storage off (see `createWorkerMediaStorage`).
    */
   MEDIA_PUBLIC_BASE_URL?: string;
+  /**
+   * Which media backend the Worker should build: `"r2"` (the default) or
+   * `"d1"`.
+   *
+   * `"d1"` stores object bytes in the `media_objects` table through the `DB`
+   * binding and needs no `MEDIA` bucket; `"r2"` keeps the existing behaviour.
+   * The default stays `r2` so no deployment changes behaviour by upgrading,
+   * and so a half-configured default deployment keeps its current posture.
+   */
+  MEDIA_BACKEND?: string;
 }
 
 /**
@@ -119,6 +131,7 @@ const WORKER_CONFIG_KEYS = [
   "RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS",
   "ADMIN_BOOTSTRAP_SECRET",
   "MEDIA_PUBLIC_BASE_URL",
+  "MEDIA_BACKEND",
 ] as const;
 
 /**
@@ -224,19 +237,51 @@ function createWorkerApp(env: Env): Hono {
   });
 }
 
+/** Media backends the Worker can build a {@link MediaStorage} from. */
+export type WorkerMediaBackend = "r2" | "d1";
+
 /**
- * Build the Worker's R2-backed media storage, or `undefined` to let `createApp`
- * install the fail-closed default.
+ * Resolve the `MEDIA_BACKEND` binding.
  *
- * Media storage is enabled only when **both** halves of the capability are
- * present: the `MEDIA` R2 bucket binding *and* `MEDIA_PUBLIC_BASE_URL`. Anything
- * less is treated as "media storage is not configured" and returns `undefined`,
- * which makes every media operation fail loudly instead of silently doing the
- * wrong thing:
+ * Unset means `r2`, so an existing deployment keeps exactly the behaviour it has
+ * today. An unrecognised value is rejected loudly instead of falling back:
+ * silently defaulting a typo like `"d1i"` to R2 would send an operator's
+ * uploads somewhere they did not ask for, and a config that only works on the
+ * fallback is not a config anyone chose.
+ */
+function resolveWorkerMediaBackend(value: string | undefined): WorkerMediaBackend {
+  if (value === undefined || value === "") {
+    return "r2";
+  }
+  if (value === "r2" || value === "d1") {
+    return value;
+  }
+  throw new AppError(
+    "APP_CONFIG_INVALID",
+    `MEDIA_BACKEND must be "r2" or "d1", received "${value}".`,
+    500,
+  );
+}
+
+/**
+ * Build the Worker's media storage, or `undefined` to let `createApp` install
+ * the fail-closed default.
  *
- * - binding without a public base: objects could be written but every URL
- *   handed to a browser would be unresolvable,
- * - public base without a binding: there would be nowhere to write.
+ * Media storage is enabled only when the capability is *complete*, and which
+ * bindings that takes depends on the backend:
+ *
+ * - `"d1"` (the default is `"r2"`): the `DB` binding and
+ *   `MEDIA_PUBLIC_BASE_URL`. The database is always present, so a public base is
+ *   the only thing that can be missing.
+ * - `"r2"`: the `MEDIA` bucket binding **and** `MEDIA_PUBLIC_BASE_URL`.
+ *
+ * Anything less is treated as "media storage is not configured" and returns
+ * `undefined`, which makes every media operation fail loudly instead of silently
+ * doing the wrong thing:
+ *
+ * - a backend with no public base: objects could be written but every URL handed
+ *   to a browser would be unresolvable,
+ * - `r2` with a public base but no binding: there would be nowhere to write.
  *
  * Half-configured is therefore *additive and inert*, never an error. This
  * matters for deployment: `wrangler.jsonc` declares the `MEDIA` binding, so a
@@ -250,8 +295,18 @@ function createWorkerApp(env: Env): Hono {
  * *what* a base URL is allowed to be.
  */
 export function createWorkerMediaStorage(env: Env, config: AppConfig): MediaStorage | undefined {
+  const backend = resolveWorkerMediaBackend(env.MEDIA_BACKEND);
   const publicBaseUrl = config.mediaPublicBaseUrl;
-  if (env.MEDIA === undefined || publicBaseUrl === null) {
+  if (publicBaseUrl === null) {
+    return undefined;
+  }
+  if (backend === "d1") {
+    return createD1MediaStorage({
+      repository: createD1MediaObjectRepository(env.DB),
+      publicBaseUrl,
+    });
+  }
+  if (env.MEDIA === undefined) {
     return undefined;
   }
   return createR2MediaStorage({ bucket: env.MEDIA, publicBaseUrl });

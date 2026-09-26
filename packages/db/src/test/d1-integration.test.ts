@@ -11,6 +11,7 @@ import { createD1SellerRepository } from "../seller/d1-repository";
 import { createD1CatalogRepository } from "../catalog/d1-repository";
 import { createD1CartRepository } from "../cart/d1-repository";
 import { createD1ProductRepository } from "../products/d1-repository";
+import { createD1MediaObjectRepository } from "../media/d1-repository";
 import { createId } from "../ids";
 import * as schema from "../schema";
 import type { DatabaseSchema } from "../client";
@@ -89,6 +90,8 @@ const REVERSE_DEPENDENCY_ORDER = [
   "order_addresses",
   "orders",
   "addresses",
+  "product_media",
+  "media_objects",
   "product_images",
   "inventory",
   "product_variants",
@@ -123,7 +126,7 @@ describe("D1 runtime with committed migrations", () => {
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
       .all<{ name: string }>();
     const names = tables.results.map((row: { name: string }) => row.name);
-    for (const expected of ["users", "seller_profiles", "stores", "categories", "products", "product_variants", "inventory", "orders", "order_items", "audit_logs", "carts", "cart_items"]) {
+    for (const expected of ["users", "seller_profiles", "stores", "categories", "products", "product_variants", "inventory", "orders", "order_items", "audit_logs", "carts", "cart_items", "media_objects", "product_media"]) {
       expect(names).toContain(expected);
     }
 
@@ -1033,6 +1036,206 @@ describe("D1 product repository: addProductImages", () => {
     expect(
       await repo.addProductImages({ productId: foreignProductId, storeId: ownStoreId, images: [] }),
     ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+  });
+});
+
+describe("D1 media object repository (raw BLOB statements)", () => {
+  /**
+   * Every byte of a value `0..255`, in an order that would not survive any
+   * text round-trip or accidental stringification: a null byte, the high-bit
+   * bytes, a lone `0x0a` and a trailing `0x00`. Any encoding mistake shows up
+   * as a mismatch rather than as a plausible-looking image.
+   */
+  const BINARY_BYTES = Uint8Array.from([
+    0x00, 0x01, 0x7f, 0x80, 0x89, 0x0a, 0x0d, 0xff, 0xfe, 0xc3, 0xa9, 0x00,
+  ]);
+
+  /** User + active seller profile + active store, so a real product can exist. */
+  async function seedSeller(db: DrizzleD1Database<DatabaseSchema>, seed: number): Promise<string> {
+    const users = createD1UserRepository(db);
+    const sellers = createD1SellerRepository(db);
+    const user = await users.create({
+      email: `media-${seed}@example.test`,
+      name: `Media Seller ${seed}`,
+      passwordHash: tokenHash(120 + seed),
+    });
+    const onboarding = await sellers.createOnboarding({
+      userId: user.id,
+      profileSlug: `media-profile-${seed}`,
+      displayName: `Media Seller ${seed}`,
+      storeName: "Media Storefront",
+      storeSlug: `media-store-${seed}`,
+    });
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+    await sellers.activateSeller(user.id);
+    return onboarding.store.id;
+  }
+
+  it("stores and reads back byte-identical bytes, content type and byte size", async () => {
+    const repository = createD1MediaObjectRepository(binding);
+    const storageKey = "products/abc/0123.png";
+
+    const created = await repository.create({
+      storageKey,
+      contentType: "image/png",
+      bytes: BINARY_BYTES,
+    });
+
+    expect(created.id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(created.storageKey).toBe(storageKey);
+    expect(created.contentType).toBe("image/png");
+    expect(created.byteSize).toBe(BINARY_BYTES.byteLength);
+    expect(created.checksum).toBeNull();
+    expect([...created.bytes]).toEqual([...BINARY_BYTES]);
+
+    const byId = await repository.findById(created.id);
+    expect(byId).not.toBeNull();
+    expect([...byId!.bytes]).toEqual([...BINARY_BYTES]);
+    expect(byId!.contentType).toBe("image/png");
+    expect(byId!.byteSize).toBe(BINARY_BYTES.byteLength);
+    expect(byId!.createdAt.getTime()).toBe(created.createdAt.getTime());
+
+    const byKey = await repository.findByStorageKey(storageKey);
+    expect([...byKey!.bytes]).toEqual([...BINARY_BYTES]);
+  });
+
+  it("returns the repository's not-found result for a missing object", async () => {
+    const repository = createD1MediaObjectRepository(binding);
+
+    expect(await repository.findById(createId())).toBeNull();
+    expect(await repository.findByStorageKey("products/never/written.jpg")).toBeNull();
+    // Deleting something that does not exist is a no-op, not a silent success.
+    expect(await repository.delete(createId())).toBe(false);
+  });
+
+  it("deletes an object and reports the removal", async () => {
+    const repository = createD1MediaObjectRepository(binding);
+    const created = await repository.create({
+      storageKey: "products/abc/delete-me.jpg",
+      contentType: "image/jpeg",
+      bytes: Uint8Array.from([1, 2, 3]),
+    });
+
+    expect(await repository.delete(created.id)).toBe(true);
+    expect(await repository.findById(created.id)).toBeNull();
+    // A second delete is a no-op, so upload compensation is safe to retry.
+    expect(await repository.delete(created.id)).toBe(false);
+  });
+
+  it("accepts ArrayBuffer bytes and round-trips them unchanged", async () => {
+    const repository = createD1MediaObjectRepository(binding);
+    const source = Uint8Array.from([9, 8, 7, 0, 6]);
+
+    const created = await repository.create({
+      storageKey: "products/abc/from-array-buffer.webp",
+      contentType: "image/webp",
+      bytes: source.buffer,
+    });
+
+    const found = await repository.findById(created.id);
+    expect(found!.byteSize).toBe(5);
+    expect([...found!.bytes]).toEqual([...source]);
+  });
+
+  it("unlinks product_media when a product is deleted but keeps the shared object", async () => {
+    const { db } = setup();
+    const repository = createD1MediaObjectRepository(binding);
+    const storeId = await seedSeller(db, 1);
+    const product = await db
+      .insert(schema.products)
+      .values({ storeId, name: "D1 Media", slug: "d1-media-product" })
+      .returning()
+      .get();
+    const object = await repository.create({
+      storageKey: "products/d1-media/photo.jpg",
+      contentType: "image/jpeg",
+      bytes: Uint8Array.from([0xff, 0xd8, 0xff]),
+    });
+    await db
+      .insert(schema.productMedia)
+      .values({ productId: product.id, mediaObjectId: object.id });
+
+    await db.delete(schema.products).where(eq(schema.products.id, product.id));
+
+    // The join row goes with the product, but the object stays: one object may
+    // legitimately back several listings, so unlinking a product must not
+    // destroy bytes another product still points at.
+    expect(await db.select().from(schema.productMedia).all()).toHaveLength(0);
+    expect(await repository.findById(object.id)).not.toBeNull();
+  });
+
+  it("cascades a media object delete through product_media", async () => {
+    const { db } = setup();
+    const repository = createD1MediaObjectRepository(binding);
+    const storeId = await seedSeller(db, 2);
+    const product = await db
+      .insert(schema.products)
+      .values({ storeId, name: "D1 Media Two", slug: "d1-media-product-two" })
+      .returning()
+      .get();
+    const object = await repository.create({
+      storageKey: "products/d1-media-two/photo.jpg",
+      contentType: "image/jpeg",
+      bytes: Uint8Array.from([0xff, 0xd8, 0xff]),
+    });
+    await db
+      .insert(schema.productMedia)
+      .values({ productId: product.id, mediaObjectId: object.id });
+
+    await repository.delete(object.id);
+
+    expect(await repository.findById(object.id)).toBeNull();
+    expect(await db.select().from(schema.productMedia).all()).toHaveLength(0);
+  });
+
+  it("stores and reads bytes without ever exposing a Node Buffer to callers", async () => {
+    const repository = createD1MediaObjectRepository(binding);
+    const fromNodeBuffer = await repository.create({
+      storageKey: "products/abc/from-node-buffer.jpg",
+      contentType: "image/jpeg",
+      // A Node Buffer is an accepted input shape, but it must not survive as
+      // the stored representation: callers get bytes, never a Node-only type.
+      bytes: Buffer.from([0xff, 0xd8, 0xff]),
+    });
+    expect(Buffer.isBuffer(fromNodeBuffer.bytes)).toBe(false);
+    // `instanceof Uint8Array` is not enough to prove this: `Buffer` extends
+    // `Uint8Array`, so only the prototype identity rules a Node type out.
+    expect(Object.getPrototypeOf(fromNodeBuffer.bytes)).toBe(Uint8Array.prototype);
+
+    // The Worker-shaped input: an `ArrayBuffer`, with no Buffer involved at all.
+    const created = await repository.create({
+      storageKey: "products/abc/no-buffer.jpg",
+      contentType: "image/jpeg",
+      bytes: BINARY_BYTES.buffer,
+    });
+    const found = await repository.findById(created.id);
+    expect([...found!.bytes]).toEqual([...BINARY_BYTES]);
+    expect(Object.getPrototypeOf(found!.bytes)).toBe(Uint8Array.prototype);
+    expect(await repository.delete(created.id)).toBe(true);
+  });
+
+  it("rejects a byte size that disagrees with the stored bytes", async () => {
+    // The CHECK is the last line of defence against a driver that computed
+    // `byte_size` from anything other than the bytes it bound, so it is
+    // exercised with hand-written SQL rather than through the repository.
+    await expect(
+      binding
+        .prepare(
+          "INSERT INTO media_objects (id, storage_key, content_type, byte_size, bytes, created_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(
+          createId(),
+          "products/abc/lying-size.jpg",
+          "image/jpeg",
+          99,
+          new Uint8Array([1, 2, 3]).buffer,
+          Date.now(),
+        )
+        .run(),
+    ).rejects.toThrow(/CHECK constraint failed/i);
   });
 });
 

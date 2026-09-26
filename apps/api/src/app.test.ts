@@ -133,6 +133,12 @@ describe("createApp media storage composition", () => {
     await expect(storage.put("products/a.jpg", MEDIA_OBJECT)).rejects.toThrow(/not configured/);
   });
 
+  it("installs a fail-closed storage that refuses to read when unconfigured", async () => {
+    await expect(resolveAppMediaStorage(undefined).get("products/a.jpg")).rejects.toThrow(
+      /not configured/,
+    );
+  });
+
   it("installs a fail-closed storage that refuses to delete when unconfigured", async () => {
     await expect(resolveAppMediaStorage(undefined).delete("products/a.jpg")).rejects.toThrow(
       /not configured/,
@@ -151,6 +157,7 @@ describe("createApp media storage composition", () => {
   it("uses the supplied storage verbatim when one is provided", () => {
     const supplied: MediaStorage = {
       put: async () => undefined,
+      get: async () => null,
       delete: async () => undefined,
       publicUrl: (key: string) => `https://media.test/${key}`,
     };

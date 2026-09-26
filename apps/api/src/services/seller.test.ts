@@ -35,7 +35,7 @@ import type {
   SetInventoryResult,
   VariantRecord,
 } from "@zelora/db/products";
-import type { MediaObjectInput, MediaStorage } from "./media/storage";
+import type { MediaObjectInput, MediaObjectOutput, MediaStorage } from "./media/storage";
 import { SellerService } from "./seller";
 
 /**
@@ -492,13 +492,23 @@ function imageRecord(input: {
 class FakeMediaStorage implements MediaStorage {
   readonly putCalls: Array<{ key: string; object: MediaObjectInput }> = [];
   readonly deleteCalls: string[] = [];
+  readonly getCalls: string[] = [];
+  /** Keys the fake should report as stored, read back by `get`. */
+  readonly objects = new Map<string, MediaObjectOutput>();
 
   async put(key: string, object: MediaObjectInput): Promise<void> {
     this.putCalls.push({ key, object });
+    this.objects.set(key, { bytes: object.bytes, contentType: object.contentType });
+  }
+
+  async get(key: string): Promise<MediaObjectOutput | null> {
+    this.getCalls.push(key);
+    return this.objects.get(key) ?? null;
   }
 
   async delete(key: string): Promise<void> {
     this.deleteCalls.push(key);
+    this.objects.delete(key);
   }
 
   publicUrl(key: string): string {

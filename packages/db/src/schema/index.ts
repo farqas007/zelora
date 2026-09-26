@@ -5,5 +5,6 @@ export * from "./catalog";
 export * from "./addresses";
 export * from "./orders";
 export * from "./cart";
+export * from "./media";
 export * from "./relations";
 export * from "./audit";

@@ -26,12 +26,13 @@
  * outside the media root.
  */
 
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import {
   assertMediaObjectSize,
   joinMediaPublicUrl,
   type MediaObjectInput,
+  type MediaObjectOutput,
   type MediaStorage,
 } from "./storage";
 
@@ -103,6 +104,36 @@ function resolveMediaPath(root: string, key: string): string {
   return target;
 }
 
+/**
+ * Whether a `readFile` failure means "nothing is stored under this key".
+ *
+ * Narrowed to the two codes the filesystem actually uses for absence
+ * (`ENOENT`: no such file, and `EISDIR`: the path is a directory), so a
+ * permission error or a genuine I/O fault still propagates instead of being
+ * reported to the caller as a missing object — which would look like data loss
+ * rather than like an outage.
+ */
+function isMissingFileError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "EISDIR";
+}
+
+/**
+ * Copy the exact bytes of `contents` into an `ArrayBuffer` of their own.
+ *
+ * A `Buffer` returned by `readFile` can be a window into a larger shared
+ * allocation, so handing its backing store to a caller would leak unrelated
+ * bytes and pin a pool buffer alive. `slice` on the backing store copies just
+ * this view's range, producing a buffer whose `byteLength` is exactly the
+ * stored object size.
+ */
+function toExactArrayBuffer(contents: Buffer): ArrayBuffer {
+  return contents.buffer.slice(
+    contents.byteOffset,
+    contents.byteOffset + contents.byteLength,
+  ) as ArrayBuffer;
+}
+
 export function createLocalFileMediaStorage(
   options: LocalFileMediaStorageOptions,
 ): MediaStorage {
@@ -113,6 +144,31 @@ export function createLocalFileMediaStorage(
       const target = resolveMediaPath(root, key);
       await mkdir(dirname(target), { recursive: true });
       await writeFile(target, Buffer.from(object.bytes));
+    },
+
+    async get(key: string) {
+      const target = resolveMediaPath(root, key);
+      let contents: Buffer;
+      try {
+        contents = await readFile(target);
+      } catch (error) {
+        // A key with nothing behind it is an ordinary answer to a read, not a
+        // fault: the port reports absence as `null` so a caller can tell it
+        // apart from a real backend failure, which still propagates.
+        if (isMissingFileError(error)) {
+          return null;
+        }
+        throw error;
+      }
+      return {
+        // `readFile` hands back a `Buffer` that may be a window into a shared
+        // pool, so the exact byte range is copied into a buffer of its own
+        // rather than exposed as-is.
+        bytes: toExactArrayBuffer(contents),
+        // The filesystem has nowhere to record a content type, so this driver
+        // reports `null` instead of guessing from the extension.
+        contentType: null,
+      } satisfies MediaObjectOutput;
     },
 
     async delete(key: string) {

@@ -337,6 +337,9 @@ describe("cart routes", () => {
         setInventory: inert,
         publishProduct: inert,
         addProductImages: inert,
+        countImagesByProduct: inert,
+        deleteProductImage: inert,
+        setPrimaryProductImage: inert,
       } satisfies ProductRepository,
       cartRepository,
       auditLogRepository: {

@@ -110,6 +110,19 @@ export const SELLER_PRODUCT_ERROR_CODES = {
   SKU_IN_USE: "SKU_IN_USE",
   PRODUCT_ARCHIVED: "PRODUCT_ARCHIVED",
   PRODUCT_NOT_PUBLISHABLE: "PRODUCT_NOT_PUBLISHABLE",
+  /**
+   * An image-management operation named an image that does not belong to the
+   * product the caller owns. Distinct from `PRODUCT_NOT_FOUND` on purpose: the
+   * product's existence and ownership are already proven by that point, so
+   * collapsing both would only hide a caller mistake behind a vaguer 404.
+   */
+  IMAGE_NOT_FOUND: "IMAGE_NOT_FOUND",
+  /**
+   * The product already holds the maximum number of images. A 409 rather than a
+   * 422: the request is well-formed and the product state is what conflicts
+   * with it, exactly like `PRODUCT_SLUG_IN_USE`.
+   */
+  IMAGE_LIMIT_REACHED: "IMAGE_LIMIT_REACHED",
 } as const;
 export type SellerProductErrorCode =
   (typeof SELLER_PRODUCT_ERROR_CODES)[keyof typeof SELLER_PRODUCT_ERROR_CODES];
@@ -232,27 +245,58 @@ export interface ProductImageDto {
 }
 
 /**
+ * The only content types an uploaded product image may have.
+ *
+ * A **closed list of verified values**, not a client-declared MIME allowlist:
+ * the API decides which byte sequences count as an image by sniffing the bytes
+ * themselves (`services/media/image-validation.ts`) and reports one of these
+ * four types. A `Content-Type` header or a filename extension never
+ * influences the decision, so publishing this list describes the policy the
+ * API actually enforces rather than a wish. The list also drives the file
+ * extension of a content-addressed storage key, so a stored object can never
+ * claim a format other than the one its bytes were verified as.
+ */
+export const PRODUCT_IMAGE_CONTENT_TYPES = ["image/jpeg", "image/png", "image/webp", "image/avif"] as const;
+
+/** A verified product-image content type, i.e. a member of {@link PRODUCT_IMAGE_CONTENT_TYPES}. */
+export type ProductImageContentType = (typeof PRODUCT_IMAGE_CONTENT_TYPES)[number];
+
+/**
  * Count/alt/url/byte limits for the seller product-image surface.
  *
  * `maxPerProduct`, `altTextMaxLength` and `urlMaxLength` govern stored rows.
- * `maxFilesPerRequest` and `maxBytesPerFile` govern a single upload request
- * and are the byte/count half of the upload contract: `5 MiB` per file and
- * `8` files per request bound one request at `40 MiB` before any per-product
- * cap is consulted.
+ * `maxFilesPerRequest` and `maxBytesPerFile` govern a single upload request.
+ * `maxStoredObjectBytes` is not a user-facing limit: it is the platform ceiling
+ * a stored object may never exceed, so the per-image cap can never be raised
+ * past what the storage layer can actually hold.
  *
- * Deliberately **absent** here: a MIME allowlist. Which byte sequences count
- * as an image is decided by content sniffing at upload time, not by a
- * client-supplied `Content-Type`, so a published list of accepted types would
- * describe a policy the API does not actually enforce. An unused limit that
- * nothing enforces is worse than no limit at all.
+ * The byte half of the contract, and why each number is what it is:
+ *
+ * - `maxBytesPerFile` is 1.5 MiB, **inclusive**: a file of exactly
+ *   `1_572_864` bytes is accepted and one byte more is rejected. It is a
+ *   *target* maximum, chosen to keep eight images per product (12 MiB of
+ *   media) and eight files per request (12 MiB) inside what an edge worker
+ *   should hold in one request, with room to spare.
+ * - `maxStoredObjectBytes` is 2,000,000 bytes: Cloudflare D1's hard per-value
+ *   BLOB limit. It is deliberately *not* the enforced cap — the 1.5 MiB
+ *   per-image maximum is stricter — so it can only ever be a defense-in-depth
+ *   invariant. It is stated here (and asserted in tests) because a limit that
+ *   is invisible is a limit nothing keeps honest: raising
+ *   `maxBytesPerFile` above this value would silently produce writes the
+ *   database rejects.
  */
 export const PRODUCT_IMAGE_LIMITS = {
   /** Maximum images one product may hold, enforced on every add. */
   maxPerProduct: 8,
   /** Maximum image files one upload request may carry. */
   maxFilesPerRequest: 8,
-  /** Maximum size of a single uploaded image file, in bytes (5 MiB). */
-  maxBytesPerFile: 5 * 1024 * 1024,
+  /** Maximum size of a single uploaded image file, in bytes (1.5 MiB, inclusive). */
+  maxBytesPerFile: 1_572_864,
+  /**
+   * Hard per-object ceiling for stored media bytes (Cloudflare D1's BLOB
+   * limit). Never the enforced per-image cap — see the note above.
+   */
+  maxStoredObjectBytes: 2_000_000,
   altTextMaxLength: 200,
   urlMaxLength: 2048,
 } as const;

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { AppError } from "@zelora/core";
+import { AppError, ValidationError } from "@zelora/core";
 import type { UserRecord } from "@zelora/db/users";
 import type {
   CreateOnboardingInput,
@@ -12,6 +12,7 @@ import type { CatalogCategoryRecord, CatalogRepository } from "@zelora/db/catalo
 import {
   AUTH_ERROR_CODES,
   DEFAULT_PRODUCT_CURRENCY,
+  PRODUCT_IMAGE_LIMITS,
   SELLER_PRODUCT_ERROR_CODES,
   SELLER_PRODUCT_PAGE_LIMITS,
 } from "@zelora/shared";
@@ -23,6 +24,8 @@ import type {
   InventoryRecord,
   CreateProductInput,
   CreateProductResult,
+  DeleteProductImageInput,
+  DeleteProductImageResult,
   ProductDetailRecord,
   ProductImageRecord,
   ProductListPage,
@@ -33,6 +36,8 @@ import type {
   PublishProductResult,
   SetInventoryInput,
   SetInventoryResult,
+  SetPrimaryProductImageInput,
+  SetPrimaryProductImageResult,
   VariantRecord,
 } from "@zelora/db/products";
 import type { MediaObjectInput, MediaObjectOutput, MediaStorage } from "./media/storage";
@@ -179,11 +184,18 @@ class FakeProductRepository implements ProductRepository {
 
   forceCreateConflict: boolean = false;
   forceSkuConflict: boolean = false;
+  /** Make `addProductImages` refuse, standing in for the product vanishing mid-upload. */
+  forceAddImagesConflict: boolean = false;
 
   createVariantCalls: CreateVariantInput[] = [];
   setInventoryCalls: SetInventoryInput[] = [];
   listCalls: Array<{ storeId: string; query: ProductListQuery }> = [];
   listImagesCalls: Array<{ productId: string; storeId: string }> = [];
+  /** Every `addProductImages` input, so stored rows (keys, order, alt text) are assertable. */
+  addImagesCalls: AddProductImagesInput[] = [];
+  /** Every `deleteProductImage` / `setPrimaryProductImage` input, for the same reason. */
+  deleteImageCalls: DeleteProductImageInput[] = [];
+  setPrimaryImageCalls: SetPrimaryProductImageInput[] = [];
 
   async listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage> {
     this.listCalls.push({ storeId, query });
@@ -363,6 +375,10 @@ class FakeProductRepository implements ProductRepository {
    * one-primary-per-product invariant can never be violated from this path.
    */
   async addProductImages(input: AddProductImagesInput): Promise<AddProductImagesResult> {
+    this.addImagesCalls.push(input);
+    if (this.forceAddImagesConflict) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
     const product = this.products.get(input.productId);
     if (product === undefined || product.storeId !== input.storeId) {
       return { ok: false, reason: "PRODUCT_NOT_FOUND" };
@@ -384,6 +400,65 @@ class FakeProductRepository implements ProductRepository {
       return record;
     });
     return { ok: true, images };
+  }
+
+  /**
+   * Ownership-scoped count, matching both real drivers: an unowned product counts
+   * zero rather than throwing, which is what lets the service distinguish "full"
+   * from "not yours" from the count alone.
+   */
+  async countImagesByProduct(productId: string, storeId: string): Promise<number> {
+    const product = this.products.get(productId);
+    if (product === undefined || product.storeId !== storeId) {
+      return 0;
+    }
+    return [...this.images.values()].filter((image) => image.productId === productId).length;
+  }
+
+  /** Deletes the row only; stored bytes are the storage layer's business. */
+  async deleteProductImage(input: DeleteProductImageInput): Promise<DeleteProductImageResult> {
+    this.deleteImageCalls.push(input);
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    const image = this.images.get(input.imageId);
+    if (image === undefined || image.productId !== input.productId) {
+      return { ok: false, reason: "IMAGE_NOT_FOUND" };
+    }
+    this.images.delete(input.imageId);
+    return { ok: true, image };
+  }
+
+  /**
+   * Idempotent promotion with clear-then-set, so the fake enforces the same
+   * one-primary-per-product invariant the real drivers do.
+   */
+  async setPrimaryProductImage(
+    input: SetPrimaryProductImageInput,
+  ): Promise<SetPrimaryProductImageResult> {
+    this.setPrimaryImageCalls.push(input);
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    const target = this.images.get(input.imageId);
+    if (target === undefined || target.productId !== input.productId) {
+      return { ok: false, reason: "IMAGE_NOT_FOUND" };
+    }
+    if (target.isPrimary) {
+      return { ok: true, image: target };
+    }
+    // Clear-then-set, mirroring both drivers: the one-primary invariant never
+    // sees two primaries, not even transiently inside the fake.
+    for (const image of [...this.images.values()]) {
+      if (image.productId === input.productId && image.isPrimary) {
+        this.images.set(image.id, { ...image, isPrimary: false });
+      }
+    }
+    const promoted: ProductImageRecord = { ...target, isPrimary: true };
+    this.images.set(promoted.id, promoted);
+    return { ok: true, image: promoted };
   }
 
   seedProduct(product: ProductRecord): void {
@@ -484,10 +559,48 @@ function imageRecord(input: {
 }
 
 /**
- * In-memory media storage fake. Seller service tests do not exercise media
- * operations in Phase 2A (the upload route is Phase 2B), but the service takes
- * the port as a required dependency, so a recording fake is supplied to keep
- * the construction honest and to let Phase 2B tests assert on it directly.
+ * Header-shaped byte fixtures for the upload tests. The service only ever sniffs
+ * the first bytes, so a real encoder's output would exercise the same path; these
+ * are built from the format's signature plus enough structure to identify it, and
+ * every one is padded past the sniffer's 16-byte floor so a failure is about the
+ * signature under test rather than about a short buffer.
+ */
+function imageBytes(signature: number[]): Uint8Array {
+  const bytes = new Uint8Array(32);
+  bytes.set(signature);
+  return bytes;
+}
+
+function pngBytes(seed = 0): Uint8Array {
+  return imageBytes([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x10, seed & 0xff,
+  ]);
+}
+
+function jpegBytes(): Uint8Array {
+  return imageBytes([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00]);
+}
+
+function webpBytes(): Uint8Array {
+  return imageBytes([
+    0x52, 0x49, 0x46, 0x46, 0x1a, 0x00, 0x00, 0x00,
+    0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20,
+  ]);
+}
+
+function avifBytes(): Uint8Array {
+  return imageBytes([
+    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70,
+    0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
+  ]);
+}
+
+/**
+ * In-memory media storage fake. It records every call so the upload tests can
+ * assert what reached storage and, just as importantly, what did not.
  */
 class FakeMediaStorage implements MediaStorage {
   readonly putCalls: Array<{ key: string; object: MediaObjectInput }> = [];
@@ -1278,6 +1391,753 @@ describe("SellerService", () => {
         403,
       );
       expect(products.listImagesCalls).toHaveLength(0);
+    });
+  });
+
+  describe("product image uploads", () => {
+    /** Seed an approved seller whose store id is `st-reads`. */
+    function seedImageSeller(): void {
+      seedApprovedSellerForProductReads();
+    }
+
+    /** Seed a product owned by `st-reads` and return its id. */
+    function seedOwnedProductWithId(seq: number, storeId = "st-reads"): string {
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      const productId = fakeId(seq);
+      products.seedProduct({
+        id: productId,
+        storeId,
+        slug: `image-product-${seq}`,
+        name: `Image Product ${seq}`,
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      return productId;
+    }
+
+    it("stores a sniffed image under a product-scoped key and returns a DTO without the key", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(100);
+      const user = makeUser({ role: "seller" });
+
+      const images = await service.addProductImages(user, productId, [{ bytes: pngBytes() }]);
+
+      expect(images).toHaveLength(1);
+      // The public DTO is the only read path a client gets: it carries the URL
+      // and never the server-side storage key as a field of its own.
+      expect(Object.keys(images[0] ?? {}).sort()).toEqual([
+        "altText",
+        "createdAt",
+        "id",
+        "isPrimary",
+        "productId",
+        "sortOrder",
+        "url",
+      ]);
+      // The URL is the storage port's public address of that same opaque key, so
+      // the key appears only inside the URL the client is meant to have.
+      expect(images[0]?.url).toBe(
+        `https://media.test/${products.addImagesCalls[0]?.images[0]?.storageKey}`,
+      );
+      expect(products.addImagesCalls[0]?.images[0]?.storageKey).toMatch(
+        new RegExp(`^products/${productId}/[0-9a-f]{64}\\.png$`),
+      );
+    });
+
+    it("keys the stored object by product, so identical bytes in two products differ", async () => {
+      seedImageSeller();
+      const user = makeUser({ role: "seller" });
+      const first = seedOwnedProductWithId(101);
+      const second = seedOwnedProductWithId(102);
+      const bytes = pngBytes();
+
+      await service.addProductImages(user, first, [{ bytes }]);
+      await service.addProductImages(user, second, [{ bytes }]);
+
+      const firstKey = products.addImagesCalls[0]?.images[0]?.storageKey;
+      const secondKey = products.addImagesCalls[1]?.images[0]?.storageKey;
+      // Same digest, different product: the second upload cannot replace the
+      // first product's stored object.
+      expect(firstKey).not.toBe(secondKey);
+      expect(firstKey?.startsWith(`products/${first}/`)).toBe(true);
+      expect(secondKey?.startsWith(`products/${second}/`)).toBe(true);
+      expect(firstKey?.split("/")[2]).toBe(secondKey?.split("/")[2]);
+      expect(mediaStorage.putCalls).toHaveLength(2);
+    });
+
+    it("uses the sniffed content type, not any client-declared one", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(103);
+
+      // The upload surface has no MIME field at all, so there is nothing for a
+      // caller to lie with: the bytes and only the bytes decide the type.
+      const images = await service.addProductImages(makeUser({ role: "seller" }), productId, [
+        { bytes: jpegBytes() },
+        { bytes: webpBytes() },
+        { bytes: avifBytes() },
+      ]);
+
+      expect(images).toHaveLength(3);
+      expect(mediaStorage.putCalls.map((call) => call.object.contentType)).toEqual([
+        "image/jpeg",
+        "image/webp",
+        "image/avif",
+      ]);
+      expect(products.addImagesCalls[0]?.images.map((image) => image.storageKey?.split(".").pop())).toEqual([
+        "jpg",
+        "webp",
+        "avif",
+      ]);
+    });
+
+    it("writes the sniffed byte size to storage, so a recorded size cannot lie", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(104);
+      const bytes = pngBytes();
+
+      await service.addProductImages(makeUser({ role: "seller" }), productId, [{ bytes }]);
+
+      expect(mediaStorage.putCalls[0]?.object.size).toBe(bytes.byteLength);
+      expect(mediaStorage.putCalls[0]?.object.bytes.byteLength).toBe(bytes.byteLength);
+    });
+
+    it("hands storage a copy, so a caller mutating its buffer cannot corrupt the digest", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(105);
+      const bytes = pngBytes();
+
+      await service.addProductImages(makeUser({ role: "seller" }), productId, [{ bytes }]);
+      const key = products.addImagesCalls[0]?.images[0]?.storageKey as string;
+      bytes.fill(0);
+
+      expect((await mediaStorage.get(key))?.bytes.byteLength).toBe(pngBytes().byteLength);
+    });
+
+    it("appends after the highest existing sort order without renumbering", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(106);
+      products.seedImage(imageRecord({ id: fakeId(107), productId, sortOrder: 0 }));
+      products.seedImage(imageRecord({ id: fakeId(108), productId, sortOrder: 5, isPrimary: true }));
+
+      await service.addProductImages(makeUser({ role: "seller" }), productId, [
+        { bytes: pngBytes() },
+        { bytes: jpegBytes() },
+      ]);
+
+      // New images continue at 6, 7; the existing rows keep 0 and 5 so a
+      // display order already shown to a shopper cannot be reshuffled.
+      expect(products.addImagesCalls[0]?.images.map((image) => image.sortOrder)).toEqual([6, 7]);
+    });
+
+    it("starts a fresh product's images at sort order 0", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(109);
+
+      await service.addProductImages(makeUser({ role: "seller" }), productId, [
+        { bytes: pngBytes() },
+        { bytes: jpegBytes() },
+      ]);
+
+      expect(products.addImagesCalls[0]?.images.map((image) => image.sortOrder)).toEqual([0, 1]);
+    });
+
+    it("normalizes alt text and stores an empty description as null", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(110);
+
+      const images = await service.addProductImages(makeUser({ role: "seller" }), productId, [
+        { bytes: pngBytes(), altText: "  Front view  " },
+        { bytes: jpegBytes(), altText: "   " },
+        { bytes: webpBytes() },
+      ]);
+
+      expect(images.map((image) => image.altText)).toEqual(["Front view", null, null]);
+    });
+
+    it("rejects an over-long alt text instead of silently truncating it", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(111);
+      const user = makeUser({ role: "seller" });
+
+      // Alt text is validated in the same up-front pass as the bytes, so a
+      // rejected description never leaves a stored object behind.
+      await expect(
+        service.addProductImages(user, productId, [
+          { bytes: pngBytes(), altText: "x".repeat(PRODUCT_IMAGE_LIMITS.altTextMaxLength + 1) },
+        ]),
+      ).rejects.toThrow(ValidationError);
+      expect(mediaStorage.putCalls).toHaveLength(0);
+      expect(products.addImagesCalls).toHaveLength(0);
+    });
+
+    it("names the offending file for an over-long alt text too", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(112);
+
+      try {
+        await service.addProductImages(makeUser({ role: "seller" }), productId, [
+          { bytes: pngBytes() },
+          { bytes: jpegBytes(), altText: "x".repeat(PRODUCT_IMAGE_LIMITS.altTextMaxLength + 1) },
+        ]);
+        expect.unreachable("expected a ValidationError");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ValidationError);
+        if (!(error instanceof ValidationError)) {
+          throw error;
+        }
+        expect(error.fields?.imagePosition).toEqual([
+          `Image 2: Alt text must be at most ${PRODUCT_IMAGE_LIMITS.altTextMaxLength} characters.`,
+        ]);
+      }
+    });
+
+    it("validates every image before writing any bytes", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(112);
+      const user = makeUser({ role: "seller" });
+
+      // Three good files followed by one bad: not one object may be written, or
+      // the seller is left with stored images their request never completed.
+      await expect(
+        service.addProductImages(user, productId, [
+          { bytes: pngBytes() },
+          { bytes: jpegBytes() },
+          { bytes: webpBytes() },
+          { bytes: new Uint8Array(0) },
+        ]),
+      ).rejects.toThrow(ValidationError);
+
+      expect(mediaStorage.putCalls).toHaveLength(0);
+      expect(products.addImagesCalls).toHaveLength(0);
+    });
+
+    it("names the rejected image's position in the batch, counting from 1", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(113);
+
+      try {
+        await service.addProductImages(makeUser({ role: "seller" }), productId, [
+          { bytes: pngBytes() },
+          { bytes: new TextEncoder().encode("<!doctype html><title>nope</title>") },
+        ]);
+        expect.unreachable("expected a ValidationError");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ValidationError);
+        if (!(error instanceof ValidationError)) {
+          throw error;
+        }
+        expect(error.fields?.imagePosition).toEqual([
+          "Image 2: Only JPEG, PNG, WebP and AVIF images are accepted.",
+        ]);
+      }
+    });
+
+    it("rejects an empty file and an oversized one with their own messages", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(114);
+      const user = makeUser({ role: "seller" });
+
+      try {
+        await service.addProductImages(user, productId, [{ bytes: new Uint8Array(0) }]);
+        expect.unreachable("expected a ValidationError");
+      } catch (error) {
+        if (!(error instanceof ValidationError)) {
+          throw error;
+        }
+        expect(error.fields?.imagePosition).toEqual(["Image 1: The file is empty."]);
+      }
+
+      const oversized = new Uint8Array(PRODUCT_IMAGE_LIMITS.maxBytesPerFile + 1);
+      oversized.set(pngBytes());
+      try {
+        await service.addProductImages(user, productId, [{ bytes: oversized }]);
+        expect.unreachable("expected a ValidationError");
+      } catch (error) {
+        if (!(error instanceof ValidationError)) {
+          throw error;
+        }
+        expect(error.fields?.imagePosition).toEqual([
+          `Image 1: Each image must be at most ${PRODUCT_IMAGE_LIMITS.maxBytesPerFile} bytes.`,
+        ]);
+      }
+    });
+
+    it("rejects a truncated header, which is not a supported image", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(115);
+
+      // The 8-byte PNG signature on its own: a prefix of a real header, and not
+      // an image.
+      const signatureOnly = pngBytes().slice(0, 8);
+
+      await expect(
+        service.addProductImages(makeUser({ role: "seller" }), productId, [{ bytes: signatureOnly }]),
+      ).rejects.toThrow(ValidationError);
+      expect(mediaStorage.putCalls).toHaveLength(0);
+    });
+
+    it("accepts a file of exactly the size limit and rejects one byte more", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(116);
+      const user = makeUser({ role: "seller" });
+      const atLimit = new Uint8Array(PRODUCT_IMAGE_LIMITS.maxBytesPerFile);
+      atLimit.set(pngBytes());
+
+      await expect(service.addProductImages(user, productId, [{ bytes: atLimit }])).resolves.toHaveLength(1);
+
+      const overLimit = new Uint8Array(PRODUCT_IMAGE_LIMITS.maxBytesPerFile + 1);
+      overLimit.set(pngBytes());
+      await expect(service.addProductImages(user, productId, [{ bytes: overLimit }])).rejects.toThrow(
+        ValidationError,
+      );
+    });
+
+    it("refuses a batch that would push the product past the per-product cap", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(117);
+      for (let index = 0; index < PRODUCT_IMAGE_LIMITS.maxPerProduct - 1; index += 1) {
+        products.seedImage(imageRecord({ id: fakeId(200 + index), productId, sortOrder: index }));
+      }
+
+      // Seven stored, two submitted: the cap is checked before any byte is
+      // written, so a refused request leaves no orphaned object behind.
+      await expectSellerError(
+        () =>
+          service.addProductImages(makeUser({ role: "seller" }), productId, [
+            { bytes: pngBytes() },
+            { bytes: jpegBytes() },
+          ]),
+        SELLER_PRODUCT_ERROR_CODES.IMAGE_LIMIT_REACHED,
+        409,
+      );
+      expect(mediaStorage.putCalls).toHaveLength(0);
+    });
+
+    it("accepts a batch that lands exactly on the per-product cap", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(118);
+      for (let index = 0; index < PRODUCT_IMAGE_LIMITS.maxPerProduct - 2; index += 1) {
+        products.seedImage(imageRecord({ id: fakeId(300 + index), productId, sortOrder: index }));
+      }
+
+      const images = await service.addProductImages(makeUser({ role: "seller" }), productId, [
+        { bytes: pngBytes() },
+        { bytes: jpegBytes() },
+      ]);
+
+      expect(images).toHaveLength(2);
+      expect(await products.countImagesByProduct(productId, "st-reads")).toBe(
+        PRODUCT_IMAGE_LIMITS.maxPerProduct,
+      );
+    });
+
+    it("refuses a batch larger than the per-request file cap", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(119);
+      const tooMany = Array.from(
+        { length: PRODUCT_IMAGE_LIMITS.maxFilesPerRequest + 1 },
+        (_unused, index) => ({ bytes: pngBytes(index + 1) }),
+      );
+
+      await expectSellerError(
+        () => service.addProductImages(makeUser({ role: "seller" }), productId, tooMany),
+        SELLER_PRODUCT_ERROR_CODES.IMAGE_LIMIT_REACHED,
+        409,
+      );
+      expect(mediaStorage.putCalls).toHaveLength(0);
+    });
+
+    it("treats an empty batch as a checked no-op that still enforces ownership", async () => {
+      seedImageSeller();
+      const own = seedOwnedProductWithId(120);
+      const foreign = seedOwnedProductWithId(121, "st-other");
+      const user = makeUser({ role: "seller" });
+
+      expect(await service.addProductImages(user, own, [])).toEqual([]);
+      expect(mediaStorage.putCalls).toHaveLength(0);
+      await expectSellerError(
+        () => service.addProductImages(user, foreign, []),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+
+    it("rejects another seller's product before reading or writing any media", async () => {
+      seedImageSeller();
+      const foreign = seedOwnedProductWithId(122, "st-other");
+
+      await expectSellerError(
+        () => service.addProductImages(makeUser({ role: "seller" }), foreign, [{ bytes: pngBytes() }]),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+      expect(mediaStorage.putCalls).toHaveLength(0);
+      expect(products.addImagesCalls).toHaveLength(0);
+    });
+
+    it("returns the same 404 for a malformed, an unknown and a foreign product id", async () => {
+      seedImageSeller();
+      const foreign = seedOwnedProductWithId(123, "st-other");
+      const user = makeUser({ role: "seller" });
+
+      for (const productId of ["not-an-id", "../../etc/passwd", fakeId(124), foreign]) {
+        await expectSellerError(
+          () => service.addProductImages(user, productId, [{ bytes: pngBytes() }]),
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          404,
+        );
+      }
+      // A traversal-shaped id is refused before a key is ever built, so nothing
+      // client-supplied can address a directory.
+      expect(mediaStorage.putCalls).toHaveLength(0);
+    });
+
+    it("requires an approved seller before touching media", async () => {
+      const customer = makeUser();
+
+      await expectSellerError(
+        () => service.addProductImages(customer, fakeId(125), [{ bytes: pngBytes() }]),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+      expect(mediaStorage.putCalls).toHaveLength(0);
+    });
+
+    it("reports a lost race as a 404 rather than a success with no rows", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(126);
+      products.forceAddImagesConflict = true;
+
+      await expectSellerError(
+        () => service.addProductImages(makeUser({ role: "seller" }), productId, [{ bytes: pngBytes() }]),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+  });
+
+  describe("deleteProductImage", () => {
+    /** Seed an approved seller whose store id is `st-reads`. */
+    function seedImageSeller(): void {
+      seedApprovedSellerForProductReads();
+    }
+
+    /** Seed a product owned by `storeId` and return its id. */
+    function seedOwnedProductWithId(seq: number, storeId = "st-reads"): string {
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      const productId = fakeId(seq);
+      products.seedProduct({
+        id: productId,
+        storeId,
+        slug: `image-product-${seq}`,
+        name: `Image Product ${seq}`,
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      return productId;
+    }
+
+    it("removes the row and returns the deleted image without its storage key", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(400);
+      products.seedImage(
+        imageRecord({ id: fakeId(401), productId, storageKey: `products/${productId}/a.png` }),
+      );
+
+      const deleted = await service.deleteProductImage(
+        makeUser({ role: "seller" }),
+        productId,
+        fakeId(401),
+      );
+
+      expect(deleted.id).toBe(fakeId(401));
+      expect(Object.keys(deleted).sort()).toEqual([
+        "altText",
+        "createdAt",
+        "id",
+        "isPrimary",
+        "productId",
+        "sortOrder",
+        "url",
+      ]);
+      expect(products.deleteImageCalls).toEqual([
+        { productId, imageId: fakeId(401), storeId: "st-reads" },
+      ]);
+      expect(await products.listImagesByProduct(productId, "st-reads")).toEqual([]);
+    });
+
+    it("does not touch stored bytes, which is a later phase's concern", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(402);
+      const key = `products/${productId}/a.png`;
+      products.seedImage(imageRecord({ id: fakeId(403), productId, storageKey: key }));
+      const stored = pngBytes();
+      await mediaStorage.put(key, {
+        bytes: stored.buffer as ArrayBuffer,
+        contentType: "image/png",
+        size: stored.byteLength,
+      });
+
+      await service.deleteProductImage(makeUser({ role: "seller" }), productId, fakeId(403));
+
+      // The object survives its row: byte reclamation is deliberately separate,
+      // and a delete that destroyed bytes could not be undone once the row is gone.
+      expect(mediaStorage.deleteCalls).toEqual([]);
+      expect(await mediaStorage.get(key)).not.toBeNull();
+    });
+
+    it("may leave a product with no primary image, which is a valid state", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(404);
+      products.seedImage(imageRecord({ id: fakeId(405), productId, isPrimary: true }));
+      products.seedImage(imageRecord({ id: fakeId(406), productId, sortOrder: 1 }));
+
+      await service.deleteProductImage(makeUser({ role: "seller" }), productId, fakeId(405));
+
+      const remaining = await products.listImagesByProduct(productId, "st-reads");
+      expect(remaining.map((image) => image.isPrimary)).toEqual([false]);
+    });
+
+    it("rejects an image belonging to another product of the same seller", async () => {
+      seedImageSeller();
+      const first = seedOwnedProductWithId(407);
+      const second = seedOwnedProductWithId(408);
+      products.seedImage(imageRecord({ id: fakeId(409), productId: second }));
+
+      await expectSellerError(
+        () => service.deleteProductImage(makeUser({ role: "seller" }), first, fakeId(409)),
+        SELLER_PRODUCT_ERROR_CODES.IMAGE_NOT_FOUND,
+        404,
+      );
+      expect(products.deleteImageCalls).toEqual([
+        { productId: first, imageId: fakeId(409), storeId: "st-reads" },
+      ]);
+    });
+
+    it("reports an unowned product as PRODUCT_NOT_FOUND, never as a missing image", async () => {
+      seedImageSeller();
+      const foreign = seedOwnedProductWithId(410, "st-other");
+      products.seedImage(imageRecord({ id: fakeId(411), productId: foreign }));
+
+      await expectSellerError(
+        () => service.deleteProductImage(makeUser({ role: "seller" }), foreign, fakeId(411)),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+
+    it("rejects malformed ids before reaching the repository", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(412);
+
+      // A malformed id is refused outright: there is nothing to look up, so the
+      // repository is never asked.
+      for (const [badProduct, badImage] of [
+        [productId, "not-an-id"],
+        ["not-an-id", fakeId(414)],
+        ["../../etc/passwd", fakeId(414)],
+      ] as const) {
+        await expectSellerError(
+          () => service.deleteProductImage(makeUser({ role: "seller" }), badProduct, badImage),
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          404,
+        );
+      }
+      expect(products.deleteImageCalls).toHaveLength(0);
+    });
+
+    it("sends a well-formed but unknown product to the repository, which reports it as missing", async () => {
+      seedImageSeller();
+
+      // Ownership cannot be decided by format-checking an id, so a well-formed id
+      // is resolved against the store; the 404 comes from that lookup.
+      await expectSellerError(
+        () => service.deleteProductImage(makeUser({ role: "seller" }), fakeId(413), fakeId(414)),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+      expect(products.deleteImageCalls).toEqual([
+        { productId: fakeId(413), imageId: fakeId(414), storeId: "st-reads" },
+      ]);
+    });
+
+    it("requires an approved seller", async () => {
+      await expectSellerError(
+        () => service.deleteProductImage(makeUser(), fakeId(415), fakeId(416)),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+    });
+  });
+
+  describe("setPrimaryProductImage", () => {
+    /** Seed an approved seller whose store id is `st-reads`. */
+    function seedImageSeller(): void {
+      seedApprovedSellerForProductReads();
+    }
+
+    /** Seed a product owned by `st-reads` and return its id. */
+    function seedOwnedProductWithId(seq: number): string {
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      const productId = fakeId(seq);
+      products.seedProduct({
+        id: productId,
+        storeId: "st-reads",
+        slug: `image-product-${seq}`,
+        name: `Image Product ${seq}`,
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      return productId;
+    }
+
+    it("promotes an image, demotes the previous primary and leaves other rows alone", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(500);
+      products.seedImage(imageRecord({ id: fakeId(501), productId, isPrimary: true, sortOrder: 0 }));
+      products.seedImage(imageRecord({ id: fakeId(502), productId, sortOrder: 1 }));
+      products.seedImage(imageRecord({ id: fakeId(503), productId, sortOrder: 2 }));
+
+      const promoted = await service.setPrimaryProductImage(
+        makeUser({ role: "seller" }),
+        productId,
+        fakeId(503),
+      );
+
+      expect(promoted.isPrimary).toBe(true);
+      expect(products.setPrimaryImageCalls).toEqual([
+        { productId, imageId: fakeId(503), storeId: "st-reads" },
+      ]);
+      const listed = await products.listImagesByProduct(productId, "st-reads");
+      // Exactly one primary survives, and the canonical order (primary, then
+      // sort order, then id) puts the promoted image first even though it sorted last.
+      expect(listed.filter((image) => image.isPrimary).map((image) => image.id)).toEqual([fakeId(503)]);
+      expect(listed.map((image) => image.id)).toEqual([
+        fakeId(503),
+        fakeId(501),
+        fakeId(502),
+      ]);
+      // Only the flag moved: no sort order was renumbered.
+      expect(listed.map((image) => image.sortOrder)).toEqual([2, 0, 1]);
+    });
+
+    it("is idempotent, so a retried promotion still succeeds", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(504);
+      products.seedImage(imageRecord({ id: fakeId(505), productId, isPrimary: true }));
+      const user = makeUser({ role: "seller" });
+
+      const first = await service.setPrimaryProductImage(user, productId, fakeId(505));
+      const second = await service.setPrimaryProductImage(user, productId, fakeId(505));
+
+      expect(first.isPrimary).toBe(true);
+      expect(second.isPrimary).toBe(true);
+      expect(second.id).toBe(first.id);
+    });
+
+    it("returns a DTO with no storage key", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(506);
+      products.seedImage(
+        imageRecord({ id: fakeId(507), productId, storageKey: `products/${productId}/a.png` }),
+      );
+
+      const promoted = await service.setPrimaryProductImage(
+        makeUser({ role: "seller" }),
+        productId,
+        fakeId(507),
+      );
+
+      expect(Object.keys(promoted).sort()).toEqual([
+        "altText",
+        "createdAt",
+        "id",
+        "isPrimary",
+        "productId",
+        "sortOrder",
+        "url",
+      ]);
+    });
+
+    it("rejects an image of another product, and an unowned product is a 404", async () => {
+      seedImageSeller();
+      const own = seedOwnedProductWithId(508);
+      const sibling = seedOwnedProductWithId(509);
+      products.seedImage(imageRecord({ id: fakeId(510), productId: sibling }));
+
+      await expectSellerError(
+        () => service.setPrimaryProductImage(makeUser({ role: "seller" }), own, fakeId(510)),
+        SELLER_PRODUCT_ERROR_CODES.IMAGE_NOT_FOUND,
+        404,
+      );
+
+      const foreign = fakeId(511);
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      products.seedProduct({
+        id: foreign,
+        storeId: "st-other",
+        slug: "image-product-foreign",
+        name: "Foreign",
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      products.seedImage(imageRecord({ id: fakeId(512), productId: foreign }));
+      await expectSellerError(
+        () => service.setPrimaryProductImage(makeUser({ role: "seller" }), foreign, fakeId(512)),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+    });
+
+    it("rejects malformed ids before reaching the repository", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(513);
+
+      for (const [badProduct, badImage] of [
+        [productId, "not-an-id"],
+        ["not-an-id", fakeId(515)],
+        ["../../etc/passwd", fakeId(515)],
+      ] as const) {
+        await expectSellerError(
+          () => service.setPrimaryProductImage(makeUser({ role: "seller" }), badProduct, badImage),
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          404,
+        );
+      }
+      expect(products.setPrimaryImageCalls).toHaveLength(0);
+    });
+
+    it("sends a well-formed but unknown product to the repository, which reports it as missing", async () => {
+      seedImageSeller();
+
+      await expectSellerError(
+        () => service.setPrimaryProductImage(makeUser({ role: "seller" }), fakeId(514), fakeId(515)),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+      expect(products.setPrimaryImageCalls).toEqual([
+        { productId: fakeId(514), imageId: fakeId(515), storeId: "st-reads" },
+      ]);
+    });
+
+    it("requires an approved seller", async () => {
+      await expectSellerError(
+        () => service.setPrimaryProductImage(makeUser(), fakeId(516), fakeId(517)),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
     });
   });
 

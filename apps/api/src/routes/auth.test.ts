@@ -210,6 +210,9 @@ const inertProductRepository: ProductRepository = {
   setInventory: unimplementedSeller,
   publishProduct: unimplementedSeller,
   addProductImages: unimplementedSeller,
+  countImagesByProduct: unimplementedSeller,
+  deleteProductImage: unimplementedSeller,
+  setPrimaryProductImage: unimplementedSeller,
 };
 
 const inertCartRepository: CartRepository = {

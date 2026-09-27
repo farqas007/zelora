@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import type { CreateMediaObjectInput, MediaObjectRecord, MediaObjectRepository } from "@zelora/db/media";
+import { PRODUCT_IMAGE_LIMITS } from "@zelora/shared";
 import { createD1MediaStorage } from "./d1";
 import { assertMediaObjectSize, type MediaObjectInput } from "./storage";
 
@@ -157,5 +158,42 @@ describe("createD1MediaStorage", () => {
     expect(() =>
       assertMediaObjectSize("k", { bytes: bytesOf(2), contentType: "image/png", size: 3 }),
     ).toThrow(/declares size 3 but carries 2 bytes/);
+  });
+
+  it("refuses an object past the D1 BLOB ceiling and names the key that would have failed", async () => {
+    const storage = createD1MediaStorage({ repository, publicBaseUrl: "https://media.test" });
+    const oversized = PRODUCT_IMAGE_LIMITS.maxStoredObjectBytes + 1;
+
+    await expect(
+      storage.put("products/p/too-big.png", {
+        bytes: bytesOf(oversized),
+        contentType: "image/png",
+        size: oversized,
+      }),
+    ).rejects.toThrow(/products\/p\/too-big\.png.*exceeds the D1 BLOB limit/s);
+    // Nothing was written, so a rejected object leaves no row behind.
+    expect(repository.rows).toEqual([]);
+  });
+
+  it("accepts an object of exactly the D1 BLOB ceiling", async () => {
+    const storage = createD1MediaStorage({ repository, publicBaseUrl: "https://media.test" });
+    const atLimit = PRODUCT_IMAGE_LIMITS.maxStoredObjectBytes;
+
+    await storage.put("products/p/at-limit.png", {
+      bytes: bytesOf(atLimit),
+      contentType: "image/png",
+      size: atLimit,
+    });
+
+    expect(repository.rows[0]?.byteSize).toBe(atLimit);
+  });
+
+  it("keeps the D1 ceiling a defense-in-depth backstop, above the enforced per-image cap", () => {
+    // Only ever both true at once does the backstop mean anything: the platform
+    // must reject an oversized image long before the database would, or the
+    // limit is doing no work.
+    expect(PRODUCT_IMAGE_LIMITS.maxBytesPerFile).toBeLessThan(
+      PRODUCT_IMAGE_LIMITS.maxStoredObjectBytes,
+    );
   });
 });

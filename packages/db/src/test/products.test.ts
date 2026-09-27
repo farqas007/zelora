@@ -618,3 +618,303 @@ describe("product repository: addProductImages", () => {
     expect(countImages(siblingId)).toBe(1);
   });
 });
+
+/**
+ * Image management on the local driver: count, delete and primary promotion.
+ *
+ * The D1 driver is a method-for-method twin of this one (same ownership guard,
+ * same reasons, same clear-then-set order), so these tests are also the
+ * behavioural spec the D1 implementation is written against. True D1 runtime
+ * tests would need `workerd`, which is not a dependency of this repository.
+ */
+describe("product repository: image management", () => {
+  /** Insert a product owned by `storeId` and return its id. */
+  function seedProduct(storeId: string, slug: string): string {
+    return db
+      .insert(schema.products)
+      .values({ storeId, name: slug, slug })
+      .returning()
+      .get().id;
+  }
+
+  /** Insert one image and return its id. */
+  function seedImage(
+    productId: string,
+    overrides: Partial<typeof schema.productImages.$inferInsert> = {},
+  ): string {
+    return db
+      .insert(schema.productImages)
+      .values({ productId, url: "https://media.test/a.jpg", ...overrides })
+      .returning()
+      .get().id;
+  }
+
+  /** Read every image of a product straight from the table, in insertion order. */
+  function readImages(productId: string): Array<{ url: string; isPrimary: number; sortOrder: number }> {
+    return db
+      .select({
+        url: schema.productImages.url,
+        isPrimary: schema.productImages.isPrimary,
+        sortOrder: schema.productImages.sortOrder,
+      })
+      .from(schema.productImages)
+      .where(eq(schema.productImages.productId, productId))
+      .all();
+  }
+
+  describe("countImagesByProduct", () => {
+    it("counts a product's own images", async () => {
+      const productId = seedProduct(scaffold.storeId, "count-own");
+      seedImage(productId);
+      seedImage(productId, { url: "https://media.test/b.jpg" });
+
+      expect(await repo.countImagesByProduct(productId, scaffold.storeId)).toBe(2);
+    });
+
+    it("counts zero for a product with no images", async () => {
+      const productId = seedProduct(scaffold.storeId, "count-empty");
+
+      expect(await repo.countImagesByProduct(productId, scaffold.storeId)).toBe(0);
+    });
+
+    it("counts zero — not an error — for an unknown or unowned product", async () => {
+      const foreign = seedProduct(scaffold.otherStoreId, "count-foreign");
+      seedImage(foreign);
+
+      // The count is a pre-check for the per-product cap, so it leaks nothing:
+      // an unowned product is indistinguishable from an empty one.
+      expect(await repo.countImagesByProduct(foreign, scaffold.storeId)).toBe(0);
+      expect(await repo.countImagesByProduct("01955f00-0000-7000-8000-000000000001", scaffold.storeId))
+        .toBe(0);
+    });
+
+    it("never counts another product's images", async () => {
+      const first = seedProduct(scaffold.storeId, "count-iso-a");
+      const second = seedProduct(scaffold.storeId, "count-iso-b");
+      seedImage(first);
+      seedImage(second);
+      seedImage(second);
+
+      expect(await repo.countImagesByProduct(first, scaffold.storeId)).toBe(1);
+      expect(await repo.countImagesByProduct(second, scaffold.storeId)).toBe(2);
+    });
+  });
+
+  describe("deleteProductImage", () => {
+    it("removes the row and returns it", async () => {
+      const productId = seedProduct(scaffold.storeId, "delete-own");
+      const imageId = seedImage(productId, { storageKey: "products/p/a.jpg" });
+
+      const result = await repo.deleteProductImage({ productId, imageId, storeId: scaffold.storeId });
+
+      expect(result).toEqual({
+        ok: true,
+        image: expect.objectContaining({ id: imageId, storageKey: "products/p/a.jpg" }),
+      });
+      expect(readImages(productId)).toEqual([]);
+    });
+
+    it("leaves the product's other images, and their order, untouched", async () => {
+      const productId = seedProduct(scaffold.storeId, "delete-siblings");
+      seedImage(productId, { url: "https://media.test/a.jpg", isPrimary: 1, sortOrder: 0 });
+      const target = seedImage(productId, { url: "https://media.test/b.jpg", sortOrder: 1 });
+      seedImage(productId, { url: "https://media.test/c.jpg", sortOrder: 2 });
+
+      await repo.deleteProductImage({ productId, imageId: target, storeId: scaffold.storeId });
+
+      expect(readImages(productId).map((image) => image.url)).toEqual([
+        "https://media.test/a.jpg",
+        "https://media.test/c.jpg",
+      ]);
+      // No renumbering: the surviving sort orders keep their gaps.
+      expect(readImages(productId).map((image) => image.sortOrder)).toEqual([0, 2]);
+    });
+
+    it("deleting the primary leaves the product with no primary, without promoting another", async () => {
+      const productId = seedProduct(scaffold.storeId, "delete-primary");
+      const primaryId = seedImage(productId, { url: "https://media.test/a.jpg", isPrimary: 1 });
+      seedImage(productId, { url: "https://media.test/b.jpg", sortOrder: 1 });
+
+      await repo.deleteProductImage({ productId, imageId: primaryId, storeId: scaffold.storeId });
+
+      expect(readImages(productId).map((image) => image.isPrimary)).toEqual([0]);
+    });
+
+    it("reports an unowned product as PRODUCT_NOT_FOUND and deletes nothing", async () => {
+      const foreign = seedProduct(scaffold.otherStoreId, "delete-foreign");
+      const imageId = seedImage(foreign);
+
+      const result = await repo.deleteProductImage({
+        productId: foreign,
+        imageId,
+        storeId: scaffold.storeId,
+      });
+
+      expect(result).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+      expect(readImages(foreign)).toHaveLength(1);
+    });
+
+    it("reports an unknown product as PRODUCT_NOT_FOUND", async () => {
+      expect(
+        await repo.deleteProductImage({
+          productId: "01955f00-0000-7000-8000-000000000001",
+          imageId: "01955f00-0000-7000-8000-000000000002",
+          storeId: scaffold.storeId,
+        }),
+      ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+    });
+
+    it("reports an image of another product as IMAGE_NOT_FOUND and deletes nothing", async () => {
+      const first = seedProduct(scaffold.storeId, "delete-wrong-product-a");
+      const second = seedProduct(scaffold.storeId, "delete-wrong-product-b");
+      const imageId = seedImage(second);
+
+      const result = await repo.deleteProductImage({
+        productId: first,
+        imageId,
+        storeId: scaffold.storeId,
+      });
+
+      expect(result).toEqual({ ok: false, reason: "IMAGE_NOT_FOUND" });
+      expect(readImages(second)).toHaveLength(1);
+    });
+
+    it("reports an unknown image id as IMAGE_NOT_FOUND", async () => {
+      const productId = seedProduct(scaffold.storeId, "delete-unknown-image");
+      seedImage(productId);
+
+      expect(
+        await repo.deleteProductImage({
+          productId,
+          imageId: "01955f00-0000-7000-8000-000000000002",
+          storeId: scaffold.storeId,
+        }),
+      ).toEqual({ ok: false, reason: "IMAGE_NOT_FOUND" });
+    });
+  });
+
+  describe("setPrimaryProductImage", () => {
+    it("promotes an image and demotes the previous primary", async () => {
+      const productId = seedProduct(scaffold.storeId, "promote-swap");
+      seedImage(productId, { url: "https://media.test/a.jpg", isPrimary: 1, sortOrder: 0 });
+      const target = seedImage(productId, { url: "https://media.test/b.jpg", sortOrder: 1 });
+
+      const result = await repo.setPrimaryProductImage({
+        productId,
+        imageId: target,
+        storeId: scaffold.storeId,
+      });
+
+      expect(result).toEqual({
+        ok: true,
+        image: expect.objectContaining({ id: target, isPrimary: true }),
+      });
+      expect(readImages(productId).map((image) => image.isPrimary)).toEqual([0, 1]);
+    });
+
+    it("leaves every other row and its sort order untouched", async () => {
+      const productId = seedProduct(scaffold.storeId, "promote-only-flag");
+      seedImage(productId, { url: "https://media.test/a.jpg", isPrimary: 1, sortOrder: 0 });
+      const target = seedImage(productId, { url: "https://media.test/b.jpg", sortOrder: 5 });
+      seedImage(productId, { url: "https://media.test/c.jpg", sortOrder: 9 });
+
+      await repo.setPrimaryProductImage({ productId, imageId: target, storeId: scaffold.storeId });
+
+      expect(readImages(productId).map((image) => image.sortOrder)).toEqual([0, 5, 9]);
+    });
+
+    it("is idempotent, so re-promoting the current primary succeeds and changes nothing", async () => {
+      const productId = seedProduct(scaffold.storeId, "promote-idempotent");
+      const primaryId = seedImage(productId, { url: "https://media.test/a.jpg", isPrimary: 1 });
+
+      const first = await repo.setPrimaryProductImage({
+        productId,
+        imageId: primaryId,
+        storeId: scaffold.storeId,
+      });
+      const second = await repo.setPrimaryProductImage({
+        productId,
+        imageId: primaryId,
+        storeId: scaffold.storeId,
+      });
+
+      expect(first.ok).toBe(true);
+      expect(second.ok).toBe(true);
+      expect(readImages(productId).map((image) => image.isPrimary)).toEqual([1]);
+    });
+
+    it("promoting back and forth leaves exactly one primary at every step", async () => {
+      const productId = seedProduct(scaffold.storeId, "promote-round-trip");
+      const first = seedImage(productId, { url: "https://media.test/a.jpg" });
+      const second = seedImage(productId, { url: "https://media.test/b.jpg", sortOrder: 1 });
+
+      await repo.setPrimaryProductImage({ productId, imageId: first, storeId: scaffold.storeId });
+      expect(readImages(productId).map((image) => image.isPrimary)).toEqual([1, 0]);
+
+      await repo.setPrimaryProductImage({ productId, imageId: second, storeId: scaffold.storeId });
+      expect(readImages(productId).map((image) => image.isPrimary)).toEqual([0, 1]);
+    });
+
+    it("puts the promoted image first in the canonical read order", async () => {
+      const productId = seedProduct(scaffold.storeId, "promote-read-order");
+      seedImage(productId, { url: "https://media.test/a.jpg", isPrimary: 1, sortOrder: 0 });
+      seedImage(productId, { url: "https://media.test/b.jpg", sortOrder: 1 });
+      const last = seedImage(productId, { url: "https://media.test/c.jpg", sortOrder: 2 });
+
+      await repo.setPrimaryProductImage({ productId, imageId: last, storeId: scaffold.storeId });
+
+      expect((await repo.listImagesByProduct(productId, scaffold.storeId)).map((image) => image.url))
+        .toEqual(["https://media.test/c.jpg", "https://media.test/a.jpg", "https://media.test/b.jpg"]);
+    });
+
+    it("reports an unowned product as PRODUCT_NOT_FOUND and promotes nothing", async () => {
+      const foreign = seedProduct(scaffold.otherStoreId, "promote-foreign");
+      const imageId = seedImage(foreign);
+
+      expect(
+        await repo.setPrimaryProductImage({
+          productId: foreign,
+          imageId,
+          storeId: scaffold.storeId,
+        }),
+      ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+      expect(readImages(foreign).map((image) => image.isPrimary)).toEqual([0]);
+    });
+
+    it("reports an unknown product as PRODUCT_NOT_FOUND", async () => {
+      expect(
+        await repo.setPrimaryProductImage({
+          productId: "01955f00-0000-7000-8000-000000000001",
+          imageId: "01955f00-0000-7000-8000-000000000002",
+          storeId: scaffold.storeId,
+        }),
+      ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+    });
+
+    it("reports an image of another product as IMAGE_NOT_FOUND and promotes nothing", async () => {
+      const first = seedProduct(scaffold.storeId, "promote-wrong-product-a");
+      const second = seedProduct(scaffold.storeId, "promote-wrong-product-b");
+      const imageId = seedImage(second);
+
+      expect(
+        await repo.setPrimaryProductImage({ productId: first, imageId, storeId: scaffold.storeId }),
+      ).toEqual({ ok: false, reason: "IMAGE_NOT_FOUND" });
+      expect(readImages(second).map((image) => image.isPrimary)).toEqual([0]);
+    });
+
+    it("reports an unknown image id as IMAGE_NOT_FOUND", async () => {
+      const productId = seedProduct(scaffold.storeId, "promote-unknown-image");
+      seedImage(productId, { isPrimary: 1 });
+
+      expect(
+        await repo.setPrimaryProductImage({
+          productId,
+          imageId: "01955f00-0000-7000-8000-000000000002",
+          storeId: scaffold.storeId,
+        }),
+      ).toEqual({ ok: false, reason: "IMAGE_NOT_FOUND" });
+      // A refused promotion must not have demoted the existing primary.
+      expect(readImages(productId).map((image) => image.isPrimary)).toEqual([1]);
+    });
+  });
+});

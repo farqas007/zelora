@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, gte, lt, or } from "drizzle-orm";
+import { and, asc, count, desc, eq, gte, lt, or } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
 import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
 import { inventory, products, productImages, productVariants } from "../schema/catalog";
@@ -27,10 +27,16 @@ import type {
  *
  * Product images are read through one shared column projection and one
  * ordering, so the dedicated list and the embedded detail can never drift.
- * `addProductImages` is the only image write: it resolves ownership through
+ * `addProductImages` is the only image insert: it resolves ownership through
  * `products.storeId` in the same statement as the insert's guard and always
  * writes `is_primary = 0`, so the one-primary-per-product partial unique index
  * is never at risk from this path.
+ *
+ * `countImagesByProduct`, `deleteProductImage` and `setPrimaryProductImage`
+ * resolve the owning product through the same `findOwnedProduct` guard before
+ * touching a row, so an unknown product and a foreign one stay
+ * indistinguishable. Promotion is two ordered writes (clear, then set) and
+ * deletes never touch the stored bytes — see the port for why.
  */
 export function createLocalProductRepository(db: LocalDatabase): ProductRepository {
   return {
@@ -202,6 +208,64 @@ export function createLocalProductRepository(db: LocalDatabase): ProductReposito
         .returning()
         .all();
       return { ok: true, images: rows.map(toProductImageRecord) };
+    },
+
+    async countImagesByProduct(productId, storeId) {
+      const row = db
+        .select({ total: count(productImages.id) })
+        .from(productImages)
+        .innerJoin(products, eq(products.id, productImages.productId))
+        .where(and(eq(productImages.productId, productId), eq(products.storeId, storeId)))
+        .get();
+      return row === undefined ? 0 : row.total;
+    },
+
+    async deleteProductImage(input) {
+      if (findOwnedProduct(db, input.productId, input.storeId) === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      const removed = db
+        .delete(productImages)
+        .where(and(eq(productImages.id, input.imageId), eq(productImages.productId, input.productId)))
+        .returning(productImageColumns)
+        .all();
+      const image = removed[0];
+      if (image === undefined) {
+        return { ok: false, reason: "IMAGE_NOT_FOUND" };
+      }
+      return { ok: true, image: toProductImageRecord(image) };
+    },
+
+    async setPrimaryProductImage(input) {
+      if (findOwnedProduct(db, input.productId, input.storeId) === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      const target = findProductImageById(db, input.productId, input.imageId);
+      if (target === null) {
+        return { ok: false, reason: "IMAGE_NOT_FOUND" };
+      }
+      if (target.isPrimary === 1) {
+        // Idempotent: the requested image already *is* the product's primary, so
+        // no flag changes and no second write is issued.
+        return { ok: true, image: toProductImageRecord(target) };
+      }
+      // Clear first, then promote, so the one-primary-per-product partial
+      // unique index never sees two primaries. The D1 twin does the same in the
+      // same order.
+      db.update(productImages)
+        .set({ isPrimary: 0 })
+        .where(and(eq(productImages.productId, input.productId), eq(productImages.isPrimary, 1)))
+        .run();
+      const promoted = db
+        .update(productImages)
+        .set({ isPrimary: 1 })
+        .where(and(eq(productImages.id, input.imageId), eq(productImages.productId, input.productId)))
+        .returning(productImageColumns)
+        .get();
+      if (promoted === undefined) {
+        throw new Error("product image promote returned no row");
+      }
+      return { ok: true, image: toProductImageRecord(promoted) };
     },
   };
 }
@@ -379,6 +443,26 @@ function findOwnedProduct(db: LocalDatabase, productId: string, storeId: string)
       .select()
       .from(products)
       .where(and(eq(products.id, productId), eq(products.storeId, storeId)))
+      .get() ?? null
+  );
+}
+
+/**
+ * Resolve one image of one product by id, or `null`. Deliberately scoped to the
+ * product rather than looked up by image id alone, so an image that belongs to
+ * another product (or another seller) can never be promoted or deleted through
+ * this path.
+ */
+function findProductImageById(
+  db: LocalDatabase,
+  productId: string,
+  imageId: string,
+): typeof productImages.$inferSelect | null {
+  return (
+    db
+      .select(productImageColumns)
+      .from(productImages)
+      .where(and(eq(productImages.id, imageId), eq(productImages.productId, productId)))
       .get() ?? null
   );
 }

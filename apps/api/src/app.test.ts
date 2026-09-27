@@ -80,6 +80,9 @@ const productRepository: ProductRepository = {
   setInventory: unimplemented,
   publishProduct: unimplemented,
   addProductImages: unimplemented,
+  countImagesByProduct: unimplemented,
+  deleteProductImage: unimplemented,
+  setPrimaryProductImage: unimplemented,
 };
 
 const cartRepository: CartRepository = {

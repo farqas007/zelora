@@ -79,10 +79,12 @@ export interface InventoryRecord {
  * documented to be identical to the public catalog DTO, so a delete handle has
  * no business crossing the API boundary.
  *
- * This table has no `updated_at`, so only `createdAt` exists. Phase 2A only
- * inserts images; nothing updates one yet, so an `updated_at` that would always
- * equal `created_at` was left out rather than added as dead weight.
- */
+  * This table has no `updated_at`, so only `createdAt` exists. Promotion
+  * (`setPrimaryProductImage`) flips `isPrimary` without touching the row's
+  * timestamps, so `createdAt` keeps describing when the image was added rather
+  * than when it was last re-ordered; an `updated_at` that moved on every
+  * re-promotion would blur that distinction for no query that needs it.
+  */
 export interface ProductImageRecord {
   id: string;
   productId: string;
@@ -227,6 +229,60 @@ export type AddProductImagesResult =
   | { ok: true; images: ProductImageRecord[] }
   | { ok: false; reason: AddProductImagesConflictReason };
 
+/**
+ * Everything required to remove one image of a product the caller owns.
+ * Ownership (`storeId`) is derived by the service from the authenticated
+ * seller; `productId` and `imageId` come from the URL path. The `imageId` is
+ * never resolved on its own: it is always scoped to `(product_id, store_id)`,
+ * so an image belonging to another product simply does not match.
+ */
+export interface DeleteProductImageInput {
+  productId: string;
+  imageId: string;
+  storeId: string;
+}
+
+/**
+ * Why deleting an owned image was refused.
+ *
+ * `PRODUCT_NOT_FOUND` covers both an unknown product and one owned by another
+ * store, exactly as elsewhere in this port, so existence never leaks.
+ * `IMAGE_NOT_FOUND` is reported only once the product is already proven owned
+ * by the caller, so it exposes nothing about any *other* seller's data: the
+ * image id either belongs to this caller's product or it does not exist there.
+ */
+export type DeleteProductImageConflictReason = "PRODUCT_NOT_FOUND" | "IMAGE_NOT_FOUND";
+
+/**
+ * The deleted row, or the reason nothing was deleted.
+ *
+ * The returned record carries `storageKey` so an internal caller can reach the
+ * stored object afterwards. That value is internal by construction: the shared
+ * `ProductImageDto` has no field for it, so no response can leak it.
+ */
+export type DeleteProductImageResult =
+  | { ok: true; image: ProductImageRecord }
+  | { ok: false; reason: DeleteProductImageConflictReason };
+
+/** Everything required to promote one image of a product the caller owns to primary. */
+export interface SetPrimaryProductImageInput {
+  productId: string;
+  imageId: string;
+  storeId: string;
+}
+
+/** Same rejection vocabulary as {@link DeleteProductImageResult}. */
+export type SetPrimaryProductImageConflictReason = "PRODUCT_NOT_FOUND" | "IMAGE_NOT_FOUND";
+
+/**
+ * The promoted row, or the reason nothing changed. Promotion is idempotent:
+ * an image that is already the product's primary resolves to `ok` with that
+ * same row, so a retried request never turns into a failure.
+ */
+export type SetPrimaryProductImageResult =
+  | { ok: true; image: ProductImageRecord }
+  | { ok: false; reason: SetPrimaryProductImageConflictReason };
+
 export interface ProductRepository {
   listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage>;
   findByStoreAndId(storeId: string, productId: string): Promise<ProductDetailRecord | null>;
@@ -291,4 +347,46 @@ export interface ProductRepository {
    * exactly like a foreign product with files.
    */
   addProductImages(input: AddProductImagesInput): Promise<AddProductImagesResult>;
+  /**
+   * Count the images of a product the caller owns.
+   *
+   * An unknown product and a product owned by another store both count `0`, not
+   * `null` and not a 404: this method is the per-product cap's pre-check, so
+   * like {@link ProductRepository.listImagesByProduct} it leaks nothing on its
+   * own. Callers that must distinguish "no images" from "no such product" pair
+   * it with `findByStoreAndId`, which is the single place existence is
+   * decided. Ordering is irrelevant to a count, so none is applied.
+   */
+  countImagesByProduct(productId: string, storeId: string): Promise<number>;
+  /**
+   * Delete one image of a product the caller owns and return the removed row.
+   *
+   * Scoped to `(image_id, product_id, store_id)`: an image of another product,
+   * or of another seller's product, is reported as `IMAGE_NOT_FOUND` and
+   * nothing is removed. Only the `product_images` row is deleted — the stored
+   * bytes behind its `storage_key` are left alone, because byte reclamation is
+   * a separate, later concern and a delete that also destroyed bytes could not
+   * be undone once the row was gone.
+   *
+   * Deleting the primary image is not a special case: no row is promoted in
+   * its place, so a product may legitimately be left with no primary image,
+   * which is the same valid state a product with no images at all is in.
+   */
+  deleteProductImage(input: DeleteProductImageInput): Promise<DeleteProductImageResult>;
+  /**
+   * Promote one image of a product the caller owns to be its primary image and
+   * return the promoted row.
+   *
+   * Exactly one image per product may be primary (the
+   * `product_images_product_primary_unique` partial unique index), so this is
+   * two ordered writes: clear the product's current primary, then set the
+   * requested one. Both drivers do it in that order, so the invariant holds
+   * the whole way and the two implementations cannot drift. Promoting the
+   * image that is already primary is an idempotent success, not an error.
+   *
+   * Only the product's own `is_primary` flag changes; `sortOrder` and every
+   * other row are untouched, and the canonical read order follows from the flag
+   * on the next read.
+   */
+  setPrimaryProductImage(input: SetPrimaryProductImageInput): Promise<SetPrimaryProductImageResult>;
 }

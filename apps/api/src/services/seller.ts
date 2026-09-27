@@ -1,6 +1,7 @@
 import {
   AUTH_ERROR_CODES,
   DEFAULT_PRODUCT_CURRENCY,
+  PRODUCT_IMAGE_LIMITS,
   SELLER_PRODUCT_ERROR_CODES,
   SELLER_PRODUCT_PAGE_LIMITS,
   type CreateProductRequest,
@@ -29,6 +30,7 @@ import type {
 } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type {
+  AddProductImageInput,
   InventoryRecord,
   ProductDetailRecord,
   ProductImageRecord,
@@ -37,6 +39,8 @@ import type {
   ProductVariantDetailRecord,
   VariantRecord,
 } from "@zelora/db/products";
+import { validateProductImageBytes, type ProductImageRejectionReason } from "./media/image-validation";
+import { buildProductImageStorageKey } from "./media/storage-key";
 import type { MediaStorage } from "./media/storage";
 import {
   parseAddProductVariantRequest,
@@ -95,6 +99,81 @@ export interface SellerServiceDependencies {
 export interface ListSellerProductsParams {
   limit?: string;
   cursor?: string;
+}
+
+/**
+ * One candidate image submitted to {@link SellerService.addProductImages}.
+ *
+ * Deliberately minimal and deliberately **not** a wire contract: a declared
+ * content type, a filename and an original extension are all absent on purpose,
+ * because every one of them is client-controlled and none of them may influence
+ * what gets stored. The service derives the content type from the bytes and
+ * derives the storage key from those bytes plus the owning product.
+ */
+export interface ProductImageUpload {
+  /** The raw image bytes, exactly as received. Never modified in place. */
+  bytes: Uint8Array;
+  /** Optional accessible description; length-checked, never sniffed. */
+  altText?: string | null;
+}
+
+/**
+ * Cap the alt text of an image at {@link PRODUCT_IMAGE_LIMITS.altTextMaxLength},
+ * returning the value to store.
+ *
+ * Normalized (trimmed, empty becomes `null`) so an all-whitespace description is
+ * stored as "no description" rather than as an invisible string a screen reader
+ * would read aloud. An over-long value is rejected rather than truncated: silently
+ * cutting a seller's text hides the mistake from the only party who can fix it.
+ *
+ * Called during the up-front validation pass, before any byte is written, and it
+ * throws the same `ValidationError` shape as a content rejection so one bad file
+ * is reported the same way whatever the mistake was.
+ */
+function normalizeImageAltText(
+  altText: string | null | undefined,
+  index: number,
+): string | null {
+  if (altText === undefined || altText === null) {
+    return null;
+  }
+  const trimmed = altText.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+  if (trimmed.length > PRODUCT_IMAGE_LIMITS.altTextMaxLength) {
+    throw new ValidationError("The request is invalid.", {
+      imagePosition: [
+        `Image ${index + 1}: Alt text must be at most ${PRODUCT_IMAGE_LIMITS.altTextMaxLength} characters.`,
+      ],
+    });
+  }
+  return trimmed;
+}
+
+/**
+ * Human-readable reason per sniffing rejection, addressed to the seller rather
+ * than to a developer. Deliberately says nothing about *how* the file was
+ * inspected beyond the outcome: a sniffed rejection is not a validation of the
+ * client's metadata, so echoing a claimed type back would only confuse.
+ */
+const IMAGE_REJECTION_MESSAGES = {
+  EMPTY: "The file is empty.",
+  TOO_LARGE: `Each image must be at most ${PRODUCT_IMAGE_LIMITS.maxBytesPerFile} bytes.`,
+  UNSUPPORTED_FORMAT: "Only JPEG, PNG, WebP and AVIF images are accepted.",
+} as const satisfies Record<ProductImageRejectionReason, string>;
+
+/**
+ * Build the 422 for a rejected image, naming the file's 1-based position in the
+ * submitted batch (`imagePosition`) and its own field (`image`).
+ *
+ * A `ValidationError` (422 with per-field messages) rather than a typed
+ * `AppError`, matching every other malformed-input path in this service.
+ */
+function imageUploadError(reason: ProductImageRejectionReason, index: number): ValidationError {
+  return new ValidationError("The request is invalid.", {
+    imagePosition: [`Image ${index + 1}: ${IMAGE_REJECTION_MESSAGES[reason]}`],
+  });
 }
 
 function mapSellerProfileToDto(profile: SellerProfileRecord): SellerProfileDto {
@@ -232,10 +311,11 @@ export class SellerService {
    * domain. Public and `readonly` so it reads as the injected dependency it is,
    * rather than as private state awaiting a reader.
    *
-   * Nothing in Phase 2A calls it yet — the seller upload route and its
-   * multipart/validation handling are Phase 2B — but the dependency is resolved
-   * and validated at composition time, so a misconfigured deployment fails when
-   * the app is built rather than on the first upload.
+   * Used by {@link SellerService.addProductImages} to store validated bytes
+   * under an opaque content-addressed key. The HTTP upload route and any upload
+   * UI are later phases; nothing else here touches media, and a deployment with
+   * no storage configured keeps a fail-closed port, so an accidental call fails
+   * loudly instead of dropping bytes.
    */
   readonly mediaStorage: MediaStorage;
 
@@ -408,6 +488,249 @@ export class SellerService {
 
     const images = await this.productRepository.listImagesByProduct(productId, store.id);
     return { productId, images: images.map(mapProductImageToDto) };
+  }
+
+  /**
+   * Validate and append images to one of the caller's own products.
+   *
+   * This is the service foundation for seller image uploads: ownership, the
+   * per-product count cap, per-file byte/format validation, the content-addressed
+   * storage key and the `product_images` insert all live here, so the future HTTP
+   * route is only a transport over this method. It is deliberately not wired to a
+   * route yet.
+   *
+   * The order of operations is the security property, not an implementation
+   * detail:
+   *
+   * 1. **Ownership first.** The store comes from the session and the product id
+   *    from the caller; a malformed id, an unknown product and a product owned by
+   *    another store all raise the same 404, so nothing is read or written for a
+   *    product the caller does not own.
+   * 2. **Count cap before any write.** A request that would push the product past
+   *    {@link PRODUCT_IMAGE_LIMITS.maxPerProduct} is refused with a 409 before a
+   *    single byte reaches storage, so a rejected request leaves no orphaned
+   *    objects behind.
+   * 3. **Every file validated before any file written.** All uploads are sniffed
+   *    and size-checked up front; only when all of them pass is the first byte
+   *    stored. A batch is therefore all-or-nothing at the validation stage, which
+   *    is the difference between "your fourth file is not an image" and four
+   *    stored objects the seller never wanted.
+   * 4. **The bytes decide the type.** The stored content type is the sniffed one
+   *    and the storage key's extension is derived from it, so no client-declared
+   *    MIME type or filename influences what is persisted or served.
+   *
+   * Returned DTOs never carry the internal `storage_key`: `product_images.url` is
+   * the single public read path, and the key stays a server-side handle.
+   */
+  async addProductImages(
+    user: UserRecord,
+    productId: string,
+    uploads: ProductImageUpload[],
+  ): Promise<ProductImageDto[]> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    // Existence is settled by the same ownership-scoped product lookup the read
+    // and delete paths use, so "unknown or unowned" is one indistinguishable 404
+    // before any media is touched.
+    const product = await this.productRepository.findByStoreAndId(store.id, productId);
+    if (product === null) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    if (uploads.length > PRODUCT_IMAGE_LIMITS.maxFilesPerRequest) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.IMAGE_LIMIT_REACHED,
+        `A request may carry at most ${PRODUCT_IMAGE_LIMITS.maxFilesPerRequest} images.`,
+        409,
+      );
+    }
+
+    // A checked no-op, not an unvalidated one: an empty batch still resolves
+    // ownership above, so a foreign product is rejected exactly as it is for a
+    // real batch.
+    if (uploads.length === 0) {
+      return [];
+    }
+
+    const existingCount = await this.productRepository.countImagesByProduct(productId, store.id);
+    if (existingCount + uploads.length > PRODUCT_IMAGE_LIMITS.maxPerProduct) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.IMAGE_LIMIT_REACHED,
+        `A product may hold at most ${PRODUCT_IMAGE_LIMITS.maxPerProduct} images.`,
+        409,
+      );
+    }
+
+    // Validate everything first — bytes *and* alt text — so a batch never leaves
+    // partially written objects behind. Each rejection is reported with the
+    // 1-based position of the offending file in the submitted batch. Alt text is
+    // checked in this same pass on purpose: a request rejected only after its
+    // bytes were stored would leave an object no row will ever point at.
+    const validated = uploads.map((upload, index) => {
+      const result = validateProductImageBytes(upload.bytes);
+      if (!result.ok) {
+        throw imageUploadError(result.reason, index);
+      }
+      const altText = normalizeImageAltText(upload.altText, index);
+      return { ...result.image, altText };
+    });
+
+    // Append semantics: new images continue after the highest existing
+    // `sortOrder` rather than renumbering what is already stored, so a partial
+    // failure can never reshuffle a listing's display order.
+    const nextSortOrder =
+      product.images.reduce((highest, image) => Math.max(highest, image.sortOrder), -1) + 1;
+
+    const storageKeys: string[] = [];
+    for (const [index, upload] of uploads.entries()) {
+      const image = validated[index];
+      if (image === undefined) {
+        throw new Error("validated image missing for a validated upload");
+      }
+      const storageKey = await buildProductImageStorageKey(productId, image.contentType, upload.bytes);
+      await this.mediaStorage.put(storageKey, {
+        // A copy the storage driver owns: some drivers bind the buffer
+        // asynchronously, and the caller's array must not be mutable underneath
+        // the write or the digest it was keyed by.
+        bytes: upload.bytes.slice().buffer as ArrayBuffer,
+        contentType: image.contentType,
+        size: image.byteSize,
+      });
+      storageKeys.push(storageKey);
+    }
+
+    const stored: AddProductImageInput[] = validated.map((image, index) => ({
+      // The public URL is derived from the opaque key, and remains the only
+      // column a reader ever needs.
+      url: this.mediaStorage.publicUrl(storageKeys[index] as string),
+      storageKey: storageKeys[index] as string,
+      altText: image.altText,
+      sortOrder: nextSortOrder + index,
+    }));
+
+    const result = await this.productRepository.addProductImages({
+      productId,
+      storeId: store.id,
+      images: stored,
+    });
+    if (!result.ok) {
+      // The only reason the repository can still refuse is a race (the product
+      // was deleted or moved between the check above and the insert). The objects
+      // are already stored; report the ownership failure rather than pretending
+      // the upload succeeded.
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+    return result.images.map(mapProductImageToDto);
+  }
+
+  /**
+   * Delete one of the caller's own product images and return what was removed.
+   *
+   * Ownership is resolved server-side exactly as everywhere else in this
+   * service, and the image is always scoped to the owned product, so an image id
+   * belonging to another listing (or another seller) is a plain
+   * 404 `IMAGE_NOT_FOUND` rather than a successful delete.
+   *
+   * Only the `product_images` row is removed. The stored bytes behind its
+   * `storage_key` are deliberately left in place: byte reclamation is a separate
+   * concern with its own failure modes, and a delete that had already destroyed
+   * the bytes could not be undone after the row was gone. A storage driver that
+   * is not configured therefore cannot turn a successful row delete into a 500.
+   */
+  async deleteProductImage(
+    user: UserRecord,
+    productId: string,
+    imageId: string,
+  ): Promise<ProductImageDto> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId) || !isValidId(imageId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    const result = await this.productRepository.deleteProductImage({
+      productId,
+      imageId,
+      storeId: store.id,
+    });
+    if (!result.ok) {
+      if (result.reason === "PRODUCT_NOT_FOUND") {
+        throw new AppError(
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          "This product is not available.",
+          404,
+        );
+      }
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.IMAGE_NOT_FOUND,
+        "This image does not belong to this product.",
+        404,
+      );
+    }
+    return mapProductImageToDto(result.image);
+  }
+
+  /**
+   * Promote one of the caller's own product images to be the primary image.
+   *
+   * The repository guarantees the one-primary-per-product invariant and reports
+   * an unknown or unowned image as `IMAGE_NOT_FOUND`; promoting the image that
+   * is already primary is an idempotent success rather than an error, so a
+   * retried request is safe. Only the product's own primary flag changes, so the
+   * promoted image simply leads the deterministic read order afterwards.
+   */
+  async setPrimaryProductImage(
+    user: UserRecord,
+    productId: string,
+    imageId: string,
+  ): Promise<ProductImageDto> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId) || !isValidId(imageId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    const result = await this.productRepository.setPrimaryProductImage({
+      productId,
+      imageId,
+      storeId: store.id,
+    });
+    if (!result.ok) {
+      if (result.reason === "PRODUCT_NOT_FOUND") {
+        throw new AppError(
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          "This product is not available.",
+          404,
+        );
+      }
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.IMAGE_NOT_FOUND,
+        "This image does not belong to this product.",
+        404,
+      );
+    }
+    return mapProductImageToDto(result.image);
   }
 
   /**

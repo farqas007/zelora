@@ -14,6 +14,7 @@ import type { CatalogRepository } from "@zelora/db/catalog";
 import type {
   AddProductImagesInput,
   AddProductImagesResult,
+  DeleteProductImageResult,
   InventoryRecord,
   CreateVariantInput,
   CreateVariantResult,
@@ -28,6 +29,7 @@ import type {
   PublishProductResult,
   SetInventoryInput,
   SetInventoryResult,
+  SetPrimaryProductImageResult,
   VariantRecord,
 } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
@@ -526,6 +528,23 @@ class FakeProductRepository implements ProductRepository {
     return { ok: true, images };
   }
 
+  /**
+   * Image management is a service-only surface in this phase: no route reaches
+   * it yet, so the fake refuses rather than pretending to implement behaviour no
+   * test can observe. Present only to satisfy the port.
+   */
+  async countImagesByProduct(): Promise<number> {
+    throw new Error("unexpected product call");
+  }
+
+  async deleteProductImage(): Promise<DeleteProductImageResult> {
+    throw new Error("unexpected product call");
+  }
+
+  async setPrimaryProductImage(): Promise<SetPrimaryProductImageResult> {
+    throw new Error("unexpected product call");
+  }
+
   seedProduct(product: ProductRecord): void {
     this.products.set(product.id, product);
   }
@@ -701,6 +720,15 @@ describe("POST /api/seller/onboarding", () => {
       throw new Error("unexpected product call");
     },
     addProductImages: () => {
+      throw new Error("unexpected product call");
+    },
+    countImagesByProduct: () => {
+      throw new Error("unexpected product call");
+    },
+    deleteProductImage: () => {
+      throw new Error("unexpected product call");
+    },
+    setPrimaryProductImage: () => {
       throw new Error("unexpected product call");
     },
   };

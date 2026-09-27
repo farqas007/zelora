@@ -23,6 +23,7 @@
  *   `rm --force`'s are.
  */
 
+import { PRODUCT_IMAGE_LIMITS } from "@zelora/shared";
 import { createD1MediaObjectRepository } from "@zelora/db/media/d1";
 import type { MediaObjectRepository } from "@zelora/db/media";
 import {
@@ -57,6 +58,16 @@ export function createD1MediaStorage(options: D1MediaStorageOptions): MediaStora
   return {
     async put(key: string, object: MediaObjectInput) {
       assertMediaObjectSize(key, object);
+      // D1's own per-value BLOB ceiling, asserted here as defense in depth. The
+      // enforced per-image cap is far stricter (1.5 MiB), so this can only fire
+      // if a future caller bypasses validation — and firing here names the
+      // object that would have failed, instead of surfacing an opaque D1 write
+      // error (or, worse, a truncated row) at the storage layer.
+      if (object.bytes.byteLength > PRODUCT_IMAGE_LIMITS.maxStoredObjectBytes) {
+        throw new Error(
+          `Media object for key "${key}" is ${object.bytes.byteLength} bytes, which exceeds the D1 BLOB limit of ${PRODUCT_IMAGE_LIMITS.maxStoredObjectBytes} bytes.`,
+        );
+      }
       // Replace, matching R2's `put` and the filesystem driver's overwrite.
       // A unique-constraint failure here would be a caller bug (a storage key
       // is supposed to be server-generated and unique), so the previous row is

@@ -416,6 +416,15 @@ const inertProductRepository: ProductRepository = {
   addProductImages: () => {
     throw new Error("unexpected product call");
   },
+  countImagesByProduct: () => {
+    throw new Error("unexpected product call");
+  },
+  deleteProductImage: () => {
+    throw new Error("unexpected product call");
+  },
+  setPrimaryProductImage: () => {
+    throw new Error("unexpected product call");
+  },
 };
 
 describe("POST /api/admin/sellers/:userId/activate", () => {

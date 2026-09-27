@@ -736,6 +736,28 @@ a {
   justify-content: center;
 }
 
+/* --- Admin seller review queue --- */
+
+.admin-seller h3 {
+  margin: 0;
+}
+
+.admin-seller .seller-product-facts {
+  margin-top: 1rem;
+}
+
+.admin-seller-description {
+  margin: 1rem 0 0;
+  color: var(--muted);
+}
+
+.admin-seller-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1rem;
+}
+
 /* ============================================================================
    Marketplace landing page
    ========================================================================== */

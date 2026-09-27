@@ -23,6 +23,32 @@ export function RequireAuth({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Admin-only guard layered on top of {@link RequireAuth}.
+ *
+ * This is a navigation concern only — it decides what the browser renders, so
+ * the admin API is never the thing that has to refuse. The server still
+ * authorizes every admin request independently (`requireAdmin` in the API), and
+ * this guard mirrors that same `user.role === "admin"` signal so a signed-in
+ * customer is sent to their dashboard instead of being shown an admin page that
+ * would only fail. Nothing about the session or the auth provider is changed
+ * here; the guard reads the state that already exists.
+ */
+export function RequireAdmin({ children }: { children: ReactNode }) {
+  const { status, user } = useAuth();
+
+  if (status === "loading") {
+    return <LoadingState label="Checking session…" />;
+  }
+  if (status === "signed-out") {
+    return <Navigate to="/login" replace />;
+  }
+  if (user?.role !== "admin") {
+    return <Navigate to="/dashboard" replace />;
+  }
+  return <>{children}</>;
+}
+
 export function RedirectIfAuthenticated({ children }: { children: ReactNode }) {
   const { status } = useAuth();
 

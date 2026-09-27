@@ -200,6 +200,13 @@ export function DashboardPage() {
                 <Link to="/seller/onboarding">Seller onboarding</Link>
               </li>
             )}
+            {user.role === "admin" && (
+              <li>
+                <Link className="btn btn-primary" to="/admin">
+                  Admin · Seller Management
+                </Link>
+              </li>
+            )}
             <li>
               <Link to="/">Back to home</Link>
             </li>

@@ -2,9 +2,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { App } from "./App";
-import { RedirectIfAuthenticated, RequireAuth } from "./components/AuthGate";
+import { RedirectIfAuthenticated, RequireAdmin, RequireAuth } from "./components/AuthGate";
 import { AuthProvider } from "./context/AuthContext";
 import { CartProvider } from "./context/CartContext";
+import { AdminSellersPage } from "./pages/AdminSellers";
 import { CartPage } from "./pages/Cart";
 import { CatalogPage } from "./pages/Catalog";
 import { DashboardPage } from "./pages/Dashboard";
@@ -51,6 +52,14 @@ createRoot(rootElement).render(
                 <RequireAuth>
                   <DashboardPage />
                 </RequireAuth>
+              }
+            />
+            <Route
+              path="/admin"
+              element={
+                <RequireAdmin>
+                  <AdminSellersPage />
+                </RequireAdmin>
               }
             />
             <Route

@@ -1,6 +1,7 @@
 import type {
   AddCartItemRequest,
   AddProductImagesEnvelope,
+  AdminPendingSellersEnvelope,
   ApiEnvelope,
   ApiErrorBody,
   AuthCsrfEnvelope,
@@ -26,9 +27,11 @@ import type {
   PublishProductEnvelope,
   RegisterEnvelope,
   RegisterRequest,
+  SellerActivationEnvelope,
   SellerOnboardingEnvelope,
   SellerOnboardingRequest,
   SellerListProductsRequest,
+  SellerRejectionEnvelope,
   SetInventoryEnvelope,
   SetInventoryRequest,
   SetPrimaryProductImageEnvelope,
@@ -93,6 +96,19 @@ export interface ApiClientDependencies {
   getCsrfToken: () => string | null;
 }
 
+/**
+ * Client-side query parameters for `GET /api/admin/sellers/pending`.
+ *
+ * Mirrors the other paginated listings: a numeric page size (validated to the
+ * shared `PENDING_SELLERS_PAGE_LIMITS` bounds server-side) and the opaque keyset
+ * cursor the previous page returned. Both are omitted rather than sent empty so
+ * the API's own defaults apply.
+ */
+export interface ListPendingSellersRequest {
+  limit?: number;
+  cursor?: string;
+}
+
 /** Typed endpoints of the Zelora API, keyed by HTTP route. */
 export interface ZeloraApi {
   getHealth(): Promise<ApiEnvelope<HealthResponse>>;
@@ -129,6 +145,9 @@ export interface ZeloraApi {
   updateCartItemQuantity(itemId: string, input: UpdateCartItemRequest): Promise<CartEnvelope>;
   removeCartItem(itemId: string): Promise<CartEnvelope>;
   clearCart(): Promise<CartEnvelope>;
+  listPendingSellers(input?: ListPendingSellersRequest): Promise<AdminPendingSellersEnvelope>;
+  activateSeller(userId: string): Promise<SellerActivationEnvelope>;
+  rejectSeller(userId: string): Promise<SellerRejectionEnvelope>;
 }
 
 /**
@@ -413,6 +432,33 @@ export function createApiClient(
         csrf: true,
       }),
     clearCart: () => request<CartEnvelope>("/api/cart", { method: "DELETE", csrf: true }),
+    listPendingSellers: (input = {}) => {
+      const params = new URLSearchParams();
+      if (input.limit !== undefined) {
+        params.set("limit", String(input.limit));
+      }
+      if (input.cursor !== undefined && input.cursor !== "") {
+        params.set("cursor", input.cursor);
+      }
+      const query = params.toString();
+      return request<AdminPendingSellersEnvelope>(
+        `/api/admin/sellers/pending${query === "" ? "" : `?${query}`}`,
+        { method: "GET" },
+      );
+    },
+    // The seller is addressed by their owning *user* id, which is what the admin
+    // routes validate and what a pending application is keyed by. Both are CSRF
+    // protected because both change server state.
+    activateSeller: (userId) =>
+      request<SellerActivationEnvelope>(
+        `/api/admin/sellers/${encodeURIComponent(userId)}/activate`,
+        { method: "POST", csrf: true },
+      ),
+    rejectSeller: (userId) =>
+      request<SellerRejectionEnvelope>(
+        `/api/admin/sellers/${encodeURIComponent(userId)}/reject`,
+        { method: "POST", csrf: true },
+      ),
   };
 }
 

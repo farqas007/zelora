@@ -16,6 +16,7 @@ import { createAdminRoutes } from "./routes/admin";
 import { createCartRoutes } from "./routes/cart";
 import { createCatalogRoutes } from "./routes/catalog";
 import { createHealthRoutes } from "./routes/health";
+import { createMediaRoutes } from "./routes/media";
 import { createSellerRoutes } from "./routes/seller";
 import { createStorefrontRoutes } from "./routes/storefront";
 import { AdminService } from "./services/admin";
@@ -45,6 +46,11 @@ import { createUnavailableMediaStorage, type MediaStorage } from "./services/med
  * accepts uploads, drops the bytes, and stores a URL that 404s — a silent data
  * loss that only shows up as broken images in production. Failing loudly at
  * the boundary keeps the misconfiguration visible.
+ *
+ * The same instance backs both halves of the media surface: the seller-only
+ * writes in `routes/seller.ts` and the unauthenticated reads in
+ * `routes/media.ts`, so a deployment can never write through one driver and
+ * read through another.
  */
 export interface AppDependencies {
   config: AppConfig;
@@ -184,6 +190,13 @@ export function createApp(dependencies: AppDependencies): Hono {
       clock,
     }),
   );
+
+  // Public media reads, deliberately outside `/api`: the stored URL is
+  // `MEDIA_PUBLIC_BASE_URL` + the storage key, and a deployment points that base
+  // at a host/path that already ends in `/media`. Keeping the mount here (rather
+  // than inside `createSellerRoutes`) is what makes the route available without a
+  // session, which is what a customer's catalog and storefront pages need.
+  app.route("/media", createMediaRoutes({ mediaStorage }));
 
   return app;
 }

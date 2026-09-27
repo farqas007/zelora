@@ -521,6 +521,27 @@ export class SellerService {
    *
    * Returned DTOs never carry the internal `storage_key`: `product_images.url` is
    * the single public read path, and the key stays a server-side handle.
+   *
+   * ### Why the write phase compensates
+   *
+   * Everything above the writes is fail-safe: a rejected request stores nothing
+   * at all. The write phase is different, because storing bytes and recording a
+   * row for them are two separate acts with no shared transaction — the D1
+   * driver has no interactive transaction, and the media table is a different
+   * concern from `product_images` by design. A batch of eight therefore has a
+   * window in which some objects exist and no row points at them: a later
+   * `put` can fail, or the row insert can lose a race against a deleted
+   * product.
+   *
+   * Rather than leave that window open, every failure inside it triggers
+   * {@link SellerService.compensateStoredMedia}, which deletes the keys *this
+   * request* wrote. It is best-effort by construction: a key that cannot be
+   * removed is not fatal, because the alternative — replacing the caller's real
+   * error with a storage fault — would be strictly worse for both the seller and
+   * whoever reads the logs. A process that dies mid-request can still leave an
+   * object behind; that is the media-byte GC a later phase owns, exactly as
+   * {@link SellerService.deleteProductImage} deliberately leaves its bytes in
+   * place.
    */
   async addProductImages(
     user: UserRecord,
@@ -592,50 +613,91 @@ export class SellerService {
     const nextSortOrder =
       product.images.reduce((highest, image) => Math.max(highest, image.sortOrder), -1) + 1;
 
+    // Keys written by *this* request, in write order. Appended only after a
+    // successful `put`, so compensation can never target a key that was never
+    // stored (deleting one is harmless by the port's contract, but tracking the
+    // real set is what makes the intent checkable).
     const storageKeys: string[] = [];
-    for (const [index, upload] of uploads.entries()) {
-      const image = validated[index];
-      if (image === undefined) {
-        throw new Error("validated image missing for a validated upload");
+    try {
+      for (const [index, upload] of uploads.entries()) {
+        const image = validated[index];
+        if (image === undefined) {
+          throw new Error("validated image missing for a validated upload");
+        }
+        const storageKey = await buildProductImageStorageKey(productId, image.contentType, upload.bytes);
+        await this.mediaStorage.put(storageKey, {
+          // A copy the storage driver owns: some drivers bind the buffer
+          // asynchronously, and the caller's array must not be mutable underneath
+          // the write or the digest it was keyed by.
+          bytes: upload.bytes.slice().buffer as ArrayBuffer,
+          contentType: image.contentType,
+          size: image.byteSize,
+        });
+        storageKeys.push(storageKey);
       }
-      const storageKey = await buildProductImageStorageKey(productId, image.contentType, upload.bytes);
-      await this.mediaStorage.put(storageKey, {
-        // A copy the storage driver owns: some drivers bind the buffer
-        // asynchronously, and the caller's array must not be mutable underneath
-        // the write or the digest it was keyed by.
-        bytes: upload.bytes.slice().buffer as ArrayBuffer,
-        contentType: image.contentType,
-        size: image.byteSize,
+
+      const stored: AddProductImageInput[] = validated.map((image, index) => ({
+        // The public URL is derived from the opaque key, and remains the only
+        // column a reader ever needs.
+        url: this.mediaStorage.publicUrl(storageKeys[index] as string),
+        storageKey: storageKeys[index] as string,
+        altText: image.altText,
+        sortOrder: nextSortOrder + index,
+      }));
+
+      const result = await this.productRepository.addProductImages({
+        productId,
+        storeId: store.id,
+        images: stored,
       });
-      storageKeys.push(storageKey);
+      if (!result.ok) {
+        // The only reason the repository can still refuse is a race (the product
+        // was deleted or moved between the check above and the insert). The objects
+        // are already stored; report the ownership failure rather than pretending
+        // the upload succeeded, and let the compensation below reclaim them.
+        throw new AppError(
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          "This product is not available.",
+          404,
+        );
+      }
+      return result.images.map(mapProductImageToDto);
+    } catch (error) {
+      await this.compensateStoredMedia(storageKeys);
+      throw error;
     }
+  }
 
-    const stored: AddProductImageInput[] = validated.map((image, index) => ({
-      // The public URL is derived from the opaque key, and remains the only
-      // column a reader ever needs.
-      url: this.mediaStorage.publicUrl(storageKeys[index] as string),
-      storageKey: storageKeys[index] as string,
-      altText: image.altText,
-      sortOrder: nextSortOrder + index,
-    }));
-
-    const result = await this.productRepository.addProductImages({
-      productId,
-      storeId: store.id,
-      images: stored,
-    });
-    if (!result.ok) {
-      // The only reason the repository can still refuse is a race (the product
-      // was deleted or moved between the check above and the insert). The objects
-      // are already stored; report the ownership failure rather than pretending
-      // the upload succeeded.
-      throw new AppError(
-        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
-        "This product is not available.",
-        404,
-      );
+  /**
+   * Best-effort removal of the objects one failed upload request had already
+   * written.
+   *
+   * Every failure is swallowed, for two reasons that are the same reason: the
+   * caller is about to be told what went wrong with their *request*, and a
+   * secondary storage fault says nothing useful that the original error does
+   * not. Swallowing also keeps a compensation fault from aborting the loop and
+   * stranding the keys after it — every key written by the request is attempted,
+   * in reverse write order, independently of whether its predecessor succeeded.
+   *
+   * Ordering is reverse because the most recently written key is the most
+   * likely to be the one nothing references yet, and leaving the rest in place
+   * would be equally wrong; the order is therefore chosen only because the
+   * newest-first sequence is the one a future reader can most easily reason
+   * about against the write loop.
+   *
+   * Orphan bytes that survive this — a crash mid-request, a permanently
+   * unreachable backend — are not recoverable here by construction. They belong
+   * to the media-byte GC of a later phase, which is also why
+   * {@link SellerService.deleteProductImage} never removes bytes itself.
+   */
+  private async compensateStoredMedia(storageKeys: readonly string[]): Promise<void> {
+    for (const storageKey of [...storageKeys].reverse()) {
+      try {
+        await this.mediaStorage.delete(storageKey);
+      } catch {
+        // Intentionally ignored; see the method comment.
+      }
     }
-    return result.images.map(mapProductImageToDto);
   }
 
   /**

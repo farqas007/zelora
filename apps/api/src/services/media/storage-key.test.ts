@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ProductImageContentType } from "@zelora/shared";
 import { PRODUCT_IMAGE_LIMITS } from "@zelora/shared";
-import { buildProductImageStorageKey } from "./storage-key";
+import { buildProductImageStorageKey, isProductImageStorageKey } from "./storage-key";
 
 /**
  * Unit tests for the product-scoped, content-addressed storage key.
@@ -195,3 +195,81 @@ async function digestOf(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest("SHA-256", bytes);
   return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
+
+describe("isProductImageStorageKey", () => {
+  /** A key the builder itself produced, for the four issued extensions. */
+  async function builtKey(contentType: ProductImageContentType): Promise<string> {
+    return buildProductImageStorageKey(PRODUCT_ID, contentType, KEYS[contentType].bytes);
+  }
+
+  it("accepts every key the builder can emit, for every supported type", async () => {
+    for (const contentType of Object.keys(KEYS) as ProductImageContentType[]) {
+      const key = await builtKey(contentType);
+
+      // The round trip is the whole point: the predicate is the exact inverse of
+      // the builder, so anything the platform can store, the public read path can
+      // address.
+      expect(isProductImageStorageKey(key), key).toBe(true);
+    }
+  });
+
+  it("accepts a key whose digest is any lowercase hex of the right length", async () => {
+    for (const digest of ["0".repeat(64), "f".repeat(64), "0123456789abcdef".repeat(4)]) {
+      expect(isProductImageStorageKey(`products/${PRODUCT_ID}/${digest}.webp`)).toBe(true);
+    }
+  });
+
+  it("refuses anything that is not exactly products/<uuidv7>/<64 hex>.<issued ext>", () => {
+    const digest = "a".repeat(64);
+    const refused = [
+      // Segment count.
+      "",
+      "products",
+      `products/${PRODUCT_ID}`,
+      `products/${PRODUCT_ID}/${digest}.png/extra`,
+      `${digest}.png`,
+      // Prefix other than the media namespace, so a key from another part of the
+      // store cannot be addressed through this route.
+      `admin/${PRODUCT_ID}/${digest}.png`,
+      `uploads/${PRODUCT_ID}/${digest}.png`,
+      `Products/${PRODUCT_ID}/${digest}.png`,
+      // Product id: a valid-looking UUID that is not v7, and a non-id at all.
+      `products/01955f00-0000-4000-8000-000000000001/${digest}.png`,
+      `products/01955f00-0000-7000-c000-000000000001/${digest}.png`,
+      `products/01955f00-0000-7000-8000-00000000000/${digest}.png`,
+      `products/01955f00-0000-7000-8000-00000000000Z/${digest}.png`,
+      `products/01955F00-0000-7000-8000-000000000001/${digest}.png`,
+      `products/not-a-uuid/${digest}.png`,
+      `products//${digest}.png`,
+      `products/../${digest}.png`,
+      // Digest: wrong length, not hex, and uppercase.
+      `products/${PRODUCT_ID}/.png`,
+      `products/${PRODUCT_ID}/.png.png`,
+      `products/${PRODUCT_ID}/${digest}.`,
+      `products/${PRODUCT_ID}/${digest.slice(0, 63)}.png`,
+      `products/${PRODUCT_ID}/${digest}a.png`,
+      `products/${PRODUCT_ID}${"a".repeat(64)}.png`,
+      `products/${PRODUCT_ID}/${"A".repeat(64)}.png`,
+      `products/${PRODUCT_ID}/${"g".repeat(64)}.png`,
+      `products/${PRODUCT_ID}/${"-".repeat(64)}.png`,
+      // Extension: not one the platform issues, and a client-chosen one that
+      // would let arbitrary bytes be served as an image.
+      `products/${PRODUCT_ID}/${digest}.svg`,
+      `products/${PRODUCT_ID}/${digest}.gif`,
+      `products/${PRODUCT_ID}/${digest}.exe`,
+      `products/${PRODUCT_ID}/${digest}.png.png`,
+      `products/${PRODUCT_ID}/${digest}.PNG`,
+      `products/${PRODUCT_ID}/${digest}`,
+      // Traversal and encodings of it: refused structurally, never rewritten.
+      `products/${PRODUCT_ID}/../../etc/passwd.png`,
+      `products/../../etc/${digest}.png`,
+      `products/${PRODUCT_ID}..%2f..%2fetc/${digest}.png`,
+      "products\\" + PRODUCT_ID + "\\" + digest + ".png",
+      `products/${PRODUCT_ID}/${digest}.png `,
+    ];
+
+    for (const value of refused) {
+      expect(isProductImageStorageKey(value), `expected ${JSON.stringify(value)} to be refused`).toBe(false);
+    }
+  });
+});

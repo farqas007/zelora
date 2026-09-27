@@ -1,4 +1,5 @@
 import type { ProductImageContentType } from "@zelora/shared";
+import { isValidId } from "@zelora/db/ids";
 import { PRODUCT_IMAGE_FILE_EXTENSIONS } from "./image-validation";
 
 /**
@@ -30,6 +31,11 @@ import { PRODUCT_IMAGE_FILE_EXTENSIONS } from "./image-validation";
  *
  * Web Crypto only — no Node `crypto` import and no `Buffer` — so this runs in
  * the Cloudflare Worker unchanged.
+ *
+ * Because the key *is* the addressing scheme of a public URL, this module also
+ * owns the reverse check {@link isProductImageStorageKey}, which the public
+ * media read path uses to decide whether a key from a URL is one the platform
+ * could have issued.
  */
 
 /** Directory prefix for product media, so a deployment can recognise its own objects. */
@@ -84,4 +90,50 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((value) => value.toString(16).padStart(2, "0"))
     .join("");
+}
+
+/** Every extension {@link buildProductImageStorageKey} can emit. */
+const STORAGE_KEY_EXTENSIONS: ReadonlySet<string> = new Set(
+  Object.values(PRODUCT_IMAGE_FILE_EXTENSIONS),
+);
+
+/**
+ * Whether `value` is a storage key this platform could have produced.
+ *
+ * The **exact inverse** of {@link buildProductImageStorageKey}'s shape, written
+ * next to it so the two cannot drift: `products/<uuid>/<64 lowercase hex>.<ext>`
+ * with `ext` drawn from the same extension table the builder uses and the
+ * product id checked by the same `isValidId` the rest of the seller surface uses.
+ *
+ * It exists for the public read path, where the key arrives from a URL rather
+ * than from this module. Because the accepted shape is a closed, fully literal
+ * structure — three segments, no empty segment, no `.` or `..` segment, no
+ * percent sign, no backslash, no leading slash — a traversal attempt cannot be
+ * *rewritten* into something safe; it simply fails to match and is refused
+ * before it ever reaches a storage driver. Rejecting rather than sanitising is
+ * the point: a key is server-generated, so anything unrecognised is either a
+ * mistake or an attack, and neither is worth guessing about.
+ */
+export function isProductImageStorageKey(value: string): boolean {
+  const segments = value.split("/");
+  if (segments.length !== 3) {
+    return false;
+  }
+  const [prefix, productId, filename] = segments as [string, string, string];
+  if (prefix !== PRODUCT_MEDIA_PREFIX || !isValidId(productId)) {
+    return false;
+  }
+
+  // `lastIndexOf` rather than splitting on every dot, so the digest half is
+  // checked for being *only* hex — a filename with an extra dot inside it
+  // cannot pass as `digest.ext`.
+  const separator = filename.lastIndexOf(".");
+  if (separator <= 0) {
+    return false;
+  }
+  const digest = filename.slice(0, separator);
+  if (digest.length !== SHA256_HEX_LENGTH || !/^[0-9a-f]+$/.test(digest)) {
+    return false;
+  }
+  return STORAGE_KEY_EXTENSIONS.has(filename.slice(separator + 1));
 }

@@ -310,6 +310,47 @@ export interface SellerProductImageListData {
 /** Success payload for `GET /api/seller/products/:id/images`. */
 export type ListSellerProductImagesEnvelope = ApiEnvelope<SellerProductImageListData>;
 
+/**
+ * Success payload for `POST /api/seller/products/:id/images`: the rows the
+ * upload actually created, in submitted order.
+ *
+ * The created rows (rather than a fresh full listing) are returned so a client
+ * can render exactly what it just uploaded without a follow-up read. They are
+ * plain {@link ProductImageDto} values, so `storage_key` cannot appear in the
+ * response — the same guarantee the list and detail envelopes already give.
+ */
+export type AddProductImagesEnvelope = ApiEnvelope<ProductImageDto[]>;
+
+/**
+ * Slack reserved on top of the summed per-file maximum for everything that is
+ * not image payload: the multipart boundary markers, the per-part headers
+ * (`Content-Disposition`, `Content-Type`, `Content-Length`), the optional
+ * `altText[]` parts, and general buffer growth in the parser.
+ *
+ * 64 KiB is far more than the framing for eight parts can need while staying
+ * small next to the 12 MiB of payload it protects, so it cannot be used to slip
+ * an extra image past the byte checks.
+ */
+const MULTIPART_OVERHEAD_ALLOWANCE_BYTES = 65_536;
+
+/**
+ * Transport-level ceiling for one image-upload request body.
+ *
+ * **Derived, never a second hand-written number.** The enforced limits are
+ * still the per-file and per-request ones in {@link PRODUCT_IMAGE_LIMITS}: this
+ * value only bounds what the server is willing to *buffer* while parsing
+ * `multipart/form-data`, which Hono materialises in memory in one piece. It is
+ * therefore exactly "the largest legal batch plus framing", so a request that
+ * passes it can still be rejected for carrying a ninth file, an oversized file
+ * or bytes that are not an image — the body limit is a resource guard, never a
+ * substitute for validation.
+ */
+export const PRODUCT_IMAGE_UPLOAD_LIMITS = {
+  maxBodyBytes:
+    PRODUCT_IMAGE_LIMITS.maxFilesPerRequest * PRODUCT_IMAGE_LIMITS.maxBytesPerFile +
+    MULTIPART_OVERHEAD_ALLOWANCE_BYTES,
+} as const;
+
 export interface SellerProductDetailDto extends SellerProductSummaryDto {
   description: string | null;
   variants: SellerProductVariantDetailDto[];

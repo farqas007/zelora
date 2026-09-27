@@ -608,9 +608,16 @@ class FakeMediaStorage implements MediaStorage {
   readonly getCalls: string[] = [];
   /** Keys the fake should report as stored, read back by `get`. */
   readonly objects = new Map<string, MediaObjectOutput>();
+  /** Fail the `put` at this 1-based position, standing in for a storage fault. */
+  failPutAt: number | null = null;
+  /** Fail every `delete`, standing in for a backend that has become unreachable. */
+  failAllDeletes: boolean = false;
 
   async put(key: string, object: MediaObjectInput): Promise<void> {
     this.putCalls.push({ key, object });
+    if (this.failPutAt !== null && this.putCalls.length === this.failPutAt) {
+      throw new Error("media storage is unavailable");
+    }
     this.objects.set(key, { bytes: object.bytes, contentType: object.contentType });
   }
 
@@ -621,6 +628,9 @@ class FakeMediaStorage implements MediaStorage {
 
   async delete(key: string): Promise<void> {
     this.deleteCalls.push(key);
+    if (this.failAllDeletes) {
+      throw new Error("media storage is unavailable");
+    }
     this.objects.delete(key);
   }
 
@@ -1816,6 +1826,124 @@ describe("SellerService", () => {
         SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
         404,
       );
+    });
+
+    it("deletes every object it wrote when a later put fails", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(127);
+      mediaStorage.failPutAt = 2;
+
+      // The batch is not a transaction, so the first object exists with no row
+      // pointing at it the moment the second write faults.
+      await expect(
+        service.addProductImages(makeUser({ role: "seller" }), productId, [
+          { bytes: pngBytes(1) },
+          { bytes: jpegBytes() },
+          { bytes: pngBytes(3) },
+        ]),
+      ).rejects.toThrow("media storage is unavailable");
+      expect(mediaStorage.putCalls).toHaveLength(2);
+      expect(mediaStorage.deleteCalls).toEqual([mediaStorage.putCalls[0]?.key]);
+      expect(mediaStorage.objects.size).toBe(0);
+      expect(products.addImagesCalls).toHaveLength(0);
+    });
+
+    it("does not delete a key whose put never succeeded", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(128);
+      mediaStorage.failPutAt = 1;
+
+      await expect(
+        service.addProductImages(makeUser({ role: "seller" }), productId, [{ bytes: pngBytes() }]),
+      ).rejects.toThrow("media storage is unavailable");
+      // The key exists only as a value that was computed, never as a stored
+      // object, so there is nothing to reclaim and nothing to delete.
+      expect(mediaStorage.deleteCalls).toEqual([]);
+    });
+
+    it("deletes every object it wrote when the row insert loses the race", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(129);
+      products.forceAddImagesConflict = true;
+
+      await expectSellerError(
+        () =>
+          service.addProductImages(makeUser({ role: "seller" }), productId, [
+            { bytes: pngBytes(1) },
+            { bytes: jpegBytes() },
+          ]),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+      // All eight-or-fewer objects are stored by the time the insert refuses, so
+      // all of them are the orphans; leaving any behind would be indistinguishable
+      // from a product whose images silently failed to attach.
+      expect(mediaStorage.putCalls).toHaveLength(2);
+      expect([...mediaStorage.deleteCalls].sort()).toEqual(
+        mediaStorage.putCalls.map((call) => call.key).sort(),
+      );
+      expect(mediaStorage.objects.size).toBe(0);
+    });
+
+    it("reclaims in reverse write order, newest key first", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(130);
+      products.forceAddImagesConflict = true;
+
+      await expectSellerError(
+        () =>
+          service.addProductImages(makeUser({ role: "seller" }), productId, [
+            { bytes: pngBytes(1) },
+            { bytes: jpegBytes() },
+            { bytes: pngBytes(3) },
+          ]),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+      expect(mediaStorage.deleteCalls).toEqual(
+        mediaStorage.putCalls.map((call) => call.key).reverse(),
+      );
+    });
+
+    it("still surfaces the original error when a reclaim delete also fails", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(131);
+      mediaStorage.failAllDeletes = true;
+
+      // The row insert is the failure the caller must hear about; a secondary
+      // storage fault during the reclaim says nothing useful about their
+      // request, and swapping it in for the real error would send them looking
+      // in the wrong place. The orphaned object is a GC concern, not a reason to
+      // answer with a different failure.
+      products.forceAddImagesConflict = true;
+      await expectSellerError(
+        () =>
+          service.addProductImages(makeUser({ role: "seller" }), productId, [
+            { bytes: pngBytes(1) },
+            { bytes: jpegBytes() },
+          ]),
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        404,
+      );
+      // Every key written is still *attempted*: one failure must not abort the
+      // loop and strand the keys after it.
+      expect(mediaStorage.deleteCalls).toHaveLength(2);
+    });
+
+    it("leaves a successful batch's objects in place", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(132);
+
+      await service.addProductImages(makeUser({ role: "seller" }), productId, [
+        { bytes: pngBytes(1) },
+        { bytes: jpegBytes() },
+      ]);
+
+      // Compensation is scoped to failures: deleting on the success path would
+      // leave rows pointing at nothing.
+      expect(mediaStorage.deleteCalls).toEqual([]);
+      expect(mediaStorage.objects.size).toBe(2);
+      expect(products.addImagesCalls).toHaveLength(1);
     });
   });
 

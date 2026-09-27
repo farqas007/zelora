@@ -6,7 +6,29 @@
   "vars": {
     // Production browser origin for the API's CORS policy. Keep in sync with
     // the deployed frontend (https://zelora-web.farqas007.workers.dev).
-    "CORS_ORIGIN": "https://zelora-web.farqas007.workers.dev"
+    "CORS_ORIGIN": "https://zelora-web.farqas007.workers.dev",
+
+    // D1 is the media backend. Product-image bytes are stored in the `media_objects`
+    // table through the existing `DB` binding, so media needs no bucket, no
+    // object store and no additional Cloudflare service (see the D1 media storage
+    // driver in src/services/media/d1.ts).
+    //
+    // This is the setting that keeps the R2 backend from ever being selected: the
+    // code's own default stays "r2" so no existing deployment changes behaviour by
+    // upgrading, and pinning it here to "d1" is what makes THIS deployment
+    // D1-backed without touching that default.
+    "MEDIA_BACKEND": "d1",
+
+    // Absolute base the stored media is publicly readable from. It must end in
+    // `/media`, because that is the path the public media route is mounted at
+    // (see src/routes/media.ts and the `/media` mount in src/app.ts): a stored
+    // key is appended to this base verbatim, and the resulting URL is what ends up
+    // in `product_images.url`.
+    //
+    // Required to enable media at all. While it is unset the media storage port
+    // stays fail-closed and both the upload and the read path fail loudly instead
+    // of storing bytes whose URLs resolve to nothing.
+    "MEDIA_PUBLIC_BASE_URL": "https://zelora-api.farqas007.workers.dev/media"
 
     // !!! SECRET — NEVER ADD A REAL VALUE TO `vars` !!!
     // The first-admin bootstrap secret lives in a Cloudflare secret binding, set
@@ -51,22 +73,20 @@
   ],
   "r2_buckets": [
     {
-      // Raw R2 binding name, exposed to the Worker as `env.MEDIA`. Holds
-      // seller-uploaded product images; see src/services/media/r2.ts.
+      // Raw R2 binding name, exposed to the Worker as `env.MEDIA`.
       //
-      // Creating the bucket is a one-off operator step and is NOT part of this
-      // repository's scripts (nothing here touches remote infrastructure):
+      // INERT IN THIS DEPLOYMENT. `MEDIA_BACKEND` is pinned to "d1" above, so
+      // `createWorkerMediaStorage` (src/worker.ts) never reads `env.MEDIA` and no
+      // bucket is created, required or billed for. The binding is left declared
+      // rather than deleted because removing it would delete an existing feature
+      // (the R2 media driver and its configuration) that this phase has not been
+      // asked to remove; it is simply not selected.
       //
-      //   wrangler r2 bucket create zelora-media
+      // Do NOT run `wrangler r2 bucket create zelora-media` for this deployment.
       //
-      // Media storage stays OFF until BOTH this binding and
-      // MEDIA_PUBLIC_BASE_URL are configured (set the latter in `vars` above, or
-      // as a deployment variable). Either one alone is inert rather than an
-      // error: because this binding is declared here, `env.MEDIA` is always
-      // present after a deploy, so an operator who has not chosen a public base
-      // yet can still deploy and serve every other endpoint. Media operations
-      // then fail loudly instead of storing objects whose URLs resolve to
-      // nothing. See `createWorkerMediaStorage` in src/worker.ts.
+      // The binding is only meaningful if `MEDIA_BACKEND` is set to "r2" AND
+      // `MEDIA_PUBLIC_BASE_URL` is configured, which is the behaviour the driver
+      // and its tests still cover.
       "binding": "MEDIA",
       "bucket_name": "zelora-media"
     }

@@ -33,10 +33,15 @@ import type {
   VariantRecord,
 } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
-import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
+import { PRODUCT_IMAGE_UPLOAD_LIMITS, type ApiFailure, type AuthUserResponse, type ProductImageDto } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
 import type { ClientIpResolver } from "../services/client-ip";
+import type {
+  MediaObjectInput,
+  MediaObjectOutput,
+  MediaStorage,
+} from "../services/media/storage";
 import { MemoryWindowRateLimiter } from "../services/rate-limit";
 
 /**
@@ -326,8 +331,12 @@ class FakeProductRepository implements ProductRepository {
   setInventoryCalls: SetInventoryInput[] = [];
   listCalls: Array<{ storeId: string; query: ProductListQuery }> = [];
   listImagesCalls: Array<{ productId: string; storeId: string }> = [];
+  /** Every `addProductImages` input, so stored keys, URLs and order are assertable. */
+  addImagesCalls: AddProductImagesInput[] = [];
   forceCreateConflict: boolean = false;
   forceSkuConflict: boolean = false;
+  /** Make the image insert refuse, standing in for the product vanishing mid-upload. */
+  forceAddImagesConflict: boolean = false;
 
   async listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage> {
     this.listCalls.push({ storeId, query });
@@ -506,8 +515,12 @@ class FakeProductRepository implements ProductRepository {
    * one-primary-per-product invariant can never be violated from this path.
    */
   async addProductImages(input: AddProductImagesInput): Promise<AddProductImagesResult> {
+    this.addImagesCalls.push(input);
     const product = this.products.get(input.productId);
     if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    if (this.forceAddImagesConflict) {
       return { ok: false, reason: "PRODUCT_NOT_FOUND" };
     }
     const createdAt = new Date();
@@ -529,12 +542,11 @@ class FakeProductRepository implements ProductRepository {
   }
 
   /**
-   * Image management is a service-only surface in this phase: no route reaches
-   * it yet, so the fake refuses rather than pretending to implement behaviour no
-   * test can observe. Present only to satisfy the port.
+   * Counts an owned product's images, and counts `0` for a product owned by
+   * another store — the same no-existence-leak answer both real drivers give.
    */
-  async countImagesByProduct(): Promise<number> {
-    throw new Error("unexpected product call");
+  async countImagesByProduct(productId: string, storeId: string): Promise<number> {
+    return this.collectImages(productId, storeId).length;
   }
 
   async deleteProductImage(): Promise<DeleteProductImageResult> {
@@ -572,8 +584,10 @@ class FakeProductRepository implements ProductRepository {
     this.setInventoryCalls = [];
     this.listCalls = [];
     this.listImagesCalls = [];
+    this.addImagesCalls = [];
     this.forceCreateConflict = false;
     this.forceSkuConflict = false;
+    this.forceAddImagesConflict = false;
   }
 }
 
@@ -607,6 +621,43 @@ class FakeCatalogRepository implements CatalogRepository {
 
   clear(): void {
     this.categories = [];
+  }
+}
+
+/**
+ * In-memory media storage for the upload route tests.
+ *
+ * Records every write so a test can assert what reached storage (and, just as
+ * importantly, that nothing did), and can be told to fail a specific `put` so
+ * the compensation path is reachable from the HTTP surface.
+ */
+class FakeMediaStorage implements MediaStorage {
+  readonly putCalls: Array<{ key: string; object: MediaObjectInput }> = [];
+  readonly deleteCalls: string[] = [];
+  readonly objects = new Map<string, MediaObjectOutput>();
+
+  /** Fail the `put` at this 1-based position, standing in for a storage fault. */
+  failPutAt: number | null = null;
+
+  async put(key: string, object: MediaObjectInput): Promise<void> {
+    this.putCalls.push({ key, object });
+    if (this.failPutAt !== null && this.putCalls.length === this.failPutAt) {
+      throw new Error("media storage is unavailable");
+    }
+    this.objects.set(key, { bytes: object.bytes, contentType: object.contentType });
+  }
+
+  async get(key: string): Promise<MediaObjectOutput | null> {
+    return this.objects.get(key) ?? null;
+  }
+
+  async delete(key: string): Promise<void> {
+    this.deleteCalls.push(key);
+    this.objects.delete(key);
+  }
+
+  publicUrl(key: string): string {
+    return `https://media.test/${key}`;
   }
 }
 
@@ -2901,5 +2952,999 @@ describe("POST /api/seller/products/:id variants, inventory and publish", () => 
       );
       expect(publishResponse.status).toBe(200);
     });
+  });
+});
+/**
+ * Header-shaped byte fixtures. Only the first bytes are ever sniffed, so these
+ * exercise exactly the path a real encoder's output would; each is padded past
+ * the sniffer's 16-byte floor so a failure is about the signature under test
+ * rather than about a buffer too short to identify.
+ */
+function imageBytes(signature: number[]): Uint8Array {
+  const bytes = new Uint8Array(32);
+  bytes.set(signature);
+  return bytes;
+}
+
+function pngBytes(seed = 0): Uint8Array {
+  return imageBytes([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d,
+    0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x10, seed & 0xff,
+  ]);
+}
+
+function jpegBytes(): Uint8Array {
+  return imageBytes([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00]);
+}
+
+describe("POST /api/seller/products/:id/images", () => {
+  const baseConfig: AppConfig = {
+    nodeEnv: "test",
+    host: "127.0.0.1",
+    port: 3001,
+    appVersion: "0.1.0",
+    corsOrigin: "http://localhost:5173",
+    sessionCookieName: "zelora_session",
+    sessionTtlSeconds: 2_592_000,
+    sessionCookieSecure: false,
+    pbkdf2Iterations: 1_000,
+    rateLimitEnabled: true,
+    rateLimitTrustProxy: false,
+    rateLimitLoginIpMax: 20,
+    rateLimitLoginIpWindowSeconds: 900,
+    rateLimitLoginEmailMax: 10,
+    rateLimitLoginEmailWindowSeconds: 900,
+    rateLimitRegisterIpMax: 10,
+    rateLimitRegisterIpWindowSeconds: 3_600,
+    rateLimitSellerOnboardingIpMax: 10,
+    rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    rateLimitProductCreateIpMax: 30,
+    rateLimitProductCreateIpWindowSeconds: 3_600,
+    sessionLastUsedThrottleSeconds: 300,
+    sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
+    mediaPublicBaseUrl: "https://media.test",
+    mediaLocalRoot: ".data/media",
+  };
+
+  const headerIpResolver: ClientIpResolver = {
+    resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+  };
+
+  const inertCartRepository: CartRepository = {
+    getCartByUserId: () => {
+      throw new Error("unexpected cart call");
+    },
+    createCart: () => {
+      throw new Error("unexpected cart call");
+    },
+    addItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    updateItemQuantity: () => {
+      throw new Error("unexpected cart call");
+    },
+    removeItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    clearCart: () => {
+      throw new Error("unexpected cart call");
+    },
+  };
+
+  const inertAuditLogRepository: AuditLogRepository = {
+    create: () => {
+      throw new Error("unexpected audit log call");
+    },
+    listByAction: () => {
+      throw new Error("unexpected audit log call");
+    },
+  };
+
+  let clock: FakeClock;
+  let userRepository: FakeUserRepository;
+  let sessionRepository: FakeAuthSessionRepository;
+  let sellerRepository: FakeSellerRepository;
+  let productRepository: FakeProductRepository;
+  let catalogRepository: FakeCatalogRepository;
+  let passwordHasher: PasswordHasher;
+  let mediaStorage: FakeMediaStorage;
+  let app: ReturnType<typeof createApp>;
+
+  beforeEach(() => {
+    clock = new FakeClock();
+    userRepository = new FakeUserRepository();
+    sessionRepository = new FakeAuthSessionRepository();
+    sellerRepository = new FakeSellerRepository();
+    productRepository = new FakeProductRepository();
+    catalogRepository = new FakeCatalogRepository();
+    mediaStorage = new FakeMediaStorage();
+    passwordHasher = new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations);
+    app = createApp({
+      config: baseConfig,
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      clientIpResolver: headerIpResolver,
+      mediaStorage,
+    });
+  });
+
+  function extractSessionCookie(response: Response): string {
+    const setCookie = response.headers.get("set-cookie");
+    if (setCookie === null) {
+      throw new Error("expected a set-cookie header");
+    }
+    return setCookie.split(";")[0] ?? "";
+  }
+
+  async function registerUser(
+    email = "seller@example.com",
+  ): Promise<{ cookie: string; csrfToken: string; userId: string }> {
+    const response = await app.request("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: "password123", name: "Ada Lovelace" }),
+    });
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: AuthUserResponse };
+    return {
+      cookie: extractSessionCookie(response),
+      csrfToken: body.data.session.csrfToken,
+      userId: body.data.user.id,
+    };
+  }
+
+  /** Register a customer session, then promote it into an approved seller. */
+  async function registerApprovedSeller(): Promise<{
+    cookie: string;
+    csrfToken: string;
+    userId: string;
+  }> {
+    const session = await registerUser();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, role: "seller" });
+    const now = new Date();
+    sellerRepository.seedProfile({
+      id: "sp-upload",
+      userId: session.userId,
+      slug: "upload-shop",
+      displayName: "Upload Seller",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: "st-upload",
+      sellerProfileId: "sp-upload",
+      name: "Upload Shop",
+      slug: "upload-shop",
+      description: null,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return session;
+  }
+
+  /** Register a seller-role session whose profile is still `pending`. */
+  async function registerPendingSeller(): Promise<{ cookie: string; csrfToken: string }> {
+    const session = await registerUser();
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, role: "seller" });
+    const now = new Date();
+    sellerRepository.seedProfile({
+      id: "sp-upload-pending",
+      userId: session.userId,
+      slug: "pending-upload-shop",
+      displayName: "Pending Upload Seller",
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: "st-upload-pending",
+      sellerProfileId: "sp-upload-pending",
+      name: "Pending Upload Shop",
+      slug: "pending-upload-shop",
+      description: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return { cookie: session.cookie, csrfToken: session.csrfToken };
+  }
+
+  /** Seed a draft product; by default one owned by the approved store. */
+  function seedOwnedProduct(seq: number, storeId = "st-upload"): string {
+    const now = new Date("2026-06-01T00:00:00.000Z");
+    const productId = fakeId(seq);
+    productRepository.seedProduct({
+      id: productId,
+      storeId,
+      slug: `upload-product-${seq}`,
+      name: `Upload Product ${seq}`,
+      description: null,
+      categoryId: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return productId;
+  }
+
+  /** Seed one existing image row at a known display position. */
+  function seedImage(input: {
+    id: string;
+    productId: string;
+    sortOrder: number;
+    isPrimary?: boolean;
+  }): void {
+    productRepository.seedImage({
+      id: input.id,
+      productId: input.productId,
+      url: `https://cdn.test/${input.id}.jpg`,
+      storageKey: null,
+      altText: null,
+      sortOrder: input.sortOrder,
+      isPrimary: input.isPrimary ?? false,
+      createdAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
+  }
+
+  interface UploadPart {
+    field: string;
+    /** File parts carry bytes; a plain string is sent as a text part. */
+    value: string | Uint8Array;
+    filename?: string;
+    type?: string;
+  }
+
+  function buildForm(parts: UploadPart[]): FormData {
+    const form = new FormData();
+    for (const part of parts) {
+      if (typeof part.value === "string") {
+        form.append(part.field, part.value);
+        continue;
+      }
+      form.append(
+        part.field,
+        new File([part.value], part.filename ?? "upload.bin", {
+          type: part.type ?? "application/octet-stream",
+        }),
+      );
+    }
+    return form;
+  }
+
+  async function postImages(
+    productId: string,
+    parts: UploadPart[],
+    cookie?: string,
+    csrfToken?: string,
+    api: ReturnType<typeof createApp> = app,
+  ): Promise<Response> {
+    return api.request(`/api/seller/products/${productId}/images`, {
+      method: "POST",
+      headers: {
+        ...(cookie === undefined ? {} : { Cookie: cookie }),
+        ...(csrfToken === undefined ? {} : { "X-Zelora-CSRF": csrfToken }),
+      },
+      body: buildForm(parts),
+    });
+  }
+
+  async function expectUploadFailure(
+    response: Response,
+    code: string,
+    status: number,
+  ): Promise<ApiFailure> {
+    expect(response.status).toBe(status);
+    const body = (await response.json()) as ApiFailure;
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe(code);
+    return body;
+  }
+
+  it("accepts a single image and returns the created DTOs", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(300);
+
+    const response = await postImages(
+      productId,
+      [{ field: "images[]", value: pngBytes() }],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: ProductImageDto[] };
+    expect(body.ok).toBe(true);
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0]).toMatchObject({
+      productId,
+      sortOrder: 0,
+      isPrimary: false,
+      altText: null,
+    });
+    // The public URL is derived from the stored key, so the two must agree —
+    // that is the only reason a client can read the bytes it just uploaded.
+    const key = mediaStorage.putCalls[0]?.key;
+    expect(key).toBeDefined();
+    expect(body.data[0]?.url).toBe(`https://media.test/${key}`);
+  });
+
+  it("keeps a single images[] part an array rather than collapsing it to a scalar", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(301);
+
+    const response = await postImages(
+      productId,
+      [{ field: "images[]", value: pngBytes() }],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    // A route that forgot `all: true` would hand the service a bare `File`
+    // where it requires an array; the stored row is the observable proof it did
+    // not, and a single image is the common case, not an edge case.
+    expect(response.status).toBe(201);
+    expect(productRepository.addImagesCalls[0]?.images).toHaveLength(1);
+    expect(mediaStorage.putCalls).toHaveLength(1);
+  });
+
+  it("accepts several images with positional alt text and appends after the highest sortOrder", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(302);
+    seedImage({ id: fakeId(303), productId, sortOrder: 4 });
+
+    const response = await postImages(
+      productId,
+      [
+        { field: "images[]", value: pngBytes(1) },
+        { field: "altText[]", value: "Front view" },
+        { field: "images[]", value: jpegBytes() },
+        { field: "altText[]", value: "Side view" },
+      ],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: ProductImageDto[] };
+    expect(body.data.map((image) => image.altText)).toEqual(["Front view", "Side view"]);
+    expect(body.data.map((image) => image.sortOrder)).toEqual([5, 6]);
+    expect(mediaStorage.putCalls.map((call) => call.object.contentType)).toEqual([
+      "image/png",
+      "image/jpeg",
+    ]);
+  });
+
+  it("accepts the maximum batch of eight images", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(304);
+
+    const parts: UploadPart[] = [];
+    for (let index = 0; index < 8; index += 1) {
+      parts.push({ field: "images[]", value: pngBytes(index) });
+    }
+
+    const response = await postImages(productId, parts, session.cookie, session.csrfToken);
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: ProductImageDto[] };
+    expect(body.data).toHaveLength(8);
+    expect(mediaStorage.putCalls).toHaveLength(8);
+  });
+
+  it("rejects a ninth image with 409 IMAGE_LIMIT_REACHED and stores nothing", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(305);
+
+    const parts: UploadPart[] = [];
+    for (let index = 0; index < 9; index += 1) {
+      parts.push({ field: "images[]", value: pngBytes(index) });
+    }
+
+    await expectUploadFailure(
+      await postImages(productId, parts, session.cookie, session.csrfToken),
+      "IMAGE_LIMIT_REACHED",
+      409,
+    );
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects images that would push the product past eight with 409", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(306);
+    for (let index = 0; index < 7; index += 1) {
+      seedImage({ id: fakeId(307 + index), productId, sortOrder: index });
+    }
+
+    const response = await postImages(
+      productId,
+      [
+        { field: "images[]", value: pngBytes(1) },
+        { field: "images[]", value: pngBytes(2) },
+      ],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    await expectUploadFailure(response, "IMAGE_LIMIT_REACHED", 409);
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects unauthenticated callers with 401 before touching storage", async () => {
+    const productId = seedOwnedProduct(310);
+
+    await expectUploadFailure(
+      await postImages(productId, [{ field: "images[]", value: pngBytes() }]),
+      "SESSION_EXPIRED",
+      401,
+    );
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects an authenticated customer with 403 FORBIDDEN", async () => {
+    const session = await registerUser();
+    const productId = seedOwnedProduct(311);
+
+    await expectUploadFailure(
+      await postImages(
+        productId,
+        [{ field: "images[]", value: pngBytes() }],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "FORBIDDEN",
+      403,
+    );
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects a seller whose profile is not approved with 403 SELLER_NOT_APPROVED", async () => {
+    const session = await registerPendingSeller();
+    const productId = seedOwnedProduct(312);
+
+    await expectUploadFailure(
+      await postImages(
+        productId,
+        [{ field: "images[]", value: pngBytes() }],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "SELLER_NOT_APPROVED",
+      403,
+    );
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects a missing or wrong CSRF token with 403 and stores nothing", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(313);
+
+    await expectUploadFailure(
+      await postImages(productId, [{ field: "images[]", value: pngBytes() }], session.cookie),
+      "CSRF_FAILED",
+      403,
+    );
+    await expectUploadFailure(
+      await postImages(
+        productId,
+        [{ field: "images[]", value: pngBytes() }],
+        session.cookie,
+        "not-the-session-token",
+      ),
+      "CSRF_FAILED",
+      403,
+    );
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("gives malformed, unknown and cross-store product ids the same 404", async () => {
+    const session = await registerApprovedSeller();
+    const foreign = seedOwnedProduct(314, "st-someone-else");
+
+    for (const productId of ["not-a-uuid", fakeId(315), foreign]) {
+      await expectUploadFailure(
+        await postImages(
+          productId,
+          [{ field: "images[]", value: pngBytes() }],
+          session.cookie,
+          session.csrfToken,
+        ),
+        "PRODUCT_NOT_FOUND",
+        404,
+      );
+    }
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("validates every file before the first storage write", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(316);
+    const notAnImage = new TextEncoder().encode("this is definitely not an image at all");
+
+    const body = await expectUploadFailure(
+      await postImages(
+        productId,
+        [
+          { field: "images[]", value: pngBytes(1) },
+          { field: "images[]", value: jpegBytes() },
+          { field: "images[]", value: notAnImage },
+        ],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    // The rejection names the offending file's position, and the two valid
+    // leading files were never stored: validation is all-before-any-write.
+    expect(body.error.fields?.imagePosition?.[0]).toContain("Image 3");
+    expect(mediaStorage.putCalls).toHaveLength(0);
+    expect(productRepository.addImagesCalls).toHaveLength(0);
+  });
+
+  it("rejects an oversized image with 422 naming its position", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(317);
+    const tooBig = new Uint8Array(1_572_865);
+    tooBig.set(pngBytes(1));
+
+    const body = await expectUploadFailure(
+      await postImages(
+        productId,
+        [
+          { field: "images[]", value: pngBytes(1) },
+          { field: "images[]", value: tooBig },
+        ],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(body.error.fields?.imagePosition?.[0]).toContain("Image 2");
+    expect(body.error.fields?.imagePosition?.[0]).toContain("1572864");
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("accepts an image of exactly the 1,572,864-byte limit", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(318);
+    const atLimit = new Uint8Array(1_572_864);
+    atLimit.set(pngBytes(1));
+
+    const response = await postImages(
+      productId,
+      [{ field: "images[]", value: atLimit }],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    expect(response.status).toBe(201);
+  });
+
+  it("rejects an empty image part with 422", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(319);
+
+    const body = await expectUploadFailure(
+      await postImages(
+        productId,
+        [{ field: "images[]", value: new Uint8Array(0) }],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(body.error.fields?.imagePosition?.[0]).toContain("empty");
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects bytes that are not one of the four supported image formats", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(335);
+
+    // Two different ways of failing to be a supported image, both refused by the
+    // magic bytes rather than by anything the client claimed: a plain text blob,
+    // and GIF — a real, valid image format that is simply not in the closed set.
+    const notAnImage = new TextEncoder().encode(
+      "GIF89a and other bytes that are certainly not a supported image format",
+    );
+    const gif = imageBytes([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 0x01, 0x00, 0x01, 0x00, 0x80, 0x00, 0x00]);
+    // A declared `image/png` filename and type on bytes that are not PNG: the
+    // client's own claim must not buy a non-image a pass.
+    const liar = { field: "images[]", value: notAnImage, filename: "totally-a.png", type: "image/png" };
+
+    for (const part of [liar, { field: "images[]", value: gif }]) {
+      const failure = await expectUploadFailure(
+        await postImages(productId, [part], session.cookie, session.csrfToken),
+        "VALIDATION_ERROR",
+        422,
+      );
+      const detail = failure.error.fields?.imagePosition?.[0] ?? "";
+      expect(detail).toContain("Image 1");
+      expect(detail).toContain("JPEG, PNG, WebP and AVIF");
+    }
+    expect(mediaStorage.putCalls).toHaveLength(0);
+    expect(productRepository.addImagesCalls).toHaveLength(0);
+  });
+
+  it("rejects a request with no image parts", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(320);
+
+    const body = await expectUploadFailure(
+      await postImages(
+        productId,
+        [{ field: "altText[]", value: "no file here" }],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(body.error.fields?.["images[]"]).toBeDefined();
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects a text part sent as an image", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(321);
+
+    const body = await expectUploadFailure(
+      await postImages(
+        productId,
+        [{ field: "images[]", value: "C:\\Users\\me\\photo.png" }],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(body.error.fields?.["images[]"]?.[0]).toContain("Image 1");
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects a bare images field rather than silently dropping the upload", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(322);
+
+    const body = await expectUploadFailure(
+      await postImages(
+        productId,
+        [{ field: "images", value: pngBytes() }],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(body.error.fields?.["images[]"]?.[0]).toContain("images[]");
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects alt text that cannot be paired one-to-one with the images", async () => {
+    const session = await registerApprovedSeller();
+
+    // Too many descriptions and too few are both silent data corruption: the
+    // second case would leave the trailing image undescribed while looking
+    // successful, so neither is paired on a best-effort basis.
+    const tooMany = seedOwnedProduct(323);
+    const body = await expectUploadFailure(
+      await postImages(
+        tooMany,
+        [
+          { field: "images[]", value: pngBytes(1) },
+          { field: "altText[]", value: "First" },
+          { field: "altText[]", value: "Second" },
+        ],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(body.error.fields?.["altText[]"]?.[0]).toContain("1 expected, 2 received");
+
+    const tooFew = seedOwnedProduct(324);
+    const second = await expectUploadFailure(
+      await postImages(
+        tooFew,
+        [
+          { field: "images[]", value: pngBytes(1) },
+          { field: "altText[]", value: "Only the first" },
+          { field: "images[]", value: jpegBytes() },
+        ],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(second.error.fields?.["altText[]"]?.[0]).toContain("2 expected, 1 received");
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("accepts an empty alt text part as 'no description' for that image", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(325);
+
+    const response = await postImages(
+      productId,
+      [
+        { field: "images[]", value: pngBytes(1) },
+        { field: "altText[]", value: "   " },
+        { field: "images[]", value: jpegBytes() },
+        { field: "altText[]", value: "Described" },
+      ],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    expect(response.status).toBe(201);
+    const body = (await response.json()) as { ok: true; data: ProductImageDto[] };
+    expect(body.data.map((image) => image.altText)).toEqual([null, "Described"]);
+  });
+
+  it("rejects over-long alt text with 422 naming its position", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(326);
+
+    const body = await expectUploadFailure(
+      await postImages(
+        productId,
+        [
+          { field: "images[]", value: pngBytes(1) },
+          { field: "altText[]", value: "x".repeat(201) },
+        ],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "VALIDATION_ERROR",
+      422,
+    );
+    expect(body.error.fields?.imagePosition?.[0]).toContain("Image 1");
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("rejects a JSON body with 422 rather than 500", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(327);
+
+    const response = await app.request(`/api/seller/products/${productId}/images`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: session.cookie,
+        "X-Zelora-CSRF": session.csrfToken,
+      },
+      body: JSON.stringify({ images: [] }),
+    });
+
+    const body = await expectUploadFailure(response, "VALIDATION_ERROR", 422);
+    expect(body.error.fields?.contentType).toBeDefined();
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("answers an oversized request with 422, never 500", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(328);
+
+    // One byte past the transport ceiling. Hono's own `bodyLimit` failure is an
+    // `HTTPException(413)`, and this app's error boundary replaces the default
+    // handler that understood it — so an unhandled limit breach would surface
+    // to the seller as a 500. It must not.
+    const tooBig = new Uint8Array(PRODUCT_IMAGE_UPLOAD_LIMITS.maxBodyBytes + 1);
+    const response = await postImages(
+      productId,
+      [{ field: "images[]", value: tooBig }],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    const body = await expectUploadFailure(response, "VALIDATION_ERROR", 422);
+    expect(body.error.fields?.images?.[0]).toContain(
+      String(PRODUCT_IMAGE_UPLOAD_LIMITS.maxBodyBytes),
+    );
+    expect(mediaStorage.putCalls).toHaveLength(0);
+  });
+
+  it("never exposes the storage key as a response field", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(329);
+
+    const response = await postImages(
+      productId,
+      [{ field: "images[]", value: pngBytes() }],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    expect(response.status).toBe(201);
+    const raw = await response.text();
+    expect(raw).not.toContain("storageKey");
+    expect(raw).not.toContain("storage_key");
+    const body = JSON.parse(raw) as { data: Array<Record<string, unknown>> };
+    // The DTO shape is the guarantee: the key may appear inside the public URL
+    // by design, but it is never a field of its own.
+    expect(Object.keys(body.data[0] ?? {}).sort()).toEqual([
+      "altText",
+      "createdAt",
+      "id",
+      "isPrimary",
+      "productId",
+      "sortOrder",
+      "url",
+    ]);
+  });
+
+  it("ignores the client filename and declared MIME type", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(330);
+
+    const response = await postImages(
+      productId,
+      [
+        {
+          field: "images[]",
+          value: jpegBytes(),
+          filename: "../../etc/passwd.svg",
+          type: "image/svg+xml",
+        },
+      ],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    expect(response.status).toBe(201);
+    const key = mediaStorage.putCalls[0]?.key ?? "";
+    expect(key.startsWith(`products/${productId}/`)).toBe(true);
+    expect(key.endsWith(".jpg")).toBe(true);
+    expect(mediaStorage.putCalls[0]?.object.contentType).toBe("image/jpeg");
+  });
+
+  it("reclaims already-stored objects when a later put fails, and reports the fault as 500", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(331);
+    mediaStorage.failPutAt = 2;
+
+    const response = await postImages(
+      productId,
+      [
+        { field: "images[]", value: pngBytes(1) },
+        { field: "images[]", value: jpegBytes() },
+        { field: "images[]", value: pngBytes(3) },
+      ],
+      session.cookie,
+      session.csrfToken,
+    );
+
+    // A storage fault is an infrastructure failure, not a client mistake, so it
+    // must not be dressed up as one — and the object written before it must not
+    // be left behind with no row pointing at it.
+    const body = await expectUploadFailure(response, "INTERNAL_ERROR", 500);
+    expect(body.error.message).toBe("Internal server error.");
+    expect(mediaStorage.deleteCalls).toEqual([mediaStorage.putCalls[0]?.key]);
+    expect(mediaStorage.objects.size).toBe(0);
+  });
+
+  it("reclaims every stored object when the image insert loses its race", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(332);
+    productRepository.forceAddImagesConflict = true;
+
+    await expectUploadFailure(
+      await postImages(
+        productId,
+        [
+          { field: "images[]", value: pngBytes(1) },
+          { field: "images[]", value: jpegBytes() },
+        ],
+        session.cookie,
+        session.csrfToken,
+      ),
+      "PRODUCT_NOT_FOUND",
+      404,
+    );
+    expect(mediaStorage.putCalls).toHaveLength(2);
+    expect([...mediaStorage.deleteCalls].sort()).toEqual(
+      mediaStorage.putCalls.map((call) => call.key).sort(),
+    );
+    expect(mediaStorage.objects.size).toBe(0);
+  });
+
+  it("reports a deployment with no media storage as 500, not as a silent success", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(333);
+    const unconfiguredApp = createApp({
+      config: { ...baseConfig, mediaPublicBaseUrl: null },
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      clientIpResolver: headerIpResolver,
+    });
+
+    const response = await unconfiguredApp.request(
+      `/api/seller/products/${productId}/images`,
+      {
+        method: "POST",
+        headers: { Cookie: session.cookie, "X-Zelora-CSRF": session.csrfToken },
+        body: buildForm([{ field: "images[]", value: pngBytes() }]),
+      },
+    );
+
+    // Fail closed and say nothing about the deployment's internals.
+    const body = await expectUploadFailure(response, "INTERNAL_ERROR", 500);
+    expect(body.error.message).toBe("Internal server error.");
+    expect(body.error.message).not.toContain("MEDIA_PUBLIC_BASE_URL");
+    expect(productRepository.addImagesCalls).toHaveLength(0);
+  });
+
+  it("spends from its own rate-limit scope, leaving the other seller writes alone", async () => {
+    const session = await registerApprovedSeller();
+    const productId = seedOwnedProduct(334);
+    const limitedApp = createApp({
+      config: { ...baseConfig, rateLimitProductCreateIpMax: 1 },
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      clientIpResolver: headerIpResolver,
+      mediaStorage,
+    });
+
+    const upload = () =>
+      limitedApp.request(`/api/seller/products/${productId}/images`, {
+        method: "POST",
+        headers: {
+          Cookie: session.cookie,
+          "X-Zelora-CSRF": session.csrfToken,
+          "X-Test-IP": "198.51.100.90",
+        },
+        body: buildForm([{ field: "images[]", value: pngBytes(1) }]),
+      });
+
+    expect((await upload()).status).toBe(201);
+    const limited = await upload();
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).not.toBeNull();
+
+    // The variant bucket is a separate scope, so a seller throttled on uploads
+    // can still manage variants.
+    const variant = await limitedApp.request(`/api/seller/products/${productId}/variants`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: session.cookie,
+        "X-Zelora-CSRF": session.csrfToken,
+        "X-Test-IP": "198.51.100.90",
+      },
+      body: JSON.stringify({ name: "Standard", priceAmountCents: 49900 }),
+    });
+    expect(variant.status).toBe(201);
   });
 });

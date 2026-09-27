@@ -1,5 +1,6 @@
 import type {
   AddCartItemRequest,
+  AddProductImagesEnvelope,
   ApiEnvelope,
   ApiErrorBody,
   AuthCsrfEnvelope,
@@ -13,6 +14,7 @@ import type {
   CreateProductRequest,
   CreateProductVariantEnvelope,
   CreateProductVariantRequest,
+  DeleteProductImageEnvelope,
   GetSellerProductEnvelope,
   HealthResponse,
   ListSellerProductImagesEnvelope,
@@ -29,6 +31,7 @@ import type {
   SellerListProductsRequest,
   SetInventoryEnvelope,
   SetInventoryRequest,
+  SetPrimaryProductImageEnvelope,
   StorefrontEnvelope,
   StorefrontRequest,
   UpdateCartItemRequest,
@@ -46,10 +49,32 @@ import type {
  * This module is deliberately React-independent: callers wire in their own
  * CSRF token holder (a closure over in-memory state) and receive typed
  * {@link ApiEnvelope} responses straight from the existing shared contracts.
+ *
+ * ### Two transports, one error surface
+ *
+ * Every endpoint except the seller image upload sends a JSON body, and the
+ * shared {@link request} path serialises it. The upload is the single
+ * `multipart/form-data` endpoint, so it travels on a separate {@link requestFormData}
+ * path. The split is deliberate: the browser must generate the multipart
+ * boundary itself, so the upload path never sets `Content-Type` at all —
+ * assigning one by hand strips the boundary and the API cannot parse the body.
+ * Both paths then share the identical envelope decoding and error handling, so
+ * a caller cannot tell from its types which transport a method used.
  */
 
 /** Header the API's CSRF middleware requires on mutating requests. */
 export const CSRF_HEADER = "X-Zelora-CSRF";
+
+/**
+ * Multipart field name the image upload endpoint reads each file part from.
+ *
+ * Exported so a caller building or asserting on the request body speaks the
+ * server's vocabulary rather than a copy of it. The `[]` suffix mirrors the
+ * server's own constant and is required: the API parses with
+ * `parseBody({ all: true })`, which only yields an array for a bracketed
+ * repeated field, and a bare `images` field is a 422 rather than a silent drop.
+ */
+export const IMAGE_FIELD = "images[]";
 
 /** Absolute API base URL. Defaults to the local dev server. */
 export const API_BASE_URL: string =
@@ -81,6 +106,9 @@ export interface ZeloraApi {
   listSellerProducts(input?: SellerListProductsRequest): Promise<ListSellerProductsEnvelope>;
   getSellerProduct(productId: string): Promise<GetSellerProductEnvelope>;
   listSellerProductImages(productId: string): Promise<ListSellerProductImagesEnvelope>;
+  addProductImages(productId: string, files: readonly File[]): Promise<AddProductImagesEnvelope>;
+  deleteProductImage(productId: string, imageId: string): Promise<DeleteProductImageEnvelope>;
+  setPrimaryProductImage(productId: string, imageId: string): Promise<SetPrimaryProductImageEnvelope>;
   createProduct(input: CreateProductRequest): Promise<CreateProductEnvelope>;
   createProductVariant(
     productId: string,
@@ -150,30 +178,33 @@ export function createApiClient(
     csrf?: boolean;
   }
 
-  async function request<E extends ApiEnvelope<unknown>>(
-    path: string,
-    options: RequestOptions,
-  ): Promise<E> {
-    const url = `${baseUrl}${path}`;
-    const headers: Record<string, string> = { Accept: "application/json" };
-    if (options.body !== undefined) {
-      headers["Content-Type"] = "application/json";
+  /** Populate the CSRF header from the injected token holder, when asked for. */
+  function applyCsrf(headers: Record<string, string>, csrf: boolean | undefined): void {
+    if (csrf !== true) {
+      return;
     }
-    if (options.csrf === true) {
-      const token = dependencies.getCsrfToken();
-      if (token !== null && token.length > 0) {
-        headers[CSRF_HEADER] = token;
-      }
+    const token = dependencies.getCsrfToken();
+    if (token !== null && token.length > 0) {
+      headers[CSRF_HEADER] = token;
     }
+  }
 
+  /**
+   * Send the prepared request and decode the shared envelope.
+   *
+   * Split out of {@link request} so the JSON and multipart transports cannot
+   * drift: both hand an already-built `fetch` configuration to this one
+   * function, and therefore share the `credentials`, the envelope decoding and
+   * both failure shapes ({@link ApiClientError} for a transport fault,
+   * a returned envelope for an API-level one).
+   */
+  async function send<E extends ApiEnvelope<unknown>>(
+    url: string,
+    init: RequestInit,
+  ): Promise<E> {
     let response: Response;
     try {
-      response = await fetch(url, {
-        method: options.method,
-        headers,
-        credentials: "include",
-        body: options.body === undefined ? undefined : JSON.stringify(options.body),
-      });
+      response = await fetch(url, init);
     } catch (cause) {
       throw new ApiClientError(`Unable to reach the Zelora API at ${url}.`, undefined, {
         cause,
@@ -188,6 +219,57 @@ export function createApiClient(
       `The Zelora API returned an unexpected payload for ${url}.`,
       response.status,
     );
+  }
+
+  async function request<E extends ApiEnvelope<unknown>>(
+    path: string,
+    options: RequestOptions,
+  ): Promise<E> {
+    const url = `${baseUrl}${path}`;
+    const headers: Record<string, string> = { Accept: "application/json" };
+    if (options.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+    }
+    applyCsrf(headers, options.csrf);
+
+    return send<E>(url, {
+      method: options.method,
+      headers,
+      credentials: "include",
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+  }
+
+  /**
+   * Send a `multipart/form-data` request.
+   *
+   * The body is handed to `fetch` as a {@link FormData} instance with **no
+   * `Content-Type` header**, and that omission is the contract rather than an
+   * oversight: the browser appends `multipart/form-data; boundary=…` itself,
+   * and a hand-written `Content-Type` would arrive without the boundary the API
+   * parses with, so the body would be unreadable. `RequestInit` also forbids
+   * setting the header for a `FormData` body in some runtimes, so this is
+   * enforced by construction rather than by convention.
+   *
+   * One caveat worth stating because it shapes the caller's error handling:
+   * `fetch` offers no upload-progress event, so a multipart request reports
+   * only "started" and "finished". Callers that want a progress indicator
+   * therefore drive a local counter of their own rather than a byte total.
+   */
+  async function requestFormData<E extends ApiEnvelope<unknown>>(
+    path: string,
+    options: { method: "POST" | "PATCH"; body: FormData; csrf?: boolean },
+  ): Promise<E> {
+    const url = `${baseUrl}${path}`;
+    const headers: Record<string, string> = { Accept: "application/json" };
+    applyCsrf(headers, options.csrf);
+
+    return send<E>(url, {
+      method: options.method,
+      headers,
+      credentials: "include",
+      body: options.body,
+    });
   }
 
   return {
@@ -230,6 +312,31 @@ export function createApiClient(
       request<ListSellerProductImagesEnvelope>(
         `/api/seller/products/${encodeURIComponent(productId)}/images`,
         { method: "GET" },
+      ),
+    addProductImages: (productId, files) => {
+      // Every file is appended under the *same* `images[]` name so the body
+      // carries N repeated parts. The bracket suffix is load-bearing on the
+      // server: it is what makes a single-file upload parse as a one-element
+      // array instead of a bare scalar, and a bare `images` field is rejected
+      // outright rather than silently dropped.
+      const body = new FormData();
+      for (const file of files) {
+        body.append(IMAGE_FIELD, file);
+      }
+      return requestFormData<AddProductImagesEnvelope>(
+        `/api/seller/products/${encodeURIComponent(productId)}/images`,
+        { method: "POST", body, csrf: true },
+      );
+    },
+    deleteProductImage: (productId, imageId) =>
+      request<DeleteProductImageEnvelope>(
+        `/api/seller/products/${encodeURIComponent(productId)}/images/${encodeURIComponent(imageId)}`,
+        { method: "DELETE", csrf: true },
+      ),
+    setPrimaryProductImage: (productId, imageId) =>
+      request<SetPrimaryProductImageEnvelope>(
+        `/api/seller/products/${encodeURIComponent(productId)}/images/${encodeURIComponent(imageId)}/primary`,
+        { method: "POST", csrf: true },
       ),
     createProduct: (input: CreateProductRequest) =>
       request<CreateProductEnvelope>("/api/seller/products", {

@@ -618,6 +618,77 @@ a {
   min-height: 1.5rem;
 }
 
+/* Seller image management. The grid, tile and frame above are reused as-is; only
+   the controls the manager adds on top of the read-only gallery are new here. */
+
+/* A gallery that holds images but no primary is a reachable state, not a
+   rendering fault: an upload never sets one and deleting the primary does not
+   promote a replacement. Spaced so it reads as guidance, not as an error. */
+.image-manager-nudge {
+  margin: 0.75rem 0 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.image-manager-alert-line {
+  margin: 0;
+}
+
+/* The alert can carry one line per problem, so it needs vertical rhythm between
+   them; `> * + *` keeps a single line flush against the alert's own padding. */
+.image-manager-alert-line + .image-manager-alert-line {
+  margin-top: 0.35rem;
+}
+
+/* Side by side on wide screens, and always full width within a tile. The 2.75rem
+   minimum is the 44px touch target the rest of the seller UI aims for. */
+.image-manager-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.image-manager-actions .btn {
+  flex: 1 1 auto;
+  min-height: 2.75rem;
+  min-width: 2.75rem;
+}
+
+.image-manager-upload {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.4rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+}
+
+.image-manager-upload-label {
+  font-weight: 600;
+}
+
+/* The native file input is kept visible rather than hidden behind a styled
+   proxy, so it stays focusable and announces its own name. Only its intrinsic
+   sizing is normalised; every affordance is the platform's. */
+.image-manager-file {
+  max-width: 100%;
+  min-height: 2.75rem;
+  padding: 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-soft);
+  color: var(--text);
+  font: inherit;
+}
+
+.image-manager-upload .field-hint {
+  margin: 0;
+}
+
 .seller-product-detail-header {
   display: flex;
   align-items: flex-start;
@@ -2107,6 +2178,22 @@ a.category-chip {
 
   .seller-product-facts {
     grid-template-columns: 1fr;
+  }
+
+  /* The auto-fill gallery already reflows, but at phone widths the tiles get
+     narrow enough that two side-by-side controls stop being comfortably
+     tappable, so each control takes the tile's full width instead. */
+  .image-manager-actions {
+    flex-direction: column;
+  }
+
+  .image-manager-actions .btn {
+    width: 100%;
+  }
+
+  .image-manager-upload,
+  .image-manager-file {
+    width: 100%;
   }
 }
 

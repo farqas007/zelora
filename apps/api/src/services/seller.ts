@@ -45,6 +45,7 @@ import type { MediaStorage } from "./media/storage";
 import {
   parseAddProductVariantRequest,
   parseCreateProductRequest,
+  parseReorderProductImagesRequest,
   parseSellerOnboardingRequest,
   parseSetInventoryRequest,
 } from "./validation";
@@ -495,9 +496,8 @@ export class SellerService {
    *
    * This is the service foundation for seller image uploads: ownership, the
    * per-product count cap, per-file byte/format validation, the content-addressed
-   * storage key and the `product_images` insert all live here, so the future HTTP
-   * route is only a transport over this method. It is deliberately not wired to a
-   * route yet.
+   * storage key and the `product_images` insert all live here, so the HTTP route
+   * in `routes/seller.ts` is only a transport over this method.
    *
    * The order of operations is the security property, not an implementation
    * detail:
@@ -793,6 +793,71 @@ export class SellerService {
       );
     }
     return mapProductImageToDto(result.image);
+  }
+
+  /**
+   * Replace the display order of one of the caller's own product images.
+   *
+   * Ownership is resolved server-side exactly as everywhere else in this
+   * service: the store comes from the authenticated user and the product id from
+   * the URL path, so a client cannot reorder another seller's gallery. A
+   * malformed product id, an unknown product and a product owned by another
+   * store all raise the same 404 `PRODUCT_NOT_FOUND`, before any image id is
+   * looked at — so a foreign product cannot even be used as an oracle for
+   * whether a given image id exists.
+   *
+   * The request must be a **complete, duplicate-free permutation** of the
+   * product's current image ids. That is decided in two halves, deliberately:
+   * the request *shape* is validated here ({@link parseReorderProductImagesRequest}
+   * — required array, string entries, well-formed ids, no repeats, bounded
+   * length), while whether the ids are actually this product's images is decided
+   * by the repository, which is the only layer that can see the product. Both
+   * halves run before anything is written, so an invalid reorder mutates nothing
+   * at all and the seller can simply re-send the current list.
+   *
+   * Only `sortOrder` changes. Primary state is never touched: a reorder can
+   * neither promote, demote nor clear the primary image, and the primary keeps
+   * leading the canonical read order afterwards no matter where it sat in the
+   * submitted list.
+   */
+  async reorderProductImages(
+    user: UserRecord,
+    productId: string,
+    request: unknown,
+  ): Promise<SellerProductImageListData> {
+    const store = await this.resolveApprovedStore(user);
+    if (!isValidId(productId)) {
+      throw new AppError(
+        SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+        "This product is not available.",
+        404,
+      );
+    }
+
+    const parsed = parseReorderProductImagesRequest(request);
+
+    const result = await this.productRepository.reorderProductImages({
+      productId,
+      storeId: store.id,
+      imageIds: parsed.imageIds,
+    });
+    if (!result.ok) {
+      if (result.reason === "PRODUCT_NOT_FOUND") {
+        throw new AppError(
+          SELLER_PRODUCT_ERROR_CODES.PRODUCT_NOT_FOUND,
+          "This product is not available.",
+          404,
+        );
+      }
+      // One reason for every kind of mismatch (a duplicate, a missing id, a
+      // foreign id, an unknown id) so the answer does not disclose which id was
+      // wrong. A `ValidationError` rather than a typed `AppError`, matching
+      // every other malformed-input path in this service.
+      throw new ValidationError("The request is invalid.", {
+        imageIds: ["Image ids must be the product's complete current set, in the desired order."],
+      });
+    }
+    return { productId, images: result.images.map(mapProductImageToDto) };
   }
 
   /**

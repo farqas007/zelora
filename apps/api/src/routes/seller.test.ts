@@ -27,8 +27,12 @@ import type {
   ProductVariantDetailRecord,
   CreateProductInput,
   PublishProductResult,
+  DeleteProductImageInput,
+  ReorderProductImagesInput,
+  ReorderProductImagesResult,
   SetInventoryInput,
   SetInventoryResult,
+  SetPrimaryProductImageInput,
   SetPrimaryProductImageResult,
   VariantRecord,
 } from "@zelora/db/products";
@@ -333,6 +337,10 @@ class FakeProductRepository implements ProductRepository {
   listImagesCalls: Array<{ productId: string; storeId: string }> = [];
   /** Every `addProductImages` input, so stored keys, URLs and order are assertable. */
   addImagesCalls: AddProductImagesInput[] = [];
+  /** Every image-management input, so the service's resolved ids are assertable. */
+  deleteImageCalls: DeleteProductImageInput[] = [];
+  setPrimaryImageCalls: SetPrimaryProductImageInput[] = [];
+  reorderImageCalls: ReorderProductImagesInput[] = [];
   forceCreateConflict: boolean = false;
   forceSkuConflict: boolean = false;
   /** Make the image insert refuse, standing in for the product vanishing mid-upload. */
@@ -381,7 +389,7 @@ class FakeProductRepository implements ProductRepository {
    * ascending, then `id` ascending. A product owned by another store yields
    * nothing at all.
    */
-  private collectImages(productId: string, storeId: string): ProductImageRecord[] {
+  collectImages(productId: string, storeId: string): ProductImageRecord[] {
     const product = this.products.get(productId);
     if (product === undefined || product.storeId !== storeId) {
       return [];
@@ -549,12 +557,79 @@ class FakeProductRepository implements ProductRepository {
     return this.collectImages(productId, storeId).length;
   }
 
-  async deleteProductImage(): Promise<DeleteProductImageResult> {
-    throw new Error("unexpected product call");
+  async deleteProductImage(input: DeleteProductImageInput): Promise<DeleteProductImageResult> {
+    this.deleteImageCalls.push(input);
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    const image = this.images.get(input.imageId);
+    // Scoped to the product as well as the id, so an image of another product
+    // can never be deleted through this path.
+    if (image === undefined || image.productId !== input.productId) {
+      return { ok: false, reason: "IMAGE_NOT_FOUND" };
+    }
+    this.images.delete(input.imageId);
+    return { ok: true, image };
   }
 
-  async setPrimaryProductImage(): Promise<SetPrimaryProductImageResult> {
-    throw new Error("unexpected product call");
+  async setPrimaryProductImage(
+    input: SetPrimaryProductImageInput,
+  ): Promise<SetPrimaryProductImageResult> {
+    this.setPrimaryImageCalls.push(input);
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    const target = this.images.get(input.imageId);
+    if (target === undefined || target.productId !== input.productId) {
+      return { ok: false, reason: "IMAGE_NOT_FOUND" };
+    }
+    if (target.isPrimary) {
+      return { ok: true, image: target };
+    }
+    // Clear-then-set, so the fake enforces the same one-primary invariant the
+    // real drivers do and never sees two primaries even transiently.
+    for (const image of this.collectImages(input.productId, input.storeId)) {
+      if (image.isPrimary) {
+        this.images.set(image.id, { ...image, isPrimary: false });
+      }
+    }
+    const promoted: ProductImageRecord = { ...target, isPrimary: true };
+    this.images.set(promoted.id, promoted);
+    return { ok: true, image: promoted };
+  }
+
+  /**
+   * Mirrors the drivers' reorder contract: ownership first, then an exact
+   * permutation check against the product's real image set, then a write that
+   * touches `sortOrder` only. Written out rather than imported so this fake is
+   * an independent statement of the contract; the exhaustive proof of the real
+   * implementation lives in the driver tests against real SQLite.
+   */
+  async reorderProductImages(input: ReorderProductImagesInput): Promise<ReorderProductImagesResult> {
+    this.reorderImageCalls.push(input);
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    const currentIds = this.collectImages(input.productId, input.storeId).map((image) => image.id);
+    const isPermutation =
+      input.imageIds.length === currentIds.length &&
+      new Set(input.imageIds).size === input.imageIds.length &&
+      input.imageIds.every((id) => currentIds.includes(id));
+    if (!isPermutation) {
+      return { ok: false, reason: "IMAGE_SET_MISMATCH" };
+    }
+    input.imageIds.forEach((imageId, position) => {
+      const image = this.images.get(imageId);
+      // `isPrimary` is spread through untouched, so a reorder can never
+      // promote, demote or clear the primary image.
+      if (image !== undefined) {
+        this.images.set(imageId, { ...image, sortOrder: position });
+      }
+    });
+    return { ok: true, images: this.collectImages(input.productId, input.storeId) };
   }
 
   seedProduct(product: ProductRecord): void {
@@ -780,6 +855,9 @@ describe("POST /api/seller/onboarding", () => {
       throw new Error("unexpected product call");
     },
     setPrimaryProductImage: () => {
+      throw new Error("unexpected product call");
+    },
+    reorderProductImages: () => {
       throw new Error("unexpected product call");
     },
   };
@@ -3946,5 +4024,913 @@ describe("POST /api/seller/products/:id/images", () => {
       body: JSON.stringify({ name: "Standard", priceAmountCents: 49900 }),
     });
     expect(variant.status).toBe(201);
+  });
+});
+
+/**
+ * The image-*management* routes: delete, set-primary and reorder.
+ *
+ * Separate from the upload suite above because they are a different surface:
+ * no multipart body, no body limit, no storage, and a different rate-limit
+ * bucket. What they share with every seller write is the security stack, and
+ * that is asserted here per route rather than once — a middleware stack is only
+ * as good as its weakest registration, and these are three registrations.
+ */
+describe("/api/seller/products/:id/images management", () => {
+  const baseConfig: AppConfig = {
+    nodeEnv: "test",
+    host: "127.0.0.1",
+    port: 3001,
+    appVersion: "0.1.0",
+    corsOrigin: "http://localhost:5173",
+    sessionCookieName: "zelora_session",
+    sessionTtlSeconds: 2_592_000,
+    sessionCookieSecure: false,
+    pbkdf2Iterations: 1_000,
+    rateLimitEnabled: true,
+    rateLimitTrustProxy: false,
+    rateLimitLoginIpMax: 20,
+    rateLimitLoginIpWindowSeconds: 900,
+    rateLimitLoginEmailMax: 10,
+    rateLimitLoginEmailWindowSeconds: 900,
+    rateLimitRegisterIpMax: 10,
+    rateLimitRegisterIpWindowSeconds: 3_600,
+    rateLimitSellerOnboardingIpMax: 10,
+    rateLimitSellerOnboardingIpWindowSeconds: 3_600,
+    rateLimitProductCreateIpMax: 30,
+    rateLimitProductCreateIpWindowSeconds: 3_600,
+    sessionLastUsedThrottleSeconds: 300,
+    sessionPurgeIntervalSeconds: 3_600,
+    adminBootstrapSecret: null,
+    mediaPublicBaseUrl: "https://media.test",
+    mediaLocalRoot: ".data/media",
+  };
+
+  const headerIpResolver: ClientIpResolver = {
+    resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+  };
+
+  const inertCartRepository: CartRepository = {
+    getCartByUserId: () => {
+      throw new Error("unexpected cart call");
+    },
+    createCart: () => {
+      throw new Error("unexpected cart call");
+    },
+    addItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    updateItemQuantity: () => {
+      throw new Error("unexpected cart call");
+    },
+    removeItem: () => {
+      throw new Error("unexpected cart call");
+    },
+    clearCart: () => {
+      throw new Error("unexpected cart call");
+    },
+  };
+
+  const inertAuditLogRepository: AuditLogRepository = {
+    create: () => {
+      throw new Error("unexpected audit log call");
+    },
+    listByAction: () => {
+      throw new Error("unexpected audit log call");
+    },
+  };
+
+  let clock: FakeClock;
+  let userRepository: FakeUserRepository;
+  let sessionRepository: FakeAuthSessionRepository;
+  let sellerRepository: FakeSellerRepository;
+  let productRepository: FakeProductRepository;
+  let catalogRepository: FakeCatalogRepository;
+  let mediaStorage: FakeMediaStorage;
+  let passwordHasher: PasswordHasher;
+  let app: ReturnType<typeof createApp>;
+
+  beforeEach(() => {
+    clock = new FakeClock();
+    userRepository = new FakeUserRepository();
+    sessionRepository = new FakeAuthSessionRepository();
+    sellerRepository = new FakeSellerRepository();
+    productRepository = new FakeProductRepository();
+    catalogRepository = new FakeCatalogRepository();
+    mediaStorage = new FakeMediaStorage();
+    passwordHasher = new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations);
+    app = createApp({
+      config: baseConfig,
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      clientIpResolver: headerIpResolver,
+      mediaStorage,
+    });
+  });
+
+  function makeApp(config: AppConfig = baseConfig): ReturnType<typeof createApp> {
+    return createApp({
+      config,
+      userRepository,
+      sessionRepository,
+      sellerRepository,
+      catalogRepository,
+      productRepository,
+      cartRepository: inertCartRepository,
+      auditLogRepository: inertAuditLogRepository,
+      passwordHasher,
+      clock,
+      clientIpResolver: headerIpResolver,
+      mediaStorage,
+    });
+  }
+
+  interface Session {
+    cookie: string;
+    csrfToken: string;
+    userId: string;
+  }
+
+  /** Register a user session and return its cookie and CSRF token. */
+  async function registerUser(email = "seller@example.com"): Promise<Session> {
+    const response = await app.request("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password: "password123", name: "Ada Lovelace" }),
+    });
+    expect(response.status).toBe(201);
+    const setCookie = response.headers.get("set-cookie");
+    if (setCookie === null) {
+      throw new Error("expected a set-cookie header");
+    }
+    const body = (await response.json()) as { ok: true; data: AuthUserResponse };
+    return {
+      cookie: setCookie.split(";")[0] ?? "",
+      csrfToken: body.data.session.csrfToken,
+      userId: body.data.user.id,
+    };
+  }
+
+  /** Promote a user session into an approved seller owning `storeId`. */
+  async function registerApprovedSeller(
+    storeId = "st-manage",
+    email = "seller@example.com",
+  ): Promise<Session> {
+    const session = await registerUser(email);
+    const user = userRepository.getUser(session.userId)!;
+    userRepository.setUser({ ...user, role: "seller" });
+    const now = new Date("2026-06-01T00:00:00.000Z");
+    sellerRepository.seedProfile({
+      id: `sp-${storeId}`,
+      userId: session.userId,
+      slug: `${storeId}-shop`,
+      displayName: "Manage Seller",
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: storeId,
+      sellerProfileId: `sp-${storeId}`,
+      name: "Manage Shop",
+      slug: `${storeId}-shop`,
+      description: null,
+      status: "active",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return session;
+  }
+
+  /** A plain customer session: authenticated, but not a seller. */
+  async function registerCustomer(): Promise<Session> {
+    return registerUser("customer@example.com");
+  }
+
+  function seedProduct(seq: number, storeId: string): string {
+    const now = new Date("2026-06-01T00:00:00.000Z");
+    const productId = fakeId(seq);
+    productRepository.seedProduct({
+      id: productId,
+      storeId,
+      slug: `manage-product-${seq}`,
+      name: `Manage Product ${seq}`,
+      description: null,
+      categoryId: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+    return productId;
+  }
+
+  function seedImage(seq: number, productId: string, sortOrder: number, isPrimary = false): string {
+    const id = fakeId(seq);
+    productRepository.seedImage({
+      id,
+      productId,
+      url: `https://cdn.test/${id}.jpg`,
+      storageKey: null,
+      altText: null,
+      sortOrder,
+      isPrimary,
+      createdAt: new Date("2026-06-01T00:00:00.000Z"),
+    });
+    return id;
+  }
+
+  interface RequestOptions {
+    cookie?: string;
+    csrfToken?: string;
+    ip?: string;
+  }
+
+  async function deleteImage(
+    productId: string,
+    imageId: string,
+    options: RequestOptions = {},
+  ): Promise<Response> {
+    return app.request(`/api/seller/products/${productId}/images/${imageId}`, {
+      method: "DELETE",
+      headers: {
+        ...(options.cookie === undefined ? {} : { Cookie: options.cookie }),
+        ...(options.csrfToken === undefined ? {} : { "X-Zelora-CSRF": options.csrfToken }),
+        ...(options.ip === undefined ? {} : { "X-Test-IP": options.ip }),
+      },
+    });
+  }
+
+  async function setPrimary(
+    productId: string,
+    imageId: string,
+    options: RequestOptions = {},
+  ): Promise<Response> {
+    return app.request(`/api/seller/products/${productId}/images/${imageId}/primary`, {
+      method: "POST",
+      headers: {
+        ...(options.cookie === undefined ? {} : { Cookie: options.cookie }),
+        ...(options.csrfToken === undefined ? {} : { "X-Zelora-CSRF": options.csrfToken }),
+        ...(options.ip === undefined ? {} : { "X-Test-IP": options.ip }),
+      },
+    });
+  }
+
+  async function reorder(
+    productId: string,
+    body: unknown,
+    options: RequestOptions = {},
+  ): Promise<Response> {
+    return app.request(`/api/seller/products/${productId}/images/order`, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        ...(options.cookie === undefined ? {} : { Cookie: options.cookie }),
+        ...(options.csrfToken === undefined ? {} : { "X-Zelora-CSRF": options.csrfToken }),
+        ...(options.ip === undefined ? {} : { "X-Test-IP": options.ip }),
+      },
+      body: typeof body === "string" ? body : JSON.stringify(body),
+    });
+  }
+
+  async function expectFailure(response: Response, code: string, status: number): Promise<ApiFailure> {
+    expect(response.status).toBe(status);
+    const body = (await response.json()) as ApiFailure;
+    expect(body.ok).toBe(false);
+    expect(body.error.code).toBe(code);
+    return body;
+  }
+
+  describe("DELETE /api/seller/products/:id/images/:imageId", () => {
+    it("removes the image row and acknowledges which ids were involved", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(400, "st-manage");
+      const first = seedImage(401, productId, 0, true);
+      seedImage(402, productId, 1);
+
+      const response = await deleteImage(productId, first, {
+        cookie: session.cookie,
+        csrfToken: session.csrfToken,
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: true;
+        data: { productId: string; imageId: string; wasPrimary: boolean };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.data).toEqual({ productId, imageId: first, wasPrimary: true });
+      expect(
+        productRepository.collectImages(productId, "st-manage").map((image) => image.id),
+      ).not.toContain(first);
+    });
+
+    it("reports wasPrimary false for a non-primary image", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(410, "st-manage");
+      const primary = seedImage(411, productId, 0, true);
+      const other = seedImage(412, productId, 1);
+
+      const response = await deleteImage(productId, other, {
+        cookie: session.cookie,
+        csrfToken: session.csrfToken,
+      });
+
+      const body = (await response.json()) as {
+        ok: true;
+        data: { wasPrimary: boolean };
+      };
+      expect(body.data.wasPrimary).toBe(false);
+      // The product still has its primary, because only a non-primary went.
+      expect(
+        productRepository.collectImages(productId, "st-manage").find((image) => image.id === primary),
+      ).toMatchObject({ isPrimary: true });
+    });
+
+    it("leaves the stored bytes alone, because reclaiming them is a separate concern", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(420, "st-manage");
+      const imageId = seedImage(421, productId, 0);
+
+      const response = await deleteImage(productId, imageId, {
+        cookie: session.cookie,
+        csrfToken: session.csrfToken,
+      });
+
+      expect(response.status).toBe(200);
+      // A row delete that had already destroyed the bytes could not be undone,
+      // so the route must not reach storage at all.
+      expect([...mediaStorage.deleteCalls]).toEqual([]);
+    });
+
+    it("404s a repeated delete instead of succeeding twice", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(430, "st-manage");
+      const imageId = seedImage(431, productId, 0);
+      const options = { cookie: session.cookie, csrfToken: session.csrfToken };
+
+      expect((await deleteImage(productId, imageId, options)).status).toBe(200);
+      await expectFailure(await deleteImage(productId, imageId, options), "IMAGE_NOT_FOUND", 404);
+    });
+
+    it("404s a product owned by another store, and an image of another product alike", async () => {
+      const session = await registerApprovedSeller("st-manage");
+      const mine = seedProduct(440, "st-manage");
+      const theirs = seedProduct(441, "st-rival");
+      const mineImage = seedImage(442, mine, 0);
+      const theirImage = seedImage(443, theirs, 0);
+      const options = { cookie: session.cookie, csrfToken: session.csrfToken };
+
+      await expectFailure(
+        await deleteImage(theirs, theirImage, options),
+        "PRODUCT_NOT_FOUND",
+        404,
+      );
+      // The product is the caller's own, so the image is the wrong thing to
+      // name — a distinct code, not a vaguer 404.
+      await expectFailure(
+        await deleteImage(mine, theirImage, options),
+        "IMAGE_NOT_FOUND",
+        404,
+      );
+      expect(productRepository.deleteImageCalls).toHaveLength(2);
+      // Nothing was deleted: the foreign image survived both attempts.
+      expect(
+        productRepository.collectImages(theirs, "st-rival").map((image) => image.id),
+      ).toEqual([theirImage]);
+      expect(mineImage).toBeTruthy();
+    });
+
+    it("404s a malformed product id without disclosing why", async () => {
+      const session = await registerApprovedSeller();
+
+      const body = await expectFailure(
+        await deleteImage("not-a-uuid", fakeId(450), {
+          cookie: session.cookie,
+          csrfToken: session.csrfToken,
+        }),
+        "PRODUCT_NOT_FOUND",
+        404,
+      );
+      expect(body.error.message).toBe("This product is not available.");
+    });
+
+    it("requires authentication", async () => {
+      const productId = seedProduct(460, "st-manage");
+      const imageId = seedImage(461, productId, 0);
+
+      await expectFailure(await deleteImage(productId, imageId), "SESSION_EXPIRED", 401);
+      expect(productRepository.deleteImageCalls).toHaveLength(0);
+    });
+
+    it("refuses a customer, even an authenticated one", async () => {
+      const session = await registerCustomer();
+      const productId = seedProduct(470, "st-manage");
+      const imageId = seedImage(471, productId, 0);
+
+      await expectFailure(
+        await deleteImage(productId, imageId, {
+          cookie: session.cookie,
+          csrfToken: session.csrfToken,
+        }),
+        "FORBIDDEN",
+        403,
+      );
+      expect(productRepository.deleteImageCalls).toHaveLength(0);
+    });
+
+    it("requires the CSRF token", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(480, "st-manage");
+      const imageId = seedImage(481, productId, 0);
+
+      await expectFailure(
+        await deleteImage(productId, imageId, { cookie: session.cookie }),
+        "CSRF_FAILED",
+        403,
+      );
+      expect(productRepository.deleteImageCalls).toHaveLength(0);
+    });
+  });
+
+  describe("POST /api/seller/products/:id/images/:imageId/primary", () => {
+    it("promotes the image and returns the promoted DTO", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(500, "st-manage");
+      const first = seedImage(501, productId, 0, true);
+      const second = seedImage(502, productId, 1);
+
+      const response = await setPrimary(productId, second, {
+        cookie: session.cookie,
+        csrfToken: session.csrfToken,
+      });
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok: true; data: ProductImageDto };
+      expect(body.ok).toBe(true);
+      expect(body.data.id).toBe(second);
+      expect(body.data.isPrimary).toBe(true);
+      expect(
+        productRepository
+          .collectImages(productId, "st-manage")
+          .filter((image) => image.isPrimary)
+          .map((image) => image.id),
+      ).toEqual([second]);
+      expect(first).toBeTruthy();
+    });
+
+    it("is idempotent, so re-promoting the current primary succeeds", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(510, "st-manage");
+      const primary = seedImage(511, productId, 0, true);
+      const options = { cookie: session.cookie, csrfToken: session.csrfToken };
+
+      const first = await setPrimary(productId, primary, options);
+      const second = await setPrimary(productId, primary, options);
+
+      expect(first.status).toBe(200);
+      expect(second.status).toBe(200);
+      const body = (await second.json()) as { ok: true; data: ProductImageDto };
+      expect(body.data.id).toBe(primary);
+    });
+
+    it("does not renumber the gallery", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(520, "st-manage");
+      seedImage(521, productId, 0, true);
+      const second = seedImage(522, productId, 1);
+      seedImage(523, productId, 2);
+
+      await setPrimary(productId, second, { cookie: session.cookie, csrfToken: session.csrfToken });
+
+      const byId = new Map(
+        productRepository
+          .collectImages(productId, "st-manage")
+          .map((image) => [image.id, image.sortOrder]),
+      );
+      expect(byId.get(fakeId(521))).toBe(0);
+      expect(byId.get(second)).toBe(1);
+      expect(byId.get(fakeId(523))).toBe(2);
+    });
+
+    it("404s a product owned by another store", async () => {
+      const session = await registerApprovedSeller("st-manage");
+      const theirs = seedProduct(530, "st-rival");
+      const theirImage = seedImage(531, theirs, 0);
+
+      await expectFailure(
+        await setPrimary(theirs, theirImage, {
+          cookie: session.cookie,
+          csrfToken: session.csrfToken,
+        }),
+        "PRODUCT_NOT_FOUND",
+        404,
+      );
+      // The store reaches the repository, which is where ownership is decided —
+      // so the proof that nothing was promoted is the foreign row, not an
+      // empty call log.
+      expect(
+        productRepository.collectImages(theirs, "st-rival").map((image) => image.isPrimary),
+      ).toEqual([false]);
+    });
+
+    it("404s an image of another product", async () => {
+      const session = await registerApprovedSeller();
+      const mine = seedProduct(540, "st-manage");
+      const theirs = seedProduct(541, "st-manage");
+      seedImage(542, mine, 0, true);
+      const theirImage = seedImage(543, theirs, 0);
+
+      await expectFailure(
+        await setPrimary(mine, theirImage, {
+          cookie: session.cookie,
+          csrfToken: session.csrfToken,
+        }),
+        "IMAGE_NOT_FOUND",
+        404,
+      );
+    });
+
+    it("requires authentication, the seller role and the CSRF token", async () => {
+      const seller = await registerApprovedSeller();
+      const customer = await registerCustomer();
+      const productId = seedProduct(550, "st-manage");
+      const imageId = seedImage(551, productId, 0, true);
+
+      await expectFailure(await setPrimary(productId, imageId), "SESSION_EXPIRED", 401);
+      await expectFailure(
+        await setPrimary(productId, imageId, {
+          cookie: customer.cookie,
+          csrfToken: customer.csrfToken,
+        }),
+        "FORBIDDEN",
+        403,
+      );
+      await expectFailure(
+        await setPrimary(productId, imageId, { cookie: seller.cookie }),
+        "CSRF_FAILED",
+        403,
+      );
+      // A rejected request promoted nothing: the seeded primary is still it.
+      expect(productRepository.setPrimaryImageCalls).toHaveLength(0);
+    });
+  });
+
+  describe("PATCH /api/seller/products/:id/images/order", () => {
+    it("reorders the gallery and returns the new order", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(600, "st-manage");
+      const first = seedImage(601, productId, 0);
+      const second = seedImage(602, productId, 1);
+      const third = seedImage(603, productId, 2);
+
+      const response = await reorder(
+        productId,
+        { imageIds: [third, first, second] },
+        { cookie: session.cookie, csrfToken: session.csrfToken },
+      );
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as {
+        ok: true;
+        data: { productId: string; images: ProductImageDto[] };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.data.productId).toBe(productId);
+      expect(body.data.images.map((image) => image.id)).toEqual([third, first, second]);
+      expect(productRepository.reorderImageCalls).toEqual([
+        { productId, storeId: "st-manage", imageIds: [third, first, second] },
+      ]);
+    });
+
+    it("keeps the primary leading even when it is submitted last", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(610, "st-manage");
+      const primary = seedImage(611, productId, 0, true);
+      const second = seedImage(612, productId, 1);
+      const third = seedImage(613, productId, 2);
+
+      const response = await reorder(
+        productId,
+        { imageIds: [second, third, primary] },
+        { cookie: session.cookie, csrfToken: session.csrfToken },
+      );
+
+      const body = (await response.json()) as { ok: true; data: { images: ProductImageDto[] } };
+      expect(body.data.images.map((image) => image.id)).toEqual([primary, second, third]);
+      expect(
+        productRepository
+          .collectImages(productId, "st-manage")
+          .filter((image) => image.isPrimary)
+          .map((image) => image.id),
+      ).toEqual([primary]);
+    });
+
+    it("never treats `order` as an image id", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(620, "st-manage");
+      const imageId = seedImage(621, productId, 0);
+
+      // `/images/order` is registered as a literal, so the delete route that
+      // also matches `/images/:imageId` cannot shadow it.
+      const response = await reorder(
+        productId,
+        { imageIds: [imageId] },
+        { cookie: session.cookie, csrfToken: session.csrfToken },
+      );
+      expect(response.status).toBe(200);
+    });
+
+    it.each([
+      ["a missing imageIds", {}],
+      ["a null imageIds", { imageIds: null }],
+      ["a non-array imageIds", { imageIds: "a,b" }],
+      ["a non-string entry", { imageIds: [1] }],
+      ["a malformed id", { imageIds: ["nope"] }],
+      [
+        "a duplicated id",
+        {
+          imageIds: [
+            "01955f00-0000-7000-8000-000000000001",
+            "01955f00-0000-7000-8000-000000000001",
+          ],
+        },
+      ],
+    ])("rejects %s with 422 and never reaches the repository", async (_label, body) => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(630, "st-manage");
+      seedImage(631, productId, 0);
+
+      const failure = await expectFailure(
+        await reorder(productId, body, { cookie: session.cookie, csrfToken: session.csrfToken }),
+        "VALIDATION_ERROR",
+        422,
+      );
+      expect(failure.error.fields?.imageIds).toBeDefined();
+      expect(productRepository.reorderImageCalls).toEqual([]);
+    });
+
+    it("rejects unparseable JSON without reaching the repository", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(640, "st-manage");
+
+      await expectFailure(
+        await reorder(productId, "{not json", {
+          cookie: session.cookie,
+          csrfToken: session.csrfToken,
+        }),
+        "VALIDATION_ERROR",
+        422,
+      );
+      expect(productRepository.reorderImageCalls).toEqual([]);
+    });
+
+    it("rejects a list that is not the product's exact set, without saying which id was wrong", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(650, "st-manage");
+      const first = seedImage(651, productId, 0);
+      const second = seedImage(652, productId, 1);
+      const foreign = fakeId(653);
+      const options = { cookie: session.cookie, csrfToken: session.csrfToken };
+
+      // Partial, over-long and foreign-id lists all get the same answer, so the
+      // response cannot be used to discover which id exists.
+      for (const imageIds of [
+        [first],
+        [first, second, foreign],
+        [first, second, first],
+      ]) {
+        const body = await expectFailure(
+          await reorder(productId, { imageIds }, options),
+          "VALIDATION_ERROR",
+          422,
+        );
+        expect(JSON.stringify(body)).not.toContain(foreign);
+      }
+    });
+
+    it("404s a product owned by another store", async () => {
+      const session = await registerApprovedSeller("st-manage");
+      const theirs = seedProduct(660, "st-rival");
+      const theirImage = seedImage(661, theirs, 0);
+
+      await expectFailure(
+        await reorder(theirs, { imageIds: [theirImage] }, {
+          cookie: session.cookie,
+          csrfToken: session.csrfToken,
+        }),
+        "PRODUCT_NOT_FOUND",
+        404,
+      );
+      // As above: the store is handed to the repository and the repository
+      // refuses, so the foreign gallery is the evidence.
+      expect(
+        productRepository.collectImages(theirs, "st-rival").map((image) => image.sortOrder),
+      ).toEqual([0]);
+    });
+
+    it("404s a malformed product id", async () => {
+      const session = await registerApprovedSeller();
+
+      await expectFailure(
+        await reorder("not-a-uuid", { imageIds: [] }, {
+          cookie: session.cookie,
+          csrfToken: session.csrfToken,
+        }),
+        "PRODUCT_NOT_FOUND",
+        404,
+      );
+      expect(productRepository.reorderImageCalls).toEqual([]);
+    });
+
+    it("requires authentication, the seller role and the CSRF token", async () => {
+      const seller = await registerApprovedSeller();
+      const customer = await registerCustomer();
+      const productId = seedProduct(670, "st-manage");
+      const imageId = seedImage(671, productId, 0);
+      const body = { imageIds: [imageId] };
+
+      await expectFailure(
+        await reorder(productId, body),
+        "SESSION_EXPIRED",
+        401,
+      );
+      await expectFailure(
+        await reorder(productId, body, { cookie: customer.cookie, csrfToken: customer.csrfToken }),
+        "FORBIDDEN",
+        403,
+      );
+      await expectFailure(
+        await reorder(productId, body, { cookie: seller.cookie }),
+        "CSRF_FAILED",
+        403,
+      );
+      expect(productRepository.reorderImageCalls).toEqual([]);
+    });
+
+    it("accepts an empty list for a product with no images", async () => {
+      const session = await registerApprovedSeller();
+      const productId = seedProduct(680, "st-manage");
+
+      const response = await reorder(
+        productId,
+        { imageIds: [] },
+        { cookie: session.cookie, csrfToken: session.csrfToken },
+      );
+
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { ok: true; data: { images: ProductImageDto[] } };
+      expect(body.data.images).toEqual([]);
+    });
+  });
+
+  describe("rate limiting", () => {
+    /** Build an app whose product-write budget is a single request. */
+    function limitedApp(): ReturnType<typeof createApp> {
+      return makeApp({ ...baseConfig, rateLimitProductCreateIpMax: 1 });
+    }
+
+    it("shares one bucket across the three management routes", async () => {
+      const session = await registerApprovedSeller();
+      const limited = limitedApp();
+      const ip = "198.51.100.31";
+      const productId = seedProduct(700, "st-manage");
+      const first = seedImage(701, productId, 0);
+      const second = seedImage(702, productId, 1);
+
+      const request = (path: string, method: string, body?: unknown) =>
+        limited.request(path, {
+          method,
+          headers: {
+            ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+            Cookie: session.cookie,
+            "X-Zelora-CSRF": session.csrfToken,
+            "X-Test-IP": ip,
+          },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        });
+
+      expect(
+        (await request(`/api/seller/products/${productId}/images/${first}/primary`, "POST")).status,
+      ).toBe(200);
+      // The other two management routes are the same scope, so the budget is
+      // already spent.
+      const throttled = await request(
+        `/api/seller/products/${productId}/images/order`,
+        "PATCH",
+        { imageIds: [second, first] },
+      );
+      expect(throttled.status).toBe(429);
+      expect(throttled.headers.get("retry-after")).not.toBeNull();
+      expect(
+        (await request(`/api/seller/products/${productId}/images/${first}`, "DELETE")).status,
+      ).toBe(429);
+    });
+
+    it("keeps the management bucket separate from the upload bucket", async () => {
+      const session = await registerApprovedSeller();
+      const limited = limitedApp();
+      const ip = "198.51.100.32";
+      const productId = seedProduct(710, "st-manage");
+      const imageId = seedImage(711, productId, 0, true);
+
+      // Spend the *upload* budget with a tiny multipart body.
+      const form = new FormData();
+      form.append("images[]", new File([pngBytes(1)], "a.png", { type: "image/png" }));
+      const headers = {
+        Cookie: session.cookie,
+        "X-Zelora-CSRF": session.csrfToken,
+        "X-Test-IP": ip,
+      };
+      expect(
+        (
+          await limited.request(`/api/seller/products/${productId}/images`, {
+            method: "POST",
+            headers,
+            body: form,
+          })
+        ).status,
+      ).toBe(201);
+      // Uploads and management are different operations with different costs, so
+      // one exhausting its budget must not starve the other.
+      expect(
+        (
+          await limited.request(`/api/seller/products/${productId}/images/${imageId}/primary`, {
+            method: "POST",
+            headers: { ...headers, "Content-Type": "application/json" },
+          })
+        ).status,
+      ).toBe(200);
+    });
+
+    it("keeps the management bucket separate from the variant bucket", async () => {
+      const session = await registerApprovedSeller();
+      const limited = limitedApp();
+      const ip = "198.51.100.33";
+      const productId = seedProduct(720, "st-manage");
+      const imageId = seedImage(721, productId, 0);
+
+      expect(
+        (
+          await limited.request(`/api/seller/products/${productId}/images/order`, {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+              Cookie: session.cookie,
+              "X-Zelora-CSRF": session.csrfToken,
+              "X-Test-IP": ip,
+            },
+            body: JSON.stringify({ imageIds: [imageId] }),
+          })
+        ).status,
+      ).toBe(200);
+      // The variant route is its own scope, so a seller throttled on image
+      // management can still manage variants.
+      expect(
+        (
+          await limited.request(`/api/seller/products/${productId}/variants`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Cookie: session.cookie,
+              "X-Zelora-CSRF": session.csrfToken,
+              "X-Test-IP": ip,
+            },
+            body: JSON.stringify({ name: "Standard", priceAmountCents: 49900 }),
+          })
+        ).status,
+      ).toBe(201);
+    });
+
+    it("does not throttle a different caller IP", async () => {
+      const session = await registerApprovedSeller();
+      const limited = limitedApp();
+      const productId = seedProduct(730, "st-manage");
+      const first = seedImage(731, productId, 0);
+      const second = seedImage(732, productId, 1);
+
+      const promote = (ip: string) =>
+        limited.request(`/api/seller/products/${productId}/images/${first}/primary`, {
+          method: "POST",
+          headers: {
+            Cookie: session.cookie,
+            "X-Zelora-CSRF": session.csrfToken,
+            "X-Test-IP": ip,
+          },
+        });
+
+      expect((await promote("198.51.100.40")).status).toBe(200);
+      expect((await promote("198.51.100.40")).status).toBe(429);
+      // A different client IP has its own budget, so the seller is not locked
+      // out of their own store by another network.
+      expect((await promote("198.51.100.41")).status).toBe(200);
+      expect(second).toBeTruthy();
+    });
   });
 });

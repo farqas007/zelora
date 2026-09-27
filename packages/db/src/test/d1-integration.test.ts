@@ -1039,6 +1039,297 @@ describe("D1 product repository: addProductImages", () => {
   });
 });
 
+describe("D1 product repository: reorderProductImages", () => {
+  /**
+   * One approved seller. Ownership needs a real `products.storeId`, and every
+   * case here is about the caller's *own* gallery, so a second seller only
+   * appears in the cross-store test.
+   */
+  async function seedSeller(db: DrizzleD1Database<DatabaseSchema>, seed: number): Promise<string> {
+    const users = createD1UserRepository(db);
+    const sellers = createD1SellerRepository(db);
+    const user = await users.create({
+      email: `reorder-${seed}@example.test`,
+      name: `Reorder Seller ${seed}`,
+      passwordHash: tokenHash(120 + seed),
+    });
+    const onboarding = await sellers.createOnboarding({
+      userId: user.id,
+      profileSlug: `reorder-profile-${seed}`,
+      displayName: `Reorder Seller ${seed}`,
+      storeName: "Reorder Storefront",
+      storeSlug: `reorder-store-${seed}`,
+    });
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+    return onboarding.store.id;
+  }
+
+  async function seedProduct(
+    db: DrizzleD1Database<DatabaseSchema>,
+    storeId: string,
+    slug: string,
+  ): Promise<string> {
+    const row = await db
+      .insert(schema.products)
+      .values({ storeId, categoryId: null, name: "D1 Camera", slug, status: "draft" })
+      .returning()
+      .get();
+    return row.id;
+  }
+
+  /** Insert `count` images at ascending sort orders and return their ids. */
+  async function seedGallery(
+    db: DrizzleD1Database<DatabaseSchema>,
+    productId: string,
+    count: number,
+  ): Promise<string[]> {
+    const rows = await db
+      .insert(schema.productImages)
+      .values(
+        Array.from({ length: count }, (_unused, index) => ({
+          productId,
+          url: `https://cdn.test/${index}.jpg`,
+          sortOrder: index,
+        })),
+      )
+      .returning();
+    return rows.map((row) => row.id);
+  }
+
+  /** Promote one image without going through the driver. */
+  async function markPrimary(
+    db: DrizzleD1Database<DatabaseSchema>,
+    imageId: string,
+  ): Promise<void> {
+    await db
+      .update(schema.productImages)
+      .set({ isPrimary: 1 })
+      .where(eq(schema.productImages.id, imageId));
+  }
+
+  /** `{ imageId: sortOrder }` read straight from the table. */
+  async function sortOrdersById(
+    db: DrizzleD1Database<DatabaseSchema>,
+    productId: string,
+  ): Promise<Record<string, number>> {
+    const rows = await db
+      .select({ id: schema.productImages.id, sortOrder: schema.productImages.sortOrder })
+      .from(schema.productImages)
+      .where(eq(schema.productImages.productId, productId));
+    return Object.fromEntries(rows.map((row) => [row.id, row.sortOrder]));
+  }
+
+  /** `is_primary` for a product's images, in canonical read order. */
+  async function primaryFlags(
+    db: DrizzleD1Database<DatabaseSchema>,
+    productId: string,
+  ): Promise<number[]> {
+    const rows = await db
+      .select({ isPrimary: schema.productImages.isPrimary })
+      .from(schema.productImages)
+      .where(eq(schema.productImages.productId, productId))
+      .orderBy(schema.productImages.sortOrder);
+    return rows.map((row) => row.isPrimary);
+  }
+
+  it("applies the submitted order and returns it", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 1);
+    const productId = await seedProduct(db, storeId, "reorder-d1");
+    const [a, b, c] = (await seedGallery(db, productId, 3)) as [string, string, string];
+
+    const result = await repo.reorderProductImages({
+      productId,
+      storeId,
+      imageIds: [c, a, b],
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.ok && result.images.map((image) => image.id)).toEqual([c, a, b]);
+    expect(await sortOrdersById(db, productId)).toEqual({ [a]: 1, [b]: 2, [c]: 0 });
+  });
+
+  it("rewrites a descending order to a dense ascending sequence", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 2);
+    const productId = await seedProduct(db, storeId, "reorder-d1-dense");
+    const [a, b, c, d] = (await seedGallery(db, productId, 4)) as [string, string, string, string];
+
+    await repo.reorderProductImages({ productId, storeId, imageIds: [d, c, b, a] });
+
+    // Dense 0..n-1, not the submitted 3,2,1,0: the contract is relative order,
+    // and the canonical read order depends on those values being a clean run.
+    expect(await sortOrdersById(db, productId)).toEqual({ [a]: 3, [b]: 2, [c]: 1, [d]: 0 });
+  });
+
+  it("scopes the write to the product", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 3);
+    const productId = await seedProduct(db, storeId, "reorder-d1-scope");
+    const otherProductId = await seedProduct(db, storeId, "reorder-d1-scope-other");
+    const [a, b] = (await seedGallery(db, productId, 2)) as [string, string];
+    const [c, d] = (await seedGallery(db, otherProductId, 2)) as [string, string];
+
+    await repo.reorderProductImages({ productId, storeId, imageIds: [b, a] });
+
+    // A second product's gallery is not merely absent from the result: its rows
+    // are physically unchanged, which is what the `where product_id` bound
+    // buys. A `where id in (...)` write would not be safe here.
+    expect(await sortOrdersById(db, otherProductId)).toEqual({ [c]: 0, [d]: 1 });
+  });
+
+  it("does not touch primary state, even when the primary is submitted last", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 4);
+    const productId = await seedProduct(db, storeId, "reorder-d1-primary");
+    const [primary, first, second] = (await seedGallery(db, productId, 3)) as [string, string, string];
+    await markPrimary(db, primary);
+
+    const result = await repo.reorderProductImages({
+      productId,
+      storeId,
+      imageIds: [first, second, primary],
+    });
+
+    expect(await primaryFlags(db, productId)).toEqual([0, 0, 1]);
+    expect(result.ok && result.images.map((image) => image.id)).toEqual([primary, first, second]);
+  });
+
+  it("does not create a primary when the product has none", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 5);
+    const productId = await seedProduct(db, storeId, "reorder-d1-no-primary");
+    const [a, b] = (await seedGallery(db, productId, 2)) as [string, string];
+
+    await repo.reorderProductImages({ productId, storeId, imageIds: [b, a] });
+
+    expect(await primaryFlags(db, productId)).toEqual([0, 0]);
+  });
+
+  it("accepts an empty list for a product with no images as a no-op", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 6);
+    const productId = await seedProduct(db, storeId, "reorder-d1-empty");
+
+    const result = await repo.reorderProductImages({ productId, storeId, imageIds: [] });
+
+    // An empty `CASE` is not valid SQL, so the driver skips the write entirely.
+    expect(result).toEqual({ ok: true, images: [] });
+  });
+
+  it("reports a product owned by another store as PRODUCT_NOT_FOUND and writes nothing", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 7);
+    const otherStoreId = await seedSeller(db, 8);
+    const foreignProductId = await seedProduct(db, otherStoreId, "reorder-d1-foreign");
+    const [a, b] = (await seedGallery(db, foreignProductId, 2)) as [string, string];
+
+    expect(
+      await repo.reorderProductImages({
+        productId: foreignProductId,
+        storeId,
+        imageIds: [b, a],
+      }),
+    ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+    expect(await sortOrdersById(db, foreignProductId)).toEqual({ [a]: 0, [b]: 1 });
+  });
+
+  it("reports an unknown product as PRODUCT_NOT_FOUND", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 9);
+
+    expect(
+      await repo.reorderProductImages({
+        productId: "01955f00-0000-7000-8000-00000000dead",
+        storeId,
+        imageIds: [],
+      }),
+    ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+  });
+
+  it("rejects a partial list, a duplicate, an unknown id and a cross-product id, writing nothing", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 10);
+    const productId = await seedProduct(db, storeId, "reorder-d1-reject");
+    const bareProductId = await seedProduct(db, storeId, "reorder-d1-reject-bare");
+    const otherProductId = await seedProduct(db, storeId, "reorder-d1-reject-other");
+    const [a, b, c] = (await seedGallery(db, productId, 3)) as [string, string, string];
+    const [otherImage] = (await seedGallery(db, otherProductId, 1)) as [string];
+    const unknown = "01955f00-0000-7000-8000-00000000beef";
+
+    const attempts: Array<{ label: string; productId: string; imageIds: string[] }> = [
+      { label: "partial list", productId, imageIds: [c, a] },
+      { label: "duplicated id", productId, imageIds: [a, a, b] },
+      { label: "unknown id", productId, imageIds: [a, b, unknown] },
+      { label: "another product's image", productId, imageIds: [a, b, otherImage] },
+      { label: "non-empty list for a product with no images", productId: bareProductId, imageIds: [unknown] },
+    ];
+
+    for (const attempt of attempts) {
+      expect(
+        await repo.reorderProductImages({
+          productId: attempt.productId,
+          storeId,
+          imageIds: attempt.imageIds,
+        }),
+        attempt.label,
+      ).toEqual({ ok: false, reason: "IMAGE_SET_MISMATCH" });
+    }
+
+    // The no-partial-mutation guarantee, asserted across every rejection: not
+    // one gallery moved a single row.
+    expect(await sortOrdersById(db, productId)).toEqual({ [a]: 0, [b]: 1, [c]: 2 });
+    expect(await sortOrdersById(db, otherProductId)).toEqual({ [otherImage]: 0 });
+  });
+
+  it("reads the product's real image set rather than trusting the caller's list", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 11);
+    const productId = await seedProduct(db, storeId, "reorder-d1-readset");
+    const [a, b] = (await seedGallery(db, productId, 2)) as [string, string];
+    // A third image lands after the caller built its list, so that list is
+    // stale by the time it arrives. The driver re-reads, so it is refused.
+    const [late] = (await seedGallery(db, productId, 1)) as [string];
+
+    expect(
+      await repo.reorderProductImages({ productId, storeId, imageIds: [b, a] }),
+    ).toEqual({ ok: false, reason: "IMAGE_SET_MISMATCH" });
+    // And the refusal is not "repair the list silently": the late image keeps
+    // its position rather than being pushed to the end.
+    expect(await sortOrdersById(db, productId)).toEqual({ [a]: 0, [b]: 1, [late]: 0 });
+  });
+
+  it("reorders the same gallery twice, so the second order is not a no-op by accident", async () => {
+    const { db } = await setup();
+    const repo = createD1ProductRepository(db);
+    const storeId = await seedSeller(db, 12);
+    const productId = await seedProduct(db, storeId, "reorder-d1-twice");
+    const [a, b, c] = (await seedGallery(db, productId, 3)) as [string, string, string];
+
+    await repo.reorderProductImages({ productId, storeId, imageIds: [b, c, a] });
+    const second = await repo.reorderProductImages({
+      productId,
+      storeId,
+      imageIds: [a, b, c],
+    });
+
+    expect(second.ok && second.images.map((image) => image.id)).toEqual([a, b, c]);
+    expect(await sortOrdersById(db, productId)).toEqual({ [a]: 0, [b]: 1, [c]: 2 });
+  });
+});
+
 describe("D1 media object repository (raw BLOB statements)", () => {
   /**
    * Every byte of a value `0..255`, in an order that would not survive any

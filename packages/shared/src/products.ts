@@ -311,6 +311,67 @@ export interface SellerProductImageListData {
 export type ListSellerProductImagesEnvelope = ApiEnvelope<SellerProductImageListData>;
 
 /**
+ * Success payload for `DELETE /api/seller/products/:id/images/:imageId`.
+ *
+ * Deliberately small and deliberately **not** a {@link ProductImageDto}: the row
+ * is gone, so echoing it would invite a client to render a deleted image. The
+ * two ids echo the request so a client can reconcile against its own list
+ * without a follow-up read, and `wasPrimary` tells it whether the product just
+ * lost its primary image — the one fact a gallery cannot infer locally, since
+ * "no primary" is a valid state a reorder or a delete can both produce.
+ *
+ * Carries no `storage_key`: the shared image DTO has no field for it, so the
+ * same guarantee the list and upload envelopes give holds here.
+ */
+export interface DeletedProductImageData {
+  productId: string;
+  imageId: string;
+  /** Whether the removed image was the product's primary at the moment it was removed. */
+  wasPrimary: boolean;
+}
+
+/** Success payload for `DELETE /api/seller/products/:id/images/:imageId`. */
+export type DeleteProductImageEnvelope = ApiEnvelope<DeletedProductImageData>;
+
+/**
+ * Success payload for `POST /api/seller/products/:id/images/:imageId/primary`.
+ *
+ * The promoted row rather than an empty acknowledgement, so a client can
+ * re-render the gallery from this response alone. Promotion is idempotent, so a
+ * retried request returns the same row again rather than an error.
+ */
+export type SetPrimaryProductImageEnvelope = ApiEnvelope<ProductImageDto>;
+
+/**
+ * Body of the image-reorder request.
+ *
+ * `imageIds` is a **complete, ordered, duplicate-free** list of the product's
+ * image ids, not a partial move instruction. A partial list would be ambiguous
+ * to apply (does an absent image go to the front or the back?) and would let a
+ * stale client silently drop images, so the API requires the exact set and
+ * refuses anything else. That is what makes an invalid reorder a 422 that
+ * changes nothing at all, rather than a partial mutation a seller has to notice
+ * and undo by hand.
+ *
+ * Ids are never accepted from anywhere else: the product comes from the URL
+ * path, the store from the session, and the ownership of each id is re-resolved
+ * server-side.
+ */
+export interface ReorderProductImagesRequest {
+  imageIds: string[];
+}
+
+/**
+ * Success payload for `PATCH /api/seller/products/:id/images/order`.
+ *
+ * The same shape {@link ListSellerProductImagesEnvelope} carries, so a client
+ * replaces its gallery with one assignment instead of diffing. The returned
+ * order is the canonical read order, which still leads with the primary image
+ * (a reorder never changes which image is primary).
+ */
+export type ReorderProductImagesEnvelope = ApiEnvelope<SellerProductImageListData>;
+
+/**
  * Success payload for `POST /api/seller/products/:id/images`: the rows the
  * upload actually created, in submitted order.
  *

@@ -135,6 +135,7 @@ describe("catalog routes", () => {
         countImagesByProduct: inert,
         deleteProductImage: inert,
         setPrimaryProductImage: inert,
+        reorderProductImages: inert,
       } satisfies ProductRepository,
       auditLogRepository: {
         create: inert,

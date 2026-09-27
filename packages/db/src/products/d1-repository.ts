@@ -3,6 +3,7 @@ import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
 import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
 import { inventory, products, productImages, productVariants } from "../schema/catalog";
+import { buildImageSortOrderExpression, isExactImageOrderPermutation } from "./reorder";
 import type {
   AddProductImageInput,
   CreateProductConflictReason,
@@ -42,6 +43,13 @@ import type {
  * doing it in the one order that keeps the one-primary-per-product partial
  * unique index satisfied is what makes the two implementations behaviorally
  * identical rather than merely similar.
+ *
+ * `reorderProductImages` is a twin of the local driver too, down to the shared
+ * `./reorder` helpers that hold the exact-set check and the write expression:
+ * both drivers refuse anything that is not a permutation of the product's real
+ * image set, and both apply the accepted order in a single `UPDATE` so the
+ * all-or-nothing guarantee survives D1's lack of a transaction. It writes only
+ * `sortOrder`, so primary state is never touched.
  *
  * Worker-safe: only the Drizzle D1 driver and the product contract are
  * imported; the Node-only SQLite stack is never pulled into the Worker bundle.
@@ -274,6 +282,40 @@ export function createD1ProductRepository(
         throw new Error("product image promote returned no row");
       }
       return { ok: true, image: toProductImageRecord(row) };
+    },
+
+    async reorderProductImages(input) {
+      if ((await findOwnedProduct(db, input.productId, input.storeId)) === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      // The product's actual image set is read here rather than trusted from a
+      // prior lookup, so a concurrent insert or delete between the caller's read
+      // and this write is caught by the permutation check instead of being
+      // applied as a partial reorder.
+      const current = await db
+        .select({ id: productImages.id })
+        .from(productImages)
+        .where(eq(productImages.productId, input.productId))
+        .all();
+      if (!isExactImageOrderPermutation(input.imageIds, current.map((row) => row.id))) {
+        return { ok: false, reason: "IMAGE_SET_MISMATCH" };
+      }
+      // A product with no images submits an empty list, which is an exact
+      // permutation of an empty set — a successful no-op. The `CASE` expression
+      // is skipped because an empty one is not valid SQL.
+      //
+      // This is the whole reason the reorder is a single statement: D1 has no
+      // interactive transaction, so a loop of per-row updates would leave the
+      // gallery half-renumbered if a later statement failed. One `UPDATE` is
+      // one statement, so it is applied whole or not at all. It is awaited
+      // without `.run()`, matching the clear-then-set writes above.
+      if (input.imageIds.length > 0) {
+        await db
+          .update(productImages)
+          .set({ sortOrder: buildImageSortOrderExpression(input.imageIds) })
+          .where(eq(productImages.productId, input.productId));
+      }
+      return { ok: true, images: await loadProductImages(db, input.productId, input.storeId) };
     },
   };
 }

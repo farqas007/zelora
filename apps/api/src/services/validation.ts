@@ -6,6 +6,7 @@ import {
   CURRENCY_PATTERN,
   EMAIL_PATTERN,
   INVENTORY_LIMITS,
+  PRODUCT_IMAGE_LIMITS,
   PRODUCT_LIMITS,
   PRODUCT_SLUG_PATTERN,
   PRODUCT_VARIANT_LIMITS,
@@ -16,6 +17,7 @@ import {
   type CreateProductVariantRequest,
   type LoginRequest,
   type RegisterRequest,
+  type ReorderProductImagesRequest,
   type SellerOnboardingRequest,
   type SetInventoryRequest,
   type UpdateCartItemRequest,
@@ -568,4 +570,75 @@ export function parseSetInventoryRequest(body: unknown): SetInventoryRequest {
   }
 
   return { quantity: quantity as number };
+}
+
+/**
+ * Parse and validate a product-image reorder request body.
+ *
+ * Only the *shape* of `imageIds` is decided here; whether the ids are the
+ * product's actual images is a data question the repository answers, because
+ * only it can see the product. This split is deliberate: shape problems are
+ * per-field 422s a client can fix from the message alone, while a set mismatch
+ * is reported by the service as a single "that is not this product's images"
+ * answer that does not disclose which id was wrong.
+ *
+ * What is enforced, and why each rule is a rejection rather than a repair:
+ *
+ * - **`imageIds` is required and must be an array.** A bare object or a
+ *   missing field is a shape mistake, not an order.
+ * - **Every entry must be a string and a canonical UUIDv7.** A non-string entry
+ *   is rejected outright rather than stringified, so a client cannot smuggle
+ *   `null`/`0`/`{}` into the query; an id that is not a well-formed id is
+ *   rejected here instead of being sent to the database as a parameter that
+ *   simply matches nothing.
+ * - **No duplicates.** A repeated id means one image is asked for two positions
+ *   while another gets none, and applying that would renumber fewer rows than
+ *   the caller listed. Rejecting is the only outcome that cannot corrupt the
+ *   order.
+ * - **At most {@link PRODUCT_IMAGE_LIMITS.maxPerProduct} entries.** The same
+ *   bound the upload path enforces, so a reorder request can never be larger
+ *   than the largest gallery that can exist. An empty list is *accepted* here:
+ *   reordering a product with no images is a legitimate no-op, and whether it
+ *   is applicable is the repository's call.
+ *
+ * Field problems are collected into a single {@link ValidationError}.
+ */
+export function parseReorderProductImagesRequest(body: unknown): ReorderProductImagesRequest {
+  const record = asObjectBody(body);
+  const fields: FieldErrors = {};
+
+  const raw = record.imageIds;
+  if (raw === undefined || raw === null) {
+    addFieldError(fields, "imageIds", "Image ids are required.");
+  } else if (!Array.isArray(raw)) {
+    addFieldError(fields, "imageIds", "Image ids must be an array.");
+  } else if (raw.length > PRODUCT_IMAGE_LIMITS.maxPerProduct) {
+    addFieldError(
+      fields,
+      "imageIds",
+      `Image ids must contain at most ${PRODUCT_IMAGE_LIMITS.maxPerProduct} entries.`,
+    );
+  } else {
+    const imageIds: string[] = [];
+    for (const [index, entry] of raw.entries()) {
+      if (typeof entry !== "string") {
+        addFieldError(fields, "imageIds", `Image ids must be strings (entry ${index + 1}).`);
+        continue;
+      }
+      if (!isValidId(entry)) {
+        addFieldError(fields, "imageIds", `Image ids must be valid ids (entry ${index + 1}).`);
+        continue;
+      }
+      if (imageIds.includes(entry)) {
+        addFieldError(fields, "imageIds", `Image ids must not repeat (entry ${index + 1}).`);
+        continue;
+      }
+      imageIds.push(entry);
+    }
+    if (Object.keys(fields).length === 0) {
+      return { imageIds };
+    }
+  }
+
+  throw new ValidationError("The request is invalid.", fields);
 }

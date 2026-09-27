@@ -9,12 +9,15 @@ import type {
   AddProductImagesEnvelope,
   CreateProductEnvelope,
   CreateProductVariantEnvelope,
+  DeleteProductImageEnvelope,
   GetSellerProductEnvelope,
   ListSellerProductImagesEnvelope,
   ListSellerProductsEnvelope,
   PublishProductEnvelope,
+  ReorderProductImagesEnvelope,
   SellerOnboardingEnvelope,
   SetInventoryEnvelope,
+  SetPrimaryProductImageEnvelope,
 } from "@zelora/shared";
 import type { AppEnv } from "../context";
 import { createAuthMiddleware } from "../middleware/auth";
@@ -59,6 +62,19 @@ import type { RateLimiter } from "../services/rate-limit";
  * and is therefore the only request shape that can be large. The handler reads
  * the parts and delegates to {@link SellerService.addProductImages}; it does no
  * image validation of its own and never touches storage.
+ *
+ * The image-*management* routes —
+ * `DELETE /products/:id/images/:imageId`,
+ * `POST /products/:id/images/:imageId/primary` and
+ * `PATCH /products/:id/images/order` — address images that already exist. They
+ * carry the same stack as every other seller write (auth, seller-role gate,
+ * CSRF, per-IP rate limit) on their own dedicated
+ * `seller-product-image-manage` bucket, which is deliberately not the upload
+ * bucket: an upload is a large bounded body, while these are small requests
+ * against a product the seller already owns, and the two should not be able to
+ * starve each other. None of them reads a request value as an owner: the store
+ * comes from the session, the product id from the path, and every image id is
+ * re-resolved inside {@link SellerService}.
  *
  * Route modules stay edge-compatible: the seller repository is injected by the
  * application boundary and only its contract is referenced here as a type. The
@@ -337,6 +353,35 @@ export function createSellerRoutes(dependencies: SellerRoutesDependencies): Hono
     windowSeconds: config.rateLimitProductCreateIpWindowSeconds,
   });
 
+  /**
+   * The bucket behind the image-*management* routes (delete, set-primary,
+   * reorder) as opposed to image *upload*.
+   *
+   * Separate from `seller-product-image-upload` on purpose. They are different
+   * operations with very different costs and very different abuse shapes: an
+   * upload is expensive and bounded by the body limit, while these three are
+   * small, cheap requests against a product that already exists. Sharing one
+   * bucket would let a seller who is being throttled on uploads also spend the
+   * same budget on reordering, or the reverse — the two would starve each other
+   * and an operator tuning the upload limit would silently retune a gallery.
+   * One bucket for all three management routes is enough: they are
+   * interchangeable in cost, and three separate scopes would only mean three
+   * numbers nobody tunes.
+   *
+   * The limit itself is the existing seller product-mutation budget, exactly as
+   * the variant, inventory, publish and upload routes already use it, so the
+   * seller's write surface stays on one number an operator already knows.
+   */
+  const productImageManageRateLimit = createIpRateLimitMiddleware({
+    config,
+    rateLimiter,
+    clientIpResolver,
+    clock,
+    scope: "seller-product-image-manage",
+    limit: config.rateLimitProductCreateIpMax,
+    windowSeconds: config.rateLimitProductCreateIpWindowSeconds,
+  });
+
   app.post("/onboarding", requireAuth, requireCsrf, onboardingRateLimit, async (c) => {
     const auth = c.get("auth");
     const body = await readJsonBody(c);
@@ -450,6 +495,104 @@ export function createSellerRoutes(dependencies: SellerRoutesDependencies): Hono
       const uploads = await readImageUploads(c);
       const data = await sellerService.addProductImages(auth.user, id, uploads);
       return c.json<AddProductImagesEnvelope>({ ok: true, data }, 201);
+    },
+  );
+
+  /**
+   * The image-management routes, registered after the upload route so the two
+   * path shapes stay unambiguous to a reader: everything below addresses an
+   * *existing* image, where `POST /images` creates new ones.
+   *
+   * All three run behind the same stack as the other seller writes —
+   * authentication, the seller-role gate, CSRF, then the shared
+   * media-management per-IP budget — and none of them does any ownership or
+   * validation work of its own. That is entirely
+   * {@link SellerService}'s: the store comes from the session, the product id
+   * from the path, and every image id is re-resolved server-side.
+   */
+
+  /**
+   * `DELETE /products/:id/images/:imageId` removes the `product_images` row and
+   * nothing else.
+   *
+   * The stored bytes behind the image's `storage_key` are deliberately left in
+   * place. Reclaiming them is a separate concern with its own failure modes, and
+   * a delete that had already destroyed the bytes could not be undone once the
+   * row was gone. A storage driver that is not configured therefore cannot turn
+   * a successful row delete into a 500.
+   *
+   * The response is a small typed acknowledgement rather than the deleted row,
+   * so a client reconciles the two ids it sent and learns whether the product
+   * just lost its primary image.
+   */
+  app.delete(
+    "/products/:id/images/:imageId",
+    requireAuth,
+    requireSellerRole(),
+    requireCsrf,
+    productImageManageRateLimit,
+    async (c) => {
+      const auth = c.get("auth");
+      const id = c.req.param("id");
+      const imageId = c.req.param("imageId");
+      const data = await sellerService.deleteProductImage(auth.user, id, imageId);
+      return c.json<DeleteProductImageEnvelope>(
+        { ok: true, data: { productId: id, imageId, wasPrimary: data.isPrimary } },
+        200,
+      );
+    },
+  );
+
+  /**
+   * `POST /products/:id/images/:imageId/primary` promotes one image of the
+   * caller's own product.
+   *
+   * Idempotent by construction: promoting the image that is already primary is
+   * a success returning that same image, so a client that retries after a
+   * dropped response converges instead of erroring. The promoted row is returned
+   * rather than an empty acknowledgement, so a gallery can re-render from the
+   * response alone.
+   */
+  app.post(
+    "/products/:id/images/:imageId/primary",
+    requireAuth,
+    requireSellerRole(),
+    requireCsrf,
+    productImageManageRateLimit,
+    async (c) => {
+      const auth = c.get("auth");
+      const id = c.req.param("id");
+      const imageId = c.req.param("imageId");
+      const data = await sellerService.setPrimaryProductImage(auth.user, id, imageId);
+      return c.json<SetPrimaryProductImageEnvelope>({ ok: true, data }, 200);
+    },
+  );
+
+  /**
+   * `PATCH /products/:id/images/order` replaces the product's display order.
+   *
+   * The body is `{ "imageIds": [...] }` and must be a complete, duplicate-free
+   * permutation of the product's current image ids. A partial list would be
+   * ambiguous to apply, so anything else is a 422 that changes nothing — the
+   * seller re-sends the current list and nothing is lost. The service validates
+   * the shape and the repository validates the set; this handler only reads the
+   * body and hands it over, exactly as the other seller writes do.
+   *
+   * The literal `order` segment is registered as its own path, so it can never
+   * be captured as an `:imageId`.
+   */
+  app.patch(
+    "/products/:id/images/order",
+    requireAuth,
+    requireSellerRole(),
+    requireCsrf,
+    productImageManageRateLimit,
+    async (c) => {
+      const auth = c.get("auth");
+      const id = c.req.param("id");
+      const body = await readJsonBody(c);
+      const data = await sellerService.reorderProductImages(auth.user, id, body);
+      return c.json<ReorderProductImagesEnvelope>({ ok: true, data }, 200);
     },
   );
 

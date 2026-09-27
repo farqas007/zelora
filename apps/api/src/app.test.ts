@@ -83,6 +83,7 @@ const productRepository: ProductRepository = {
   countImagesByProduct: unimplemented,
   deleteProductImage: unimplemented,
   setPrimaryProductImage: unimplemented,
+  reorderProductImages: unimplemented,
 };
 
 const cartRepository: CartRepository = {

@@ -283,6 +283,57 @@ export type SetPrimaryProductImageResult =
   | { ok: true; image: ProductImageRecord }
   | { ok: false; reason: SetPrimaryProductImageConflictReason };
 
+/**
+ * Everything required to reorder one owned product's images.
+ *
+ * `imageIds` is a **complete, ordered, duplicate-free** list of the product's
+ * image ids, not a partial move instruction, and this port requires that
+ * exactly: the drivers refuse anything that is not a permutation of the
+ * product's current image set. A partial list would be ambiguous to apply and
+ * would let a stale caller silently drop an image, so the all-or-nothing rule
+ * is enforced in the driver rather than trusted from the caller.
+ *
+ * Ownership (`storeId`) is derived by the service from the authenticated
+ * seller; `productId` comes from the URL path and is never taken from client
+ * input. No target sort order is accepted: the position in `imageIds` *is* the
+ * new `sortOrder`, so the caller cannot request two images at the same position.
+ */
+export interface ReorderProductImagesInput {
+  productId: string;
+  /** The owning store, resolved by the service from the authenticated seller. */
+  storeId: string;
+  /** The complete new order, most significant first. */
+  imageIds: readonly string[];
+}
+
+/**
+ * Why an owned reorder was refused.
+ *
+ * `PRODUCT_NOT_FOUND` covers both an unknown product and one owned by another
+ * store, exactly as elsewhere in this port, so existence never leaks.
+ * `IMAGE_SET_MISMATCH` is reported only once the product is already proven owned
+ * by the caller, and covers a submitted list that duplicates an id, omits one of
+ * the product's images, or names an image that is not the product's. It is a
+ * single reason on purpose: the seller needs to re-send the current list, and
+ * which specific id was wrong is not actionable.
+ */
+export type ReorderProductImagesConflictReason =
+  | "PRODUCT_NOT_FOUND"
+  | "IMAGE_SET_MISMATCH";
+
+/**
+ * The product's images after the reorder, in the canonical read order
+ * (primary first, then `sortOrder` ascending, then `id` ascending) — the same
+ * order {@link ProductRepository.listImagesByProduct} returns, so a client can
+ * replace its gallery from this response without a follow-up read.
+ *
+ * A reorder never changes primary state, so the primary image still leads the
+ * returned list no matter where it sits in the submitted order.
+ */
+export type ReorderProductImagesResult =
+  | { ok: true; images: ProductImageRecord[] }
+  | { ok: false; reason: ReorderProductImagesConflictReason };
+
 export interface ProductRepository {
   listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage>;
   findByStoreAndId(storeId: string, productId: string): Promise<ProductDetailRecord | null>;
@@ -389,4 +440,25 @@ export interface ProductRepository {
    * on the next read.
    */
   setPrimaryProductImage(input: SetPrimaryProductImageInput): Promise<SetPrimaryProductImageResult>;
+  /**
+   * Replace the display order of a product the caller owns with a complete,
+   * duplicate-free permutation of its current image ids, and return the images
+   * in the canonical read order afterwards.
+   *
+   * The submitted set is checked against the product's actual image set inside
+   * the driver, before anything is written: a duplicate, a missing id, a
+   * foreign id or an id belonging to another product is reported as
+   * `IMAGE_SET_MISMATCH` and **nothing is mutated**. Both drivers then apply the
+   * whole new order in a single `UPDATE`, so a reorder is all-or-nothing even
+   * on D1 (which has no interactive transaction) — a rejected or failed reorder
+   * can never leave a product with a half-renumbered gallery.
+   *
+   * Only `sortOrder` is written. `isPrimary` is never touched by this method, so
+   * a reorder cannot promote, demote or clear the primary image; the primary
+   * simply keeps leading the canonical read order.
+   *
+   * Unknown or unowned products resolve to `PRODUCT_NOT_FOUND` (no existence
+   * leak), matching every other write on this port.
+   */
+  reorderProductImages(input: ReorderProductImagesInput): Promise<ReorderProductImagesResult>;
 }

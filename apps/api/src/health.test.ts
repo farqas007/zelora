@@ -93,6 +93,7 @@ const productRepository: ProductRepository = {
   countImagesByProduct: unimplemented,
   deleteProductImage: unimplemented,
   setPrimaryProductImage: unimplemented,
+  reorderProductImages: unimplemented,
 };
 
 function makeApp(): ReturnType<typeof createApp> {

@@ -917,4 +917,231 @@ describe("product repository: image management", () => {
       expect(readImages(productId).map((image) => image.isPrimary)).toEqual([1]);
     });
   });
+
+  describe("reorderProductImages", () => {
+    /**
+     * Seed `count` images with distinct urls and an ascending sort order, and
+     * return their ids in insertion order.
+     */
+    function seedGallery(productId: string, count: number): string[] {
+      return Array.from({ length: count }, (_unused, index) =>
+        seedImage(productId, {
+          url: `https://media.test/${index}.jpg`,
+          sortOrder: index,
+        }),
+      );
+    }
+
+    /**
+     * `{ imageId: sortOrder }` for a product, read straight from the table.
+     *
+     * Keyed by id rather than returned as a positional array because
+     * {@link readImages} carries no `ORDER BY`: SQLite happens to answer it from
+     * a covering index, but nothing promises that order, and a positional
+     * assertion about sort orders would be asserting the accident instead of the
+     * write. Every assertion below is about *which* image holds *which* order.
+     */
+    function sortOrdersById(productId: string): Record<string, number> {
+      return Object.fromEntries(
+        db
+          .select({ id: schema.productImages.id, sortOrder: schema.productImages.sortOrder })
+          .from(schema.productImages)
+          .where(eq(schema.productImages.productId, productId))
+          .all()
+          .map((image) => [image.id, image.sortOrder]),
+      );
+    }
+
+    it("applies a new order and returns the images in it", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-apply");
+      const [a, b, c] = seedGallery(productId, 3) as [string, string, string];
+
+      const result = await repo.reorderProductImages({
+        productId,
+        storeId: scaffold.storeId,
+        imageIds: [c, a, b],
+      });
+
+      expect(result.ok).toBe(true);
+      expect(result.ok && result.images.map((image) => image.id)).toEqual([c, a, b]);
+      expect(sortOrdersById(productId)).toEqual({ [a]: 1, [b]: 2, [c]: 0 });
+    });
+
+    it("rewrites a descending order to a dense ascending sequence", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-dense");
+      const [a, b, c, d] = seedGallery(productId, 4) as [string, string, string, string];
+
+      await repo.reorderProductImages({
+        productId,
+        storeId: scaffold.storeId,
+        imageIds: [d, c, b, a],
+      });
+
+      // Dense 0..n-1, not the submitted 3,2,1,0: the contract is relative
+      // order, and the canonical read order depends on those values being a
+      // clean sequence.
+      expect(sortOrdersById(productId)).toEqual({ [a]: 3, [b]: 2, [c]: 1, [d]: 0 });
+    });
+
+    it("accepts an empty list for a product with no images as a no-op", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-empty");
+
+      const result = await repo.reorderProductImages({
+        productId,
+        storeId: scaffold.storeId,
+        imageIds: [],
+      });
+
+      expect(result).toEqual({ ok: true, images: [] });
+    });
+
+    it("does not promote, demote or clear the primary when it is submitted last", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-primary-last");
+      const primary = seedImage(productId, { url: "https://media.test/hero.jpg", isPrimary: 1 });
+      const first = seedImage(productId, { url: "https://media.test/1.jpg", sortOrder: 1 });
+      const second = seedImage(productId, { url: "https://media.test/2.jpg", sortOrder: 2 });
+
+      const result = await repo.reorderProductImages({
+        productId,
+        storeId: scaffold.storeId,
+        imageIds: [first, second, primary],
+      });
+
+      expect(readImages(productId).map((image) => image.isPrimary)).toEqual([0, 0, 1]);
+      // Primary first, then the new relative order of the rest.
+      expect(result.ok && result.images.map((image) => image.url)).toEqual([
+        "https://media.test/hero.jpg",
+        "https://media.test/1.jpg",
+        "https://media.test/2.jpg",
+      ]);
+    });
+
+    it("does not create a primary when the product has none", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-no-primary");
+      const [a, b] = seedGallery(productId, 2) as [string, string];
+
+      await repo.reorderProductImages({
+        productId,
+        storeId: scaffold.storeId,
+        imageIds: [b, a],
+      });
+
+      expect(readImages(productId).map((image) => image.isPrimary)).toEqual([0, 0]);
+    });
+
+    it("ignores the submitted order of another product's images", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-isolated-a");
+      const other = seedProduct(scaffold.storeId, "reorder-isolated-b");
+      const [a, b] = seedGallery(productId, 2) as [string, string];
+      const [c] = seedGallery(other, 1) as [string];
+
+      await repo.reorderProductImages({
+        productId,
+        storeId: scaffold.storeId,
+        imageIds: [b, a],
+      });
+
+      // The `WHERE product_id` bound is what keeps a reorder from reaching
+      // across products; `c` is in a different product and must be untouched.
+      expect(sortOrdersById(other)).toEqual({ [c]: 0 });
+      expect(sortOrdersById(productId)).toEqual({ [a]: 1, [b]: 0 });
+    });
+
+    it("reports an unowned product as PRODUCT_NOT_FOUND and writes nothing", async () => {
+      const foreign = seedProduct(scaffold.otherStoreId, "reorder-foreign");
+      const [a, b] = seedGallery(foreign, 2) as [string, string];
+
+      expect(
+        await repo.reorderProductImages({
+          productId: foreign,
+          storeId: scaffold.storeId,
+          imageIds: [b, a],
+        }),
+      ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+      expect(sortOrdersById(foreign)).toEqual({ [a]: 0, [b]: 1 });
+    });
+
+    it("reports an unknown product as PRODUCT_NOT_FOUND", async () => {
+      expect(
+        await repo.reorderProductImages({
+          productId: "01955f00-0000-7000-8000-000000000001",
+          storeId: scaffold.storeId,
+          imageIds: [],
+        }),
+      ).toEqual({ ok: false, reason: "PRODUCT_NOT_FOUND" });
+    });
+
+    it("rejects a partial list and leaves every sort order untouched", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-partial");
+      const [a, b, c] = seedGallery(productId, 3) as [string, string, string];
+
+      expect(
+        await repo.reorderProductImages({
+          productId,
+          storeId: scaffold.storeId,
+          imageIds: [c, a],
+        }),
+      ).toEqual({ ok: false, reason: "IMAGE_SET_MISMATCH" });
+      // The no-partial-mutation guarantee: not one row moved.
+      expect(sortOrdersById(productId)).toEqual({ [a]: 0, [b]: 1, [c]: 2 });
+    });
+
+    it("rejects a duplicated id and leaves every sort order untouched", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-duplicate");
+      const [a, b] = seedGallery(productId, 2) as [string, string];
+
+      expect(
+        await repo.reorderProductImages({
+          productId,
+          storeId: scaffold.storeId,
+          imageIds: [a, a],
+        }),
+      ).toEqual({ ok: false, reason: "IMAGE_SET_MISMATCH" });
+      expect(sortOrdersById(productId)).toEqual({ [a]: 0, [b]: 1 });
+    });
+
+    it("rejects an unknown id and leaves every sort order untouched", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-unknown-id");
+      const [a, b] = seedGallery(productId, 2) as [string, string];
+
+      expect(
+        await repo.reorderProductImages({
+          productId,
+          storeId: scaffold.storeId,
+          imageIds: [a, "01955f00-0000-7000-8000-000000000002"],
+        }),
+      ).toEqual({ ok: false, reason: "IMAGE_SET_MISMATCH" });
+      expect(sortOrdersById(productId)).toEqual({ [a]: 0, [b]: 1 });
+    });
+
+    it("rejects an image of another product and leaves every sort order untouched", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-cross-a");
+      const other = seedProduct(scaffold.storeId, "reorder-cross-b");
+      const [a, b] = seedGallery(productId, 2) as [string, string];
+      const [c] = seedGallery(other, 1) as [string];
+
+      expect(
+        await repo.reorderProductImages({
+          productId,
+          storeId: scaffold.storeId,
+          imageIds: [a, b, c],
+        }),
+      ).toEqual({ ok: false, reason: "IMAGE_SET_MISMATCH" });
+      expect(sortOrdersById(productId)).toEqual({ [a]: 0, [b]: 1 });
+      expect(sortOrdersById(other)).toEqual({ [c]: 0 });
+    });
+
+    it("rejects a non-empty list for a product with no images", async () => {
+      const productId = seedProduct(scaffold.storeId, "reorder-empty-nonempty");
+
+      expect(
+        await repo.reorderProductImages({
+          productId,
+          storeId: scaffold.storeId,
+          imageIds: ["01955f00-0000-7000-8000-000000000002"],
+        }),
+      ).toEqual({ ok: false, reason: "IMAGE_SET_MISMATCH" });
+      expect(readImages(productId)).toEqual([]);
+    });
+  });
 });

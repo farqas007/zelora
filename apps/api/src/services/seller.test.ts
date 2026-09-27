@@ -34,6 +34,8 @@ import type {
   ProductRepository,
   ProductVariantDetailRecord,
   PublishProductResult,
+  ReorderProductImagesInput,
+  ReorderProductImagesResult,
   SetInventoryInput,
   SetInventoryResult,
   SetPrimaryProductImageInput,
@@ -196,6 +198,8 @@ class FakeProductRepository implements ProductRepository {
   /** Every `deleteProductImage` / `setPrimaryProductImage` input, for the same reason. */
   deleteImageCalls: DeleteProductImageInput[] = [];
   setPrimaryImageCalls: SetPrimaryProductImageInput[] = [];
+  /** Every `reorderProductImages` input, so the submitted order is assertable. */
+  reorderImageCalls: ReorderProductImagesInput[] = [];
 
   async listByStore(storeId: string, query: ProductListQuery): Promise<ProductListPage> {
     this.listCalls.push({ storeId, query });
@@ -238,11 +242,11 @@ class FakeProductRepository implements ProductRepository {
   }
 
   /**
-   * Mirrors the real drivers: ownership resolves through `products.storeId` and
+   * Mirrors both real drivers: ownership resolves through `products.storeId` and
    * the order is primary first, then `sortOrder` ascending, then `id` ascending.
    * A product owned by another store yields nothing at all.
    */
-  private collectImages(productId: string, storeId: string): ProductImageRecord[] {
+  collectImages(productId: string, storeId: string): ProductImageRecord[] {
     const product = this.products.get(productId);
     if (product === undefined || product.storeId !== storeId) {
       return [];
@@ -459,6 +463,42 @@ class FakeProductRepository implements ProductRepository {
     const promoted: ProductImageRecord = { ...target, isPrimary: true };
     this.images.set(promoted.id, promoted);
     return { ok: true, image: promoted };
+  }
+
+  /**
+   * Mirrors both real drivers' reorder contract: ownership first, then an exact
+   * permutation check against the product's real image set, then a write that
+   * touches `sortOrder` only.
+   *
+   * The permutation check is written out here rather than imported from the
+   * driver so this fake is an *independent* statement of the contract. The
+   * exhaustive proof that the real implementation accepts exactly the right
+   * inputs lives in the driver tests against real SQLite, not here.
+   */
+  async reorderProductImages(input: ReorderProductImagesInput): Promise<ReorderProductImagesResult> {
+    this.reorderImageCalls.push(input);
+    const product = this.products.get(input.productId);
+    if (product === undefined || product.storeId !== input.storeId) {
+      return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+    }
+    const current = this.collectImages(input.productId, input.storeId);
+    const currentIds = current.map((image) => image.id);
+    const isPermutation =
+      input.imageIds.length === currentIds.length &&
+      new Set(input.imageIds).size === input.imageIds.length &&
+      input.imageIds.every((id) => currentIds.includes(id));
+    if (!isPermutation) {
+      return { ok: false, reason: "IMAGE_SET_MISMATCH" };
+    }
+    input.imageIds.forEach((imageId, position) => {
+      const image = this.images.get(imageId);
+      if (image !== undefined) {
+        // `isPrimary` is spread through untouched, so a reorder can never
+        // promote, demote or clear the primary image.
+        this.images.set(imageId, { ...image, sortOrder: position });
+      }
+    });
+    return { ok: true, images: this.collectImages(input.productId, input.storeId) };
   }
 
   seedProduct(product: ProductRecord): void {
@@ -2266,6 +2306,200 @@ describe("SellerService", () => {
         "SELLER_NOT_APPROVED",
         403,
       );
+    });
+  });
+
+  describe("reorderProductImages", () => {
+    function seedImageSeller(): void {
+      seedApprovedSellerForProductReads();
+    }
+
+    function seedOwnedProductWithId(seq: number): string {
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      const productId = fakeId(seq);
+      products.seedProduct({
+        id: productId,
+        storeId: "st-reads",
+        slug: `image-order-${seq}`,
+        name: `Image Order ${seq}`,
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+      return productId;
+    }
+
+    /** A product with `count` images seeded at ascending sort orders. */
+    function seedGallery(seq: number, count: number): { productId: string; ids: string[] } {
+      const productId = seedOwnedProductWithId(seq);
+      const ids = Array.from({ length: count }, (_unused, index) => {
+        const id = fakeId(seq + 1 + index);
+        products.seedImage(imageRecord({ id, productId, sortOrder: index }));
+        return id;
+      });
+      return { productId, ids };
+    }
+
+    it("reorders the product's own images and returns them in the new order", async () => {
+      seedImageSeller();
+      const { productId, ids } = seedGallery(600, 3);
+      const [a, b, c] = ids as [string, string, string];
+
+      const data = await service.reorderProductImages(makeUser({ role: "seller" }), productId, {
+        imageIds: [c, a, b],
+      });
+
+      expect(data.productId).toBe(productId);
+      expect(data.images.map((image) => image.id)).toEqual([c, a, b]);
+      // The store comes from the session, never from the request, so a client
+      // cannot aim the reorder at another seller's gallery.
+      expect(products.reorderImageCalls).toEqual([
+        { productId, storeId: "st-reads", imageIds: [c, a, b] },
+      ]);
+    });
+
+    it("accepts an empty list for a product with no images", async () => {
+      seedImageSeller();
+      const productId = seedOwnedProductWithId(620);
+
+      const data = await service.reorderProductImages(makeUser({ role: "seller" }), productId, {
+        imageIds: [],
+      });
+
+      expect(data).toEqual({ productId, images: [] });
+    });
+
+    it("never touches primary state, even when the primary is submitted last", async () => {
+      seedImageSeller();
+      const { productId, ids } = seedGallery(630, 3);
+      const [first, second, third] = ids as [string, string, string];
+      // Promote the last image out of band, so the reorder is a real reorder
+      // rather than a promotion in disguise.
+      await service.setPrimaryProductImage(makeUser({ role: "seller" }), productId, third);
+
+      const data = await service.reorderProductImages(makeUser({ role: "seller" }), productId, {
+        imageIds: [first, second, third],
+      });
+
+      expect(data.images.filter((image) => image.isPrimary).map((image) => image.id)).toEqual([third]);
+      expect(data.images.map((image) => image.id)).toEqual([third, first, second]);
+    });
+
+    it("rejects a malformed product id without reaching the repository", async () => {
+      seedImageSeller();
+
+      await expectSellerError(
+        () => service.reorderProductImages(makeUser({ role: "seller" }), "not-a-uuid", { imageIds: [] }),
+        "PRODUCT_NOT_FOUND",
+        404,
+      );
+      expect(products.reorderImageCalls).toEqual([]);
+    });
+
+    it("reports a product owned by another store as PRODUCT_NOT_FOUND", async () => {
+      seedImageSeller();
+      const createdAt = new Date("2026-06-01T00:00:00.000Z");
+      const productId = fakeId(640);
+      products.seedProduct({
+        id: productId,
+        storeId: "st-someone-else",
+        slug: "image-order-foreign",
+        name: "Foreign",
+        description: null,
+        categoryId: null,
+        status: "draft",
+        createdAt,
+        updatedAt: createdAt,
+      });
+
+      await expectSellerError(
+        () =>
+          service.reorderProductImages(makeUser({ role: "seller" }), productId, {
+            imageIds: [],
+          }),
+        "PRODUCT_NOT_FOUND",
+        404,
+      );
+    });
+
+    it("requires an approved seller", async () => {
+      await expectSellerError(
+        () => service.reorderProductImages(makeUser(), fakeId(650), { imageIds: [] }),
+        "SELLER_NOT_APPROVED",
+        403,
+      );
+      expect(products.reorderImageCalls).toEqual([]);
+    });
+
+    // Shape rejections. Every one of these must fail before the repository is
+    // touched, so a malformed body can never reach the database at all.
+    it.each([
+      ["a missing imageIds field", {}],
+      ["a null imageIds", { imageIds: null }],
+      ["a non-array imageIds", { imageIds: "a,b" }],
+      ["a non-string entry", { imageIds: [1] }],
+      ["a null entry", { imageIds: [null] }],
+      ["a malformed id", { imageIds: ["not-a-uuid"] }],
+      ["a duplicated id", { imageIds: ["01955f00-0000-7000-8000-000000000001", "01955f00-0000-7000-8000-000000000001"] }],
+      ["an entry that is an object", { imageIds: [{}] }],
+    ])("rejects %s as a validation error and never calls the repository", async (_label, body) => {
+      seedImageSeller();
+      const { productId } = seedGallery(660, 2);
+
+      await expectSellerError(
+        () => service.reorderProductImages(makeUser({ role: "seller" }), productId, body),
+        "VALIDATION_ERROR",
+        422,
+      );
+      expect(products.reorderImageCalls).toEqual([]);
+    });
+
+    it("rejects more ids than a product can hold", async () => {
+      seedImageSeller();
+      const { productId } = seedGallery(670, 1);
+      const tooMany = Array.from(
+        { length: PRODUCT_IMAGE_LIMITS.maxPerProduct + 1 },
+        (_unused, index) => `01955f00-0000-7000-8000-${String(index).padStart(12, "0")}`,
+      );
+
+      await expectSellerError(
+        () => service.reorderProductImages(makeUser({ role: "seller" }), productId, { imageIds: tooMany }),
+        "VALIDATION_ERROR",
+        422,
+      );
+      expect(products.reorderImageCalls).toEqual([]);
+    });
+
+    // A set mismatch is a data question, not a shape question, so it surfaces as
+    // a 422 too — but from the repository's answer, and with one message for
+    // every kind of mismatch so no answer discloses which id was wrong.
+    it.each([
+      ["a partial list", ["01955f00-0000-7000-8000-000000000001"]],
+      ["an unknown id", ["01955f00-0000-7000-8000-000000000001", "01955f00-0000-7000-8000-0000000000ff"]],
+      ["another product's image", ["01955f00-0000-7000-8000-000000000001", "01955f00-0000-7000-8000-0000000000ee"]],
+    ])("rejects %s without disclosing which id was wrong", async (_label, imageIds) => {
+      seedImageSeller();
+      const { productId } = seedGallery(680, 1);
+
+      const error = await service
+        .reorderProductImages(makeUser({ role: "seller" }), productId, { imageIds })
+        .then(
+          () => undefined,
+          (caught: unknown) => caught,
+        );
+
+      expect(error).toBeInstanceOf(ValidationError);
+      if (!(error instanceof ValidationError)) {
+        throw error;
+      }
+      expect(error.statusCode).toBe(422);
+      const message = JSON.stringify(error);
+      // The response names the field and the rule, never the offending value.
+      expect(message).toContain("imageIds");
+      expect(message).not.toContain("01955f00-0000-7000-8000-0000000000ff");
+      expect(message).not.toContain("01955f00-0000-7000-8000-0000000000ee");
     });
   });
 

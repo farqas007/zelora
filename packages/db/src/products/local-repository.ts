@@ -2,6 +2,7 @@ import { and, asc, count, desc, eq, gte, lt, or } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
 import { decodeCatalogCursor, encodeCatalogCursor } from "../catalog/cursor";
 import { inventory, products, productImages, productVariants } from "../schema/catalog";
+import { buildImageSortOrderExpression, isExactImageOrderPermutation } from "./reorder";
 import type {
   AddProductImageInput,
   ProductDetailRecord,
@@ -37,6 +38,12 @@ import type {
  * touching a row, so an unknown product and a foreign one stay
  * indistinguishable. Promotion is two ordered writes (clear, then set) and
  * deletes never touch the stored bytes — see the port for why.
+ *
+ * `reorderProductImages` re-reads the product's actual image set and refuses
+ * anything that is not an exact permutation of it, then applies the whole new
+ * order in a single `UPDATE` via the shared `./reorder` helpers, so an invalid
+ * reorder mutates nothing and a valid one is all-or-nothing. It writes only
+ * `sortOrder`, so it can never change which image is primary.
  */
 export function createLocalProductRepository(db: LocalDatabase): ProductRepository {
   return {
@@ -266,6 +273,35 @@ export function createLocalProductRepository(db: LocalDatabase): ProductReposito
         throw new Error("product image promote returned no row");
       }
       return { ok: true, image: toProductImageRecord(promoted) };
+    },
+
+    async reorderProductImages(input) {
+      if (findOwnedProduct(db, input.productId, input.storeId) === null) {
+        return { ok: false, reason: "PRODUCT_NOT_FOUND" };
+      }
+      // The product's actual image set is read here rather than trusted from a
+      // prior lookup, so a concurrent insert or delete between the caller's read
+      // and this write is caught by the permutation check instead of being
+      // applied as a partial reorder.
+      const current = db
+        .select({ id: productImages.id })
+        .from(productImages)
+        .where(eq(productImages.productId, input.productId))
+        .all()
+        .map((row) => row.id);
+      if (!isExactImageOrderPermutation(input.imageIds, current)) {
+        return { ok: false, reason: "IMAGE_SET_MISMATCH" };
+      }
+      // A product with no images submits an empty list, which is an exact
+      // permutation of an empty set — a successful no-op. The `CASE` expression
+      // is skipped because an empty one is not valid SQL.
+      if (input.imageIds.length > 0) {
+        db.update(productImages)
+          .set({ sortOrder: buildImageSortOrderExpression(input.imageIds) })
+          .where(eq(productImages.productId, input.productId))
+          .run();
+      }
+      return { ok: true, images: loadProductImages(db, input.productId, input.storeId) };
     },
   };
 }

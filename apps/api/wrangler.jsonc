@@ -70,25 +70,5 @@
       // resolved relative to this config file (apps/api).
       "migrations_dir": "../../packages/db/migrations"
     }
-  ],
-  "r2_buckets": [
-    {
-      // Raw R2 binding name, exposed to the Worker as `env.MEDIA`.
-      //
-      // INERT IN THIS DEPLOYMENT. `MEDIA_BACKEND` is pinned to "d1" above, so
-      // `createWorkerMediaStorage` (src/worker.ts) never reads `env.MEDIA` and no
-      // bucket is created, required or billed for. The binding is left declared
-      // rather than deleted because removing it would delete an existing feature
-      // (the R2 media driver and its configuration) that this phase has not been
-      // asked to remove; it is simply not selected.
-      //
-      // Do NOT run `wrangler r2 bucket create zelora-media` for this deployment.
-      //
-      // The binding is only meaningful if `MEDIA_BACKEND` is set to "r2" AND
-      // `MEDIA_PUBLIC_BASE_URL` is configured, which is the behaviour the driver
-      // and its tests still cover.
-      "binding": "MEDIA",
-      "bucket_name": "zelora-media"
-    }
   ]
 }

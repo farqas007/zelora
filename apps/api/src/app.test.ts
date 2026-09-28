@@ -169,3 +169,48 @@ describe("createApp media storage composition", () => {
     expect(resolveAppMediaStorage(supplied)).toBe(supplied);
   });
 });
+
+/**
+ * Cross-cutting response-header contract, owned by the composition root because
+ * that is the only place both policies are installed. The media route asserts
+ * the half it depends on in `routes/media.test.ts`; what is checked here is that
+ * relaxing CORP did not quietly relax anything else — the API's read access is
+ * still CORS-gated to one configured origin with credentials.
+ */
+describe("createApp cross-origin response policy", () => {
+  const corsOrigin = "https://zelora-web.farqas007.workers.dev";
+
+  function corsConfiguredApp() {
+    return createApp({
+      ...unconfiguredDependencies(),
+      config: loadConfig({ NODE_ENV: "test", CORS_ORIGIN: corsOrigin }),
+    });
+  }
+
+  it("echoes only the configured origin on a credentialed API request", async () => {
+    const response = await corsConfiguredApp().request("/api/health", {
+      headers: { Origin: corsOrigin },
+    });
+
+    expect(response.headers.get("access-control-allow-origin")).toBe(corsOrigin);
+    expect(response.headers.get("access-control-allow-credentials")).toBe("true");
+  });
+
+  it("grants no origin but the configured one", async () => {
+    const response = await corsConfiguredApp().request("/api/health", {
+      headers: { Origin: "https://evil.test" },
+    });
+
+    // The CORS policy — not the CORP header — is what decides who may read a
+    // credentialed API response, and it stays a single explicit origin.
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
+  it("never emits a wildcard, which credentials would forbid anyway", async () => {
+    const response = await corsConfiguredApp().request("/api/health", {
+      headers: { Origin: corsOrigin },
+    });
+
+    expect(response.headers.get("access-control-allow-origin")).not.toBe("*");
+  });
+});

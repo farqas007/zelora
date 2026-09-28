@@ -4,7 +4,7 @@ import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { UserDto, UserRole } from "@zelora/shared";
 import type { AuthContextValue, AuthStatus } from "../context/AuthContext";
 import { useAuth } from "../context/AuthContext";
-import { RequireAdmin, RequireAuth } from "./AuthGate";
+import { ForbidAdmin, RequireAdmin, RequireAuth } from "./AuthGate";
 
 /**
  * Route guard tests.
@@ -72,6 +72,29 @@ function renderSellerRoute(): void {
             </RequireAuth>
           }
         />
+        <Route path="/dashboard" element={<p>Dashboard</p>} />
+        <Route path="/login" element={<p>Sign in</p>} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+/** Mount the seller-onboarding route behind `RequireAuth` + `ForbidAdmin`. */
+function renderOnboardingRoute(): void {
+  render(
+    <MemoryRouter initialEntries={["/seller/onboarding"]}>
+      <Routes>
+        <Route
+          path="/seller/onboarding"
+          element={
+            <RequireAuth>
+              <ForbidAdmin>
+                <p>Become a seller</p>
+              </ForbidAdmin>
+            </RequireAuth>
+          }
+        />
+        <Route path="/admin" element={<p>Admin seller management</p>} />
         <Route path="/dashboard" element={<p>Dashboard</p>} />
         <Route path="/login" element={<p>Sign in</p>} />
       </Routes>
@@ -155,5 +178,53 @@ describe("RequireAuth", () => {
     renderSellerRoute();
 
     expect(screen.getByText("Sign in")).toBeDefined();
+  });
+});
+
+describe("ForbidAdmin", () => {
+  it("renders the onboarding form for a customer", () => {
+    givenSession("authenticated", "customer");
+
+    renderOnboardingRoute();
+
+    expect(screen.getByText("Become a seller")).toBeDefined();
+  });
+
+  it("sends an administrator to the admin page instead of the onboarding form", () => {
+    // Navigation only: the API refuses the submission with
+    // SELLER_ONBOARDING_FORBIDDEN regardless. This keeps an admin from being
+    // shown a form that can only fail.
+    givenSession("authenticated", "admin");
+
+    renderOnboardingRoute();
+
+    expect(screen.getByText("Admin seller management")).toBeDefined();
+    expect(screen.queryByText("Become a seller")).toBeNull();
+  });
+
+  it("still renders the form for an already-approved seller", () => {
+    givenSession("authenticated", "seller");
+
+    renderOnboardingRoute();
+
+    expect(screen.getByText("Become a seller")).toBeDefined();
+  });
+
+  it("still sends a signed-out visitor to the sign-in page", () => {
+    givenSession("signed-out");
+
+    renderOnboardingRoute();
+
+    expect(screen.getByText("Sign in")).toBeDefined();
+    expect(screen.queryByText("Become a seller")).toBeNull();
+  });
+
+  it("waits for the session instead of redirecting while it is loading", () => {
+    givenSession("loading");
+
+    renderOnboardingRoute();
+
+    expect(screen.getByText("Checking session…")).toBeDefined();
+    expect(screen.queryByText("Become a seller")).toBeNull();
   });
 });

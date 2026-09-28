@@ -87,6 +87,21 @@ export function createLocalSellerRepository(db: LocalDatabase): SellerRepository
           return null;
         }
 
+        const account = tx.select({ role: users.role }).from(users).where(eq(users.id, userId)).get();
+        if (account === undefined) {
+          // A profile whose account has gone must not be promoted blind.
+          return null;
+        }
+        if (account.role === "admin") {
+          // Backstop for the service-level guard: the promotion below is an
+          // unconditional `role = 'seller'` write, and an admin is the platform's
+          // only administrator (`users_single_admin_unique` permits at most one),
+          // so demoting one here would leave no way to review sellers or
+          // bootstrap a replacement. `null` is the port's "nothing was
+          // activated" signal, which the service surfaces as NOT_FOUND.
+          return null;
+        }
+
         const sellerProfile = tx
           .update(sellerProfiles)
           .set({ status: "active" })

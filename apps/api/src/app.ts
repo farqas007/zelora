@@ -82,6 +82,35 @@ export function resolveAppMediaStorage(mediaStorage: MediaStorage | undefined): 
   return mediaStorage ?? createUnavailableMediaStorage("MEDIA_PUBLIC_BASE_URL is not set");
 }
 
+/**
+ * Security headers applied to every response.
+ *
+ * `crossOriginResourcePolicy` is the one default Hono overrides. Its default is
+ * `same-origin`, which is a *response* policy rather than a request one: the
+ * browser blocks a cross-origin **no-CORS** load of the resource, and an
+ * `<img src>` is exactly such a load. The public media route is served from the
+ * API origin while the storefront that renders those images is a different
+ * origin, so `same-origin` there does not fail loudly at boot or in CI — it
+ * fails silently in production, as a catalog full of broken product photos,
+ * while every seed image (same-origin, served by the web Worker) keeps working
+ * and hides the fault.
+ *
+ * `cross-origin` is the accurate value for this app and it is *not* a relaxation
+ * of the API's read access. The two policies are independent: CORP only governs
+ * no-CORS loads, and every `/api` surface is a JSON envelope that the SPA reads
+ * in CORS mode with credentials, where the `cors()` middleware below is — and
+ * remains — the only thing that decides who may read a credentialed response.
+ * So this header changes nothing for `/api` and unblocks `/media`.
+ *
+ * It is set here rather than on the media sub-app because Hono's
+ * `secureHeaders` applies its headers *after* `await next()`: a nested instance
+ * would set `cross-origin` first and then be overwritten by this one on the way
+ * out. One call site is also the only place where "which policy applies where"
+ * can be read at a glance; `routes/media.test.ts` pins the resulting contract so
+ * neither half can drift silently again.
+ */
+const SECURITY_HEADERS = secureHeaders({ crossOriginResourcePolicy: "cross-origin" });
+
 export function createApp(dependencies: AppDependencies): Hono {
   const { config, userRepository, sessionRepository, sellerRepository, catalogRepository, productRepository, cartRepository, auditLogRepository, passwordHasher, clock } = dependencies;
   const rateLimiter = dependencies.rateLimiter ?? new MemoryWindowRateLimiter(clock);
@@ -92,7 +121,7 @@ export function createApp(dependencies: AppDependencies): Hono {
   const app = new Hono();
   const logger = createLogger("api");
 
-  app.use("*", secureHeaders());
+  app.use("*", SECURITY_HEADERS);
   app.use(
     "/api/*",
     cors({
@@ -121,6 +150,7 @@ export function createApp(dependencies: AppDependencies): Hono {
     sellerRepository,
     productRepository,
     catalogRepository,
+    userRepository,
     mediaStorage,
   });
   const catalogService = new CatalogService({ catalogRepository });
@@ -196,6 +226,14 @@ export function createApp(dependencies: AppDependencies): Hono {
   // at a host/path that already ends in `/media`. Keeping the mount here (rather
   // than inside `createSellerRoutes`) is what makes the route available without a
   // session, which is what a customer's catalog and storefront pages need.
+  //
+  // Being outside `/api` also means outside the `cors()` middleware above, which
+  // is correct and sufficient: a cross-origin `<img>` load is a no-CORS request,
+  // so `Access-Control-Allow-Origin` would be ignored by the browser anyway. What
+  // actually unblocks it is `crossOriginResourcePolicy` on the shared
+  // {@link SECURITY_HEADERS} instance, and the route's own contract — no
+  // credentials, content-addressed keys, structural key validation — is asserted
+  // in `routes/media.test.ts`.
   app.route("/media", createMediaRoutes({ mediaStorage }));
 
   return app;

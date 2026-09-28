@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { AppError, ValidationError } from "@zelora/core";
-import type { UserRecord } from "@zelora/db/users";
+import type { UserRecord, UserRepository } from "@zelora/db/users";
 import type {
   CreateOnboardingInput,
   OnboardingConflictReason,
@@ -547,6 +547,32 @@ class FakeCatalogRepository implements CatalogRepository {
   }
 }
 
+/**
+ * Minimal `UserRepository` fake: only `findById` is reachable from
+ * `SellerService` (activation reads the target's role), so the write half is
+ * unimplemented rather than stubbed with silent no-ops that could hide a future
+ * accidental write.
+ */
+class FakeUserRepository implements UserRepository {
+  users: UserRecord[] = [];
+
+  async create(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+
+  async createAdmin(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+
+  async findByEmail(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+
+  async findById(id: string): Promise<UserRecord | null> {
+    return this.users.find((user) => user.id === id) ?? null;
+  }
+}
+
 function makeUser(overrides: Partial<UserRecord> = {}): UserRecord {
   const now = new Date();
   return {
@@ -701,6 +727,7 @@ describe("SellerService", () => {
   let repository: FakeSellerRepository;
   let products: FakeProductRepository;
   let catalog: FakeCatalogRepository;
+  let users: FakeUserRepository;
   let mediaStorage: FakeMediaStorage;
   let service: SellerService;
 
@@ -708,11 +735,23 @@ describe("SellerService", () => {
     repository = new FakeSellerRepository();
     products = new FakeProductRepository();
     catalog = new FakeCatalogRepository();
+    users = new FakeUserRepository();
+    // Default: active customers for the ids the seller tests use, so the
+    // activation guard's role read resolves and the promotion is allowed. The
+    // admin cases override a role explicitly.
+    users.users.push(
+      makeUser(),
+      makeUser({ id: "seller-user" }),
+      makeUser({ id: "active-user" }),
+      makeUser({ id: "suspended-user" }),
+      makeUser({ id: "rejected-user" }),
+    );
     mediaStorage = new FakeMediaStorage();
     service = new SellerService({
       sellerRepository: repository,
       productRepository: products,
       catalogRepository: catalog,
+      userRepository: users,
       mediaStorage,
     });
   });
@@ -951,6 +990,42 @@ describe("SellerService", () => {
       expect(repository.lastCreateInput).toBeNull();
     });
 
+    it("refuses an administrator before any repository lookup", async () => {
+      // An admin must not be able to apply to sell: approving the application
+      // would demote the platform's only administrator, and the refusal is on
+      // role, so it is a distinct code from the account-status refusals above.
+      const user = makeUser({ role: "admin" });
+
+      await expectSellerError(
+        () => service.onboard(user, validBody),
+        AUTH_ERROR_CODES.SELLER_ONBOARDING_FORBIDDEN,
+        403,
+      );
+      // No profile and no draft store are left behind to clean up.
+      expect(repository.lastCreateInput).toBeNull();
+    });
+
+    it("refuses an administrator whose account is also suspended, on the account", async () => {
+      // Status is checked first, matching the existing precedence: the caller
+      // gets the more specific reason about the account itself.
+      const user = makeUser({ role: "admin", status: "suspended" });
+
+      await expectSellerError(
+        () => service.onboard(user, validBody),
+        AUTH_ERROR_CODES.ACCOUNT_SUSPENDED,
+        403,
+      );
+    });
+
+    it("still allows a seller-role account to onboard again after a rejection", async () => {
+      // The guard is role-scoped, not "has a profile"-scoped: an existing seller
+      // (or a previously rejected one) must keep the normal duplicate-profile
+      // behaviour rather than being told they may not apply at all.
+      const result = await service.onboard(makeUser({ role: "seller" }), validBody);
+
+      expect(result.sellerProfile.status).toBe("pending");
+    });
+
     it("uses the authenticated user id and ignores spoofed userId/role/status in the body", async () => {
       const result = await service.onboard(makeUser(), {
         ...validBody,
@@ -1111,6 +1186,68 @@ describe("SellerService", () => {
         () => service.activateSeller("rejected-user"),
         AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
         409,
+      );
+    });
+
+    it("refuses to promote an administrator and leaves the profile pending", async () => {
+      // The load-bearing case: approving an admin would demote the platform's
+      // only administrator out of the role the database allows exactly one of,
+      // leaving nobody able to review sellers or bootstrap a replacement.
+      seedPendingSeller("admin-user");
+      users.users.push(makeUser({ id: "admin-user", role: "admin" }));
+
+      await expectSellerError(
+        () => service.activateSeller("admin-user"),
+        AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
+        409,
+      );
+
+      // Nothing was transitioned: the guard runs before the repository write.
+      const profile = await repository.findByUserId("admin-user");
+      expect(profile?.status).toBe("pending");
+    });
+
+    it("refuses an administrator even when the profile is already active", async () => {
+      // An already-active admin-held profile would make the repository's
+      // activation a no-op, but the role check must still not depend on whether
+      // a write would be visible.
+      repository.seedProfile({
+        id: "sp-admin-active",
+        userId: "admin-user",
+        slug: "admin-active-shop",
+        displayName: "Admin Shop",
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      repository.seedStore({
+        id: "st-admin-active",
+        sellerProfileId: "sp-admin-active",
+        name: "Admin Shop",
+        slug: "admin-active-shop",
+        description: null,
+        status: "active",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      users.users.push(makeUser({ id: "admin-user", role: "admin" }));
+
+      await expectSellerError(
+        () => service.activateSeller("admin-user"),
+        AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
+        409,
+      );
+    });
+
+    it("returns NOT_FOUND 404 when a seller profile has no surviving user row", async () => {
+      // The role is re-read from the user table, so a profile whose account has
+      // gone must fail as "not found" rather than be promoted blind.
+      seedPendingSeller("orphan-user");
+
+      await expectSellerError(
+        () => service.activateSeller("orphan-user"),
+        "NOT_FOUND",
+        404,
       );
     });
   });

@@ -49,6 +49,34 @@ export function RequireAdmin({ children }: { children: ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Seller-onboarding guard, the mirror image of {@link RequireAdmin}.
+ *
+ * The platform permits exactly one administrator, and approving a seller
+ * application promotes the account, so an administrator is not allowed to apply
+ * to sell: the API refuses the request with
+ * `SELLER_ONBOARDING_FORBIDDEN` regardless of what the browser renders. This
+ * guard exists so an admin is not shown a form that can only be submitted into a
+ * refusal — the same navigation-only role of `RequireAdmin`, reading the same
+ * already-resolved `user.role`, with no change to the session or the auth
+ * provider. An admin lands on the admin page, which is the page that actually
+ * reviews applications.
+ */
+export function ForbidAdmin({ children }: { children: ReactNode }) {
+  const { status, user } = useAuth();
+
+  if (status === "loading") {
+    return <LoadingState label="Checking session…" />;
+  }
+  if (status === "signed-out") {
+    return <Navigate to="/login" replace />;
+  }
+  if (user?.role === "admin") {
+    return <Navigate to="/admin" replace />;
+  }
+  return <>{children}</>;
+}
+
 export function RedirectIfAuthenticated({ children }: { children: ReactNode }) {
   const { status } = useAuth();
 

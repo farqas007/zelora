@@ -286,22 +286,92 @@ export interface FixtureImage {
   altText: string;
 }
 
+/** Environment variable naming the origin the seeded image URLs hang off. */
+export const SEED_IMAGE_BASE_URL_ENV_VAR = "ZELORA_SEED_IMAGE_BASE_URL";
+
+/**
+ * Origin used when {@link SEED_IMAGE_BASE_URL_ENV_VAR} is unset.
+ *
+ * `http://localhost:5173` is the Vite dev server, which is what serves
+ * `apps/web/public/images/products/` during local development. The default was
+ * previously the deployed web Worker's production origin, which meant a local
+ * `pnpm seed` wrote production URLs into the local SQLite file: rows rendered
+ * fine in a browser but resolved against a *deployed* host, so local work
+ * silently depended on a production deployment staying up and never changing.
+ */
+export const DEFAULT_SEED_IMAGE_BASE_URL = "http://localhost:5173";
+
+/**
+ * Normalize the configured image base URL, or throw.
+ *
+ * Trailing slashes are stripped so callers can always join with exactly one `/`,
+ * and a base carrying a query string or fragment is rejected outright: those
+ * cannot be concatenated with a path without producing a URL that points
+ * somewhere other than the operator meant.
+ */
+export function resolveSeedImageBaseUrl(
+  value: string | undefined = process.env[SEED_IMAGE_BASE_URL_ENV_VAR],
+): string {
+  const raw = (value === undefined ? DEFAULT_SEED_IMAGE_BASE_URL : value).trim();
+  if (raw === "") return DEFAULT_SEED_IMAGE_BASE_URL;
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error(
+      `[dev-seed] ${SEED_IMAGE_BASE_URL_ENV_VAR} must be an absolute http(s) URL, received: ${raw}`,
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      `[dev-seed] ${SEED_IMAGE_BASE_URL_ENV_VAR} must use http or https, received: ${raw}`,
+    );
+  }
+  if (parsed.search !== "" || parsed.hash !== "") {
+    throw new Error(
+      `[dev-seed] ${SEED_IMAGE_BASE_URL_ENV_VAR} must not include a query string or fragment, received: ${raw}`,
+    );
+  }
+  return raw.replace(/\/+$/, "");
+}
+
+/**
+ * True when the base URL points at the local machine.
+ *
+ * Used to refuse writing unreachable image URLs into a *remote* database: every
+ * browser and every other developer opening that database would get broken
+ * images, and unlike the local SQLite file there is no obvious moment at which
+ * the mistake becomes visible.
+ */
+export function isLoopbackSeedImageBaseUrl(baseUrl: string): boolean {
+  const hostname = new URL(baseUrl).hostname.toLowerCase();
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]" || hostname === "::1";
+}
+
 /**
  * Demo product artwork, served as real static assets from this repository.
  *
  * The four files live in `apps/web/public/images/products/` and are named after
  * the product slug they depict. Vite copies `public/**` verbatim to the build
  * root, and `apps/web/wrangler.jsonc` deploys that root as a Workers Static
- * Assets site, so each file is served from the deployed web Worker's origin at
+ * Assets site, so each file is served from the web Worker's origin at
  * `/images/products/<slug>.jpg` (the same `public/` → root-URL mapping the
  * `/assets/zelora-*.svg` logos already rely on).
+ *
+ * The origin is configuration, not a constant: it comes from
+ * {@link resolveSeedImageBaseUrl}, i.e. `ZELORA_SEED_IMAGE_BASE_URL`, defaulting
+ * to the local Vite server. It used to be the deployed web Worker's production
+ * origin hardcoded four times, which coupled the fixture to one deployment —
+ * every fork, preview environment and local database inherited production URLs,
+ * and changing the deployed origin would have silently stranded every already
+ * seeded row on an image that no longer resolves. A remote seed must set the
+ * variable explicitly to its own web origin; `./d1.ts` refuses a loopback base
+ * for the remote path.
  *
  * These URLs must be *loadable*: the browser fetches them directly from
  * `product_images.url` with no proxy or rewrite in front, so a reserved
  * placeholder host such as `example.test` (RFC 6761 — never resolves in DNS)
- * renders as a broken image on the catalog. The URLs below are absolute `https`
- * URLs on a host that actually resolves, so the same row renders identically in
- * a browser, from the deployed Worker, and from the local dev server.
+ * renders as a broken image on the catalog.
  *
  * They stay deterministic — same URL, same bytes, on every run — so local
  * SQLite rows and the remote D1 seed remain byte-identical, exactly like the
@@ -309,33 +379,35 @@ export interface FixtureImage {
  *
  * Every URL this fixture has ever written for an image is retained as a legacy
  * generation in `LEGACY_FIXTURE_IMAGE_URLS` (`./d1.ts`) — first
- * `example.test`, then `placehold.co` — so `refresh-images` can migrate a
- * database holding any earlier revision, and `cleanup` can still recognise
- * those rows as the fixture's own.
+ * `example.test`, then `placehold.co`, then the production web origin — so
+ * `refresh-images` can migrate a database holding any earlier revision, and
+ * `cleanup` can still recognise those rows as the fixture's own.
  */
+const FIXTURE_IMAGE_BASE_URL = resolveSeedImageBaseUrl();
+
 export const FIXTURE_IMAGES: readonly FixtureImage[] = [
   {
     id: nextFixtureId(),
     productId: FIXTURE_PRODUCTS[0]!.id,
-    url: "https://zelora-web.farqas007.workers.dev/images/products/wireless-headphones.jpg",
+    url: `${FIXTURE_IMAGE_BASE_URL}/images/products/wireless-headphones.jpg`,
     altText: "Wireless Headphones",
   },
   {
     id: nextFixtureId(),
     productId: FIXTURE_PRODUCTS[1]!.id,
-    url: "https://zelora-web.farqas007.workers.dev/images/products/gaming-keyboard.jpg",
+    url: `${FIXTURE_IMAGE_BASE_URL}/images/products/gaming-keyboard.jpg`,
     altText: "Gaming Keyboard",
   },
   {
     id: nextFixtureId(),
     productId: FIXTURE_PRODUCTS[2]!.id,
-    url: "https://zelora-web.farqas007.workers.dev/images/products/gaming-mouse.jpg",
+    url: `${FIXTURE_IMAGE_BASE_URL}/images/products/gaming-mouse.jpg`,
     altText: "Gaming Mouse",
   },
   {
     id: nextFixtureId(),
     productId: FIXTURE_PRODUCTS[3]!.id,
-    url: "https://zelora-web.farqas007.workers.dev/images/products/led-desk-lamp.jpg",
+    url: `${FIXTURE_IMAGE_BASE_URL}/images/products/led-desk-lamp.jpg`,
     altText: "LED Desk Lamp",
   },
 ];

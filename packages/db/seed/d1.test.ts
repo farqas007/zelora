@@ -10,6 +10,7 @@ import { createD1Client } from "../src/d1";
 import { createD1CatalogRepository } from "../src/catalog/d1-repository";
 import { isValidId } from "../src/ids";
 import {
+  assertRemoteSeedImageBaseUrlReachable,
   buildCleanupStatements,
   buildImageUrlStatement,
   buildPreflightStatement,
@@ -27,6 +28,7 @@ import {
   parsePreflightRow,
 } from "./d1";
 import {
+  DEFAULT_SEED_IMAGE_BASE_URL,
   FIXTURE_CATEGORIES,
   FIXTURE_CREATED_AT_MS,
   FIXTURE_IMAGES,
@@ -39,6 +41,7 @@ import {
   FIXTURE_STORES,
   FIXTURE_USERS,
   FIXTURE_VARIANTS,
+  SEED_IMAGE_BASE_URL_ENV_VAR,
   SEED_SUMMARY,
 } from "./fixture";
 
@@ -135,30 +138,36 @@ async function preflightRow(database: D1Binding): Promise<Record<string, number>
 /**
  * The URLs the fixture wrote for its images in every revision *before* the
  * current one, keyed by product slug and ordered oldest generation first:
- * `example.test` first, then `placehold.co`.
+ * `example.test` first, then `placehold.co`, then the deployed web Worker's
+ * production origin (the last generation that was hardcoded rather than
+ * configured).
  *
  * Pinned here as literals, keyed by product slug, so the stale-URL tests build
  * their input independently of `fixtureImageUrls` — otherwise they would just
  * assert that the implementation equals itself and could not catch a wrong or
- * over-broad allowlist. Both generations are listed because a real database can
- * be sitting at either one, and the tooling has to migrate each of them.
+ * over-broad allowlist. Every generation is listed because a real database can
+ * be sitting at any one of them, and the tooling has to migrate each of them.
  */
 const LEGACY_IMAGE_URLS_BY_SLUG: Readonly<Record<string, readonly string[]>> = {
   "wireless-headphones": [
     "https://example.test/wireless-headphones.jpg",
     "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Wireless+Headphones",
+    "https://zelora-web.farqas007.workers.dev/images/products/wireless-headphones.jpg",
   ],
   "gaming-keyboard": [
     "https://example.test/gaming-keyboard.jpg",
     "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Gaming+Keyboard",
+    "https://zelora-web.farqas007.workers.dev/images/products/gaming-keyboard.jpg",
   ],
   "gaming-mouse": [
     "https://example.test/gaming-mouse.jpg",
     "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Gaming+Mouse",
+    "https://zelora-web.farqas007.workers.dev/images/products/gaming-mouse.jpg",
   ],
   "led-desk-lamp": [
     "https://example.test/led-desk-lamp.jpg",
     "https://placehold.co/1200x900/ece6f8/1c1230.png?text=LED+Desk+Lamp",
+    "https://zelora-web.farqas007.workers.dev/images/products/led-desk-lamp.jpg",
   ],
 };
 
@@ -494,7 +503,7 @@ describe("remote D1 seed tooling (rehearsal, generated SQL verbatim)", () => {
     expect(headphones?.category).toMatchObject({ slug: "audio", name: "Audio" });
     expect(headphones?.priceAmountCents).toBe(129_99);
     expect(headphones?.image).toEqual({
-      url: "https://zelora-web.farqas007.workers.dev/images/products/wireless-headphones.jpg",
+      url: `${DEFAULT_SEED_IMAGE_BASE_URL}/images/products/wireless-headphones.jpg`,
       altText: "Wireless Headphones",
     });
 
@@ -1053,6 +1062,32 @@ describe("wrangler --json output parsing", () => {
  * allowlist on top of* the deterministic id + product id — never a widening of
  * ownership.
  */
+describe("remote image base gate", () => {
+  it("refuses loopback image URLs, which no remote browser can load", () => {
+    // The default base is the local Vite server. Seeding those URLs into D1
+    // would write rows that look structurally perfect and render as broken
+    // images for everyone except the machine that ran the seed.
+    expect(() => assertRemoteSeedImageBaseUrlReachable()).toThrowError(
+      /refusing to seed image URLs from a loopback origin/,
+    );
+    expect(() => assertRemoteSeedImageBaseUrlReachable()).toThrowError(
+      new RegExp(SEED_IMAGE_BASE_URL_ENV_VAR),
+    );
+  });
+
+  it("accepts a reachable image origin", () => {
+    const reachable = FIXTURE_IMAGES.map((image) => ({
+      ...image,
+      url: image.url.replace(DEFAULT_SEED_IMAGE_BASE_URL, "https://web.example.com"),
+    }));
+    expect(() => assertRemoteSeedImageBaseUrlReachable(reachable)).not.toThrow();
+  });
+
+  it("accepts an empty image list, which has nothing to write", () => {
+    expect(() => assertRemoteSeedImageBaseUrlReachable([])).not.toThrow();
+  });
+});
+
 describe("product_images cleanup guard (generated SQL, no database)", () => {
   const imageDeletes = (): string[] =>
     buildCleanupStatements().filter((statement) => statement.startsWith("DELETE FROM product_images"));
@@ -1094,29 +1129,34 @@ describe("product_images cleanup guard (generated SQL, no database)", () => {
 
   it("every legacy generation belongs to a fixture product, and the whole set is unique", () => {
     const legacy = FIXTURE_IMAGES.flatMap((image) => legacyUrlsFor(image));
-    // Both past generations stay recognisable, so a database sitting at either
-    // one can still be migrated by refresh-images and cleaned up.
-    expect(legacy).toHaveLength(FIXTURE_IMAGES.length * 2);
+    // Every past generation stays recognisable, so a database sitting at any of
+    // them can still be migrated by refresh-images and cleaned up — including
+    // the production-origin generation this fixture used to hardcode.
+    expect(legacy).toHaveLength(FIXTURE_IMAGES.length * 3);
     for (const url of legacy) {
-      expect(url).toMatch(/^https:\/\/(placehold\.co|example\.test)\//);
+      expect(url).toMatch(
+        /^https:\/\/(placehold\.co|example\.test|zelora-web\.farqas007\.workers\.dev)\//,
+      );
     }
 
     const allowed = FIXTURE_IMAGES.flatMap((image) => fixtureImageUrls(image));
     expect(new Set(allowed).size).toBe(allowed.length);
   });
 
-  it("every current image URL is an absolute https URL on the deployed web Worker", () => {
-    // The demo artwork is served as static assets by the web Worker: the four
-    // files live in `apps/web/public/images/products/` and Vite copies `public/`
-    // to the build root, so each URL is that worker's origin plus the file's
-    // public path. A reserved host here would render a broken image, and a
-    // root-relative path would violate the "fetched directly, no rewrite"
-    // contract the catalog mapping relies on.
+  it("every current image URL is an absolute URL on the configured image origin", () => {
+    // The demo artwork is served as static assets by the web deployment: the
+    // four files live in `apps/web/public/images/products/` and Vite copies
+    // `public/` to the build root, so each URL is that deployment's origin plus
+    // the file's public path. The origin is configuration
+    // (`ZELORA_SEED_IMAGE_BASE_URL`), not a hardcoded deployment. A reserved
+    // host here would render a broken image, and a root-relative path would
+    // violate the "fetched directly, no rewrite" contract the catalog mapping
+    // relies on.
     const seen = new Set<string>();
     for (const image of FIXTURE_IMAGES) {
       const url = new URL(image.url);
-      expect(url.protocol).toBe("https:");
-      expect(url.host).toBe("zelora-web.farqas007.workers.dev");
+      expect(url.protocol === "http:" || url.protocol === "https:").toBe(true);
+      expect(url.origin).toBe(DEFAULT_SEED_IMAGE_BASE_URL);
       expect(url.pathname).toMatch(/^\/images\/products\/[a-z0-9-]+\.jpg$/);
       seen.add(url.pathname);
     }

@@ -120,6 +120,16 @@ export const AUTH_ERROR_CODES = {
   SESSION_EXPIRED: "SESSION_EXPIRED",
   SELLER_PROFILE_EXISTS: "SELLER_PROFILE_EXISTS",
   SELLER_ACTIVATION_BLOCKED: "SELLER_ACTIVATION_BLOCKED",
+  /**
+   * The account's role forbids entering seller onboarding at all.
+   *
+   * Distinct from `SELLER_PROFILE_EXISTS` (a 409 about a duplicate profile) and
+   * from the account-status codes: this is a statement about `users.role`, and
+   * the platform permits exactly one administrator, so an admin applying to
+   * sell would risk demoting themselves out of the only role that can review
+   * the application. See `SellerService.onboard`.
+   */
+  SELLER_ONBOARDING_FORBIDDEN: "SELLER_ONBOARDING_FORBIDDEN",
   SLUG_IN_USE: "SLUG_IN_USE",
   RATE_LIMITED: "RATE_LIMITED",
   CSRF_FAILED: "CSRF_FAILED",

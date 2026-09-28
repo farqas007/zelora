@@ -4,7 +4,13 @@ import * as schema from "../src/schema";
 import { createLocalCatalogRepository } from "../src/catalog/local-repository";
 import { createTestDatabase, type TestDatabase } from "../src/test/helpers";
 import { assertSeedAllowed, SEED_SUMMARY, seedDev } from "./dev";
-import { FIXTURE_IMAGES } from "./fixture";
+import {
+  DEFAULT_SEED_IMAGE_BASE_URL,
+  FIXTURE_IMAGES,
+  SEED_IMAGE_BASE_URL_ENV_VAR,
+  isLoopbackSeedImageBaseUrl,
+  resolveSeedImageBaseUrl,
+} from "./fixture";
 
 /**
  * Focused tests for the dev/test seed: the fixture that makes up the data,
@@ -125,7 +131,7 @@ describe("dev seed (development/test data only)", () => {
     expect(headphones?.priceAmountCents).toBe(129_99);
     expect(headphones?.currency).toBe("USD");
     expect(headphones?.image).toEqual({
-      url: "https://zelora-web.farqas007.workers.dev/images/products/wireless-headphones.jpg",
+      url: `${DEFAULT_SEED_IMAGE_BASE_URL}/images/products/wireless-headphones.jpg`,
       altText: "Wireless Headphones",
     });
 
@@ -267,12 +273,22 @@ describe("dev seed (development/test data only)", () => {
     // The browser fetches `product_images.url` directly, with no proxy or
     // rewrite in front. A reserved placeholder host (RFC 6761 — `.test`,
     // `.example`, `.invalid`, `.localhost`) never resolves in DNS, so a single
-    // such URL ships a broken image to the storefront.
-    const reservedTlds = [".test", ".example", ".invalid", ".localhost"];
+    // such URL ships a broken image to the storefront. `localhost` is the one
+    // reserved name the fixture uses on purpose: it is the local Vite server
+    // that serves the artwork, and it is only ever written into the local
+    // SQLite file, never into a remote database (see the D1 remote gate).
+    const reservedTlds = [".test", ".example", ".invalid"];
     for (const image of FIXTURE_IMAGES) {
       const host = new URL(image.url).hostname;
-      expect(image.url.startsWith("https://")).toBe(true);
+      expect(image.url.startsWith("http://") || image.url.startsWith("https://")).toBe(true);
       expect(reservedTlds.some((tld) => host.endsWith(tld))).toBe(false);
+    }
+
+    // The local default must not point at a deployed host: a local seed that
+    // writes production URLs makes local rendering depend on that deployment
+    // staying up and unchanged.
+    for (const image of FIXTURE_IMAGES) {
+      expect(new URL(image.url).hostname).toBe(new URL(DEFAULT_SEED_IMAGE_BASE_URL).hostname);
     }
 
     // Every fixture URL is written verbatim, so a re-run resolves the same row
@@ -283,6 +299,44 @@ describe("dev seed (development/test data only)", () => {
       .all();
     expect(seeded.map((row) => row.url).sort()).toEqual(FIXTURE_IMAGES.map((i) => i.url).sort());
     expect(seeded.every((row) => row.altText !== null)).toBe(true);
+  });
+
+  it("resolves the image base URL from configuration, with the local default", () => {
+    // The default, used when the variable is unset or blank.
+    expect(resolveSeedImageBaseUrl(undefined)).toBe("http://localhost:5173");
+    expect(resolveSeedImageBaseUrl("")).toBe("http://localhost:5173");
+    expect(resolveSeedImageBaseUrl("   ")).toBe("http://localhost:5173");
+
+    // An explicit origin replaces it, including a subpath, and surrounding
+    // whitespace or trailing slashes are normalized away so callers can join
+    // with exactly one `/`.
+    expect(resolveSeedImageBaseUrl("https://web.example.com")).toBe("https://web.example.com");
+    expect(resolveSeedImageBaseUrl("  https://web.example.com/  ")).toBe("https://web.example.com");
+    expect(resolveSeedImageBaseUrl("https://web.example.com///")).toBe("https://web.example.com");
+    expect(resolveSeedImageBaseUrl("https://web.example.com/storefront")).toBe(
+      "https://web.example.com/storefront",
+    );
+
+    // A base that cannot carry a path, or that would resolve somewhere other
+    // than the operator meant, is refused rather than silently mangled.
+    expect(() => resolveSeedImageBaseUrl("not-a-url")).toThrowError(
+      new RegExp(`${SEED_IMAGE_BASE_URL_ENV_VAR} must be an absolute`),
+    );
+    expect(() => resolveSeedImageBaseUrl("ftp://web.example.com")).toThrowError(/must use http or https/);
+    expect(() => resolveSeedImageBaseUrl("https://web.example.com?x=1")).toThrowError(
+      /must not include a query string or fragment/,
+    );
+    expect(() => resolveSeedImageBaseUrl("https://web.example.com#top")).toThrowError(
+      /must not include a query string or fragment/,
+    );
+  });
+
+  it("recognises a loopback image base so a remote seed can refuse it", () => {
+    expect(isLoopbackSeedImageBaseUrl("http://localhost:5173")).toBe(true);
+    expect(isLoopbackSeedImageBaseUrl("http://127.0.0.1:5173")).toBe(true);
+    expect(isLoopbackSeedImageBaseUrl("http://[::1]:5173")).toBe(true);
+    expect(isLoopbackSeedImageBaseUrl("https://zelora-web.farqas007.workers.dev")).toBe(false);
+    expect(isLoopbackSeedImageBaseUrl("https://web.example.com")).toBe(false);
   });
 
   it("refuses to run with NODE_ENV=production", () => {

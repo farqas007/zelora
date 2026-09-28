@@ -176,6 +176,42 @@ function parseBoolean(
 }
 
 /**
+ * Resolve the session cookie's `Secure` flag.
+ *
+ * Unset falls back to `Secure` in production and to plain-HTTP in every other
+ * environment, because that is the only combination that is actually correct on
+ * both sides: a browser refuses to store a `Secure` cookie over plain-HTTP
+ * localhost, and shipping a session cookie without `Secure` over the public
+ * internet is a credential leak waiting for the first plain-HTTP hop.
+ *
+ * That default is a *default*, not a policy: an explicit
+ * `SESSION_COOKIE_SECURE=false` would otherwise let a production deployment —
+ * or a `wrangler` var that leaks into the deployed `vars` — opt out of it
+ * silently, and the symptom is invisible from the outside (sessions appear to
+ * work over https, then fail or leak on any downgrade). So the one combination
+ * that cannot be intended is refused here, at load time, in both runtimes,
+ * rather than being left to a comment. Development and test are untouched: an
+ * explicit value wins in both directions there, since local work genuinely needs
+ * the non-`Secure` cookie.
+ */
+function parseSessionCookieSecure(
+  value: string | undefined,
+  nodeEnv: AppConfig["nodeEnv"],
+): boolean {
+  const secure = parseBoolean(value, nodeEnv === "production", "SESSION_COOKIE_SECURE");
+  if (nodeEnv === "production" && !secure) {
+    throw new AppError(
+      "APP_CONFIG_INVALID",
+      "SESSION_COOKIE_SECURE must not be disabled in production: the session cookie would be sent over " +
+        "plain HTTP. Drop the variable (production defaults to Secure) or set it to \"true\"; only a " +
+        "local plain-HTTP development server may run with the non-Secure cookie, via NODE_ENV=development.",
+      500,
+    );
+  }
+  return secure;
+}
+
+/**
  * Parse the admin bootstrap secret. An unset/empty value disables the
  * bootstrap endpoint (`null`); a set value must reach the minimum strength
  * so operators cannot opt in with a guessable secret. The value is never
@@ -257,11 +293,7 @@ export function loadConfig(
       DEFAULT_CONFIG.sessionTtlSeconds,
       "SESSION_TTL_SECONDS",
     ),
-    sessionCookieSecure: parseBoolean(
-      env.SESSION_COOKIE_SECURE,
-      nodeEnv === "production",
-      "SESSION_COOKIE_SECURE",
-    ),
+    sessionCookieSecure: parseSessionCookieSecure(env.SESSION_COOKIE_SECURE, nodeEnv),
     sessionLastUsedThrottleSeconds: parsePositiveInteger(
       env.SESSION_LAST_USED_THROTTLE_SECONDS,
       DEFAULT_CONFIG.sessionLastUsedThrottleSeconds,

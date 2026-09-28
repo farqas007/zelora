@@ -52,6 +52,8 @@ import {
   FIXTURE_STORES,
   FIXTURE_USERS,
   FIXTURE_VARIANTS,
+  SEED_IMAGE_BASE_URL_ENV_VAR,
+  isLoopbackSeedImageBaseUrl,
   type FixtureImage,
 } from "./fixture";
 
@@ -215,10 +217,12 @@ export function buildSeedStatements(): string[] {
  *
  * Each slug lists *every* prior generation, because a database can be at any
  * one of them: revision 1 wrote `example.test` (a reserved host that never
- * resolved in DNS) and revision 2 wrote `placehold.co`. `refresh-images`
- * migrates whichever it finds to the current URL, and cleanup removes rows at
- * any generation. Generations are only ever appended — never edited or
- * dropped — so an already-migrated row stays recognisable.
+ * resolved in DNS), revision 2 wrote `placehold.co`, and revision 3 hardcoded
+ * the deployed web Worker's production origin. The current generation is
+ * whatever `ZELORA_SEED_IMAGE_BASE_URL` resolves to. `refresh-images` migrates
+ * whichever generation it finds to the current one, and cleanup removes rows at
+ * any generation. Generations are only ever appended — never edited or dropped —
+ * so an already-migrated row stays recognisable.
  *
  * This is an explicit allowlist, never a host or prefix pattern: a row that
  * squats a fixture image id under any other URL is still left untouched, and
@@ -229,18 +233,22 @@ const LEGACY_FIXTURE_IMAGE_URLS: Readonly<Record<string, readonly string[]>> = {
   "wireless-headphones": [
     "https://example.test/wireless-headphones.jpg",
     "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Wireless+Headphones",
+    "https://zelora-web.farqas007.workers.dev/images/products/wireless-headphones.jpg",
   ],
   "gaming-keyboard": [
     "https://example.test/gaming-keyboard.jpg",
     "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Gaming+Keyboard",
+    "https://zelora-web.farqas007.workers.dev/images/products/gaming-keyboard.jpg",
   ],
   "gaming-mouse": [
     "https://example.test/gaming-mouse.jpg",
     "https://placehold.co/1200x900/ece6f8/1c1230.png?text=Gaming+Mouse",
+    "https://zelora-web.farqas007.workers.dev/images/products/gaming-mouse.jpg",
   ],
   "led-desk-lamp": [
     "https://example.test/led-desk-lamp.jpg",
     "https://placehold.co/1200x900/ece6f8/1c1230.png?text=LED+Desk+Lamp",
+    "https://zelora-web.farqas007.workers.dev/images/products/led-desk-lamp.jpg",
   ],
 };
 
@@ -797,6 +805,39 @@ function remoteGate(database: string, yes: boolean): void {
   }
 }
 
+/**
+ * Refuse to write loopback image URLs into a *remote* database.
+ *
+ * The seeded image base is configuration now, and its default is the local Vite
+ * server. That default is right for the local SQLite file and wrong for D1:
+ * every `product_images.url` written under `http://localhost:5173` is
+ * unresolvable for every browser that is not the machine that ran the seed, and
+ * because the row looks structurally perfect, the breakage only shows up later
+ * as a broken catalog image with no obvious cause. So the remote path demands an
+ * explicit, reachable origin.
+ *
+ * `ZELORA_SEED_IMAGE_BASE_URL` is read once at fixture import, so a run that
+ * sets it is the same run whose URLs are checked here — the two cannot disagree.
+ */
+export function assertRemoteSeedImageBaseUrlReachable(
+  images: readonly FixtureImage[] = FIXTURE_IMAGES,
+): void {
+  const first = images[0];
+  // No images means nothing to write, so there is no unreachable URL to refuse.
+  if (first === undefined) return;
+  // Derived from the rows themselves rather than from the environment, so the
+  // check is against exactly the URLs that would be written even if a caller
+  // passes a hand-built list.
+  const base = new URL(first.url).origin;
+  if (!isLoopbackSeedImageBaseUrl(base)) return;
+  throw new Error(
+    `[dev-seed] refusing to seed image URLs from a loopback origin into the remote database: ` +
+      `images would resolve to ${base}, which only exists on the machine running the seed. ` +
+      `Set ${SEED_IMAGE_BASE_URL_ENV_VAR} to the deployed web origin (the host serving ` +
+      `/images/products/*.jpg) before applying remotely.`,
+  );
+}
+
 export interface CliOptions {
   mode: "plan" | "apply" | "cleanup" | "verify" | "refresh-images";
   local: boolean;
@@ -891,6 +932,7 @@ function devCli(): void {
     const remote = !local;
     if (remote) {
       remoteGate(database, yes);
+      assertRemoteSeedImageBaseUrlReachable();
     } else {
       if (database !== TARGET_DATABASE_NAME) {
         throw new Error(`[dev-seed] local rehearsal requires --database ${TARGET_DATABASE_NAME}.`);

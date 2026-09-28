@@ -37,7 +37,7 @@ import type {
   VariantRecord,
 } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
-import { PRODUCT_IMAGE_UPLOAD_LIMITS, type ApiFailure, type AuthUserResponse, type ProductImageDto } from "@zelora/shared";
+import { AUTH_ERROR_CODES, PRODUCT_IMAGE_UPLOAD_LIMITS, type ApiFailure, type AuthUserResponse, type ProductImageDto } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
 import type { ClientIpResolver } from "../services/client-ip";
@@ -1063,6 +1063,23 @@ describe("POST /api/seller/onboarding", () => {
     expect(sellerRepository.createCalls[0]).not.toHaveProperty("role");
     expect(sellerRepository.createCalls[0]).not.toHaveProperty("status");
     expect(sellerRepository.createCalls[0]?.userId).toBe(userId);
+  });
+
+  it("D: an administrator session is refused 403 SELLER_ONBOARDING_FORBIDDEN", async () => {
+    // The route itself only requires a session and CSRF; the role refusal is the
+    // service's, and this proves it reaches the client as a 403 with a stable
+    // code rather than a half-created profile or a 500.
+    const { cookie, csrfToken, userId } = await registerSession();
+    userRepository.setUser({ ...userRepository.getUser(userId)!, role: "admin" });
+
+    const response = await postJson("/api/seller/onboarding", validBody, cookie, csrfToken);
+
+    expect(response.status).toBe(403);
+    const body = (await response.json()) as { ok: false; error: { code: string; message: string } };
+    expect(body.error.code).toBe(AUTH_ERROR_CODES.SELLER_ONBOARDING_FORBIDDEN);
+    // Nothing was written: no profile, and the account keeps its admin role.
+    expect(sellerRepository.createCalls).toHaveLength(0);
+    expect(userRepository.getUser(userId)?.role).toBe("admin");
   });
 
   it("D: duplicate seller profile returns 409 SELLER_PROFILE_EXISTS", async () => {

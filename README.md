@@ -95,6 +95,13 @@ Other scripts:
 | `pnpm db:seed`       | Load clearly-marked dev/test seed data (blocked in production) |
 | `pnpm db:studio`     | Open Drizzle Studio against the local dev DB    |
 
+The seeded demo product images are written under an origin taken from
+`ZELORA_SEED_IMAGE_BASE_URL` (default `http://localhost:5173`, the Vite dev
+server that serves `apps/web/public/images/products/`). Set it to the deployed
+web origin when seeding a remote database — `pnpm db:seed:d1 apply` refuses to
+run against D1 while the resolved base is a loopback address, since those URLs
+would only resolve on the machine running the seed.
+
 Environment variables are optional at this phase — defaults are documented in
 `.env.example`. A `.env` loader arrives in a later phase, when the data layer
 is added.
@@ -119,6 +126,11 @@ The Worker validates this at startup: a `Secure` cookie combined with
 so a config copied from a Node-tuned local environment can never silently break
 authentication or crash hashing on the edge. Production deployments keep the
 `Secure` cookie and the Workers-compatible iteration cap.
+
+The cookie flag is validated in `loadConfig`, so it is enforced in the Node
+server too: `NODE_ENV=production` with `SESSION_COOKIE_SECURE=false` (or `0`)
+fails with `APP_CONFIG_INVALID` instead of starting. Drop the variable in
+production — it already defaults to `Secure` there.
 
 ## Admin provisioning
 

@@ -303,6 +303,54 @@ describe("GET /media/*", () => {
     expect(mediaStorage.putCalls).toEqual([]);
   });
 
+  it("is loadable from another origin, which is how the storefront consumes it", async () => {
+    // The regression this pins: Hono's `secureHeaders` default is
+    // `Cross-Origin-Resource-Policy: same-origin`, which blocks a cross-origin
+    // no-CORS load — and an `<img src>` is precisely one. Media is served from
+    // the API origin and rendered by a storefront on a different one, so with
+    // the default every seller-uploaded product photo is blocked in production
+    // while same-origin seed images keep rendering and hide the fault. No
+    // `crossorigin` attribute appears anywhere in the web app, so nothing opts
+    // back in on the client side.
+    const key = seedObject([0x89, 0x50, 0x4e, 0x47], "image/png");
+
+    const response = await app.request(`/media/${key}`, {
+      headers: { Origin: "https://zelora-web.farqas007.workers.dev" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cross-origin-resource-policy")).toBe("cross-origin");
+  });
+
+  it("keeps the rest of the security header set intact", async () => {
+    // `crossOriginResourcePolicy` is the single override; a mistake that
+    // replaced the whole header set would strip these and is not visible from
+    // the CORP assertion above.
+    const key = seedObject([0x89, 0x50], "image/png");
+
+    const response = await app.request(`/media/${key}`);
+
+    expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(response.headers.get("x-frame-options")).toBe("SAMEORIGIN");
+    expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(response.headers.get("strict-transport-security")).toContain("max-age=");
+  });
+
+  it("still refuses a credentialed cross-origin read, so CORP did not become CORS", async () => {
+    // CORP and CORS are independent. Making media cross-origin-readable must not
+    // hand any origin a readable response: `/media` sits outside the `cors()`
+    // mount, so no `Access-Control-Allow-Origin` is emitted and a cross-origin
+    // `fetch` of the same URL is still refused by the browser.
+    const key = seedObject([0x89, 0x50], "image/png");
+
+    const response = await app.request(`/media/${key}`, {
+      headers: { Origin: "https://evil.test" },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
+  });
+
   it("refuses media reads on a deployment with no media storage configured", async () => {
     const unconfigured = createApp({
       config: { ...config, mediaPublicBaseUrl: null },

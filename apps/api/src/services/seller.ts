@@ -22,7 +22,7 @@ import {
 } from "@zelora/shared";
 import { AppError, NotFoundError, ValidationError } from "@zelora/core";
 import { isValidId } from "@zelora/db/ids";
-import type { UserRecord } from "@zelora/db/users";
+import type { UserRecord, UserRepository } from "@zelora/db/users";
 import type {
   SellerProfileRecord,
   SellerRepository,
@@ -88,6 +88,13 @@ export interface SellerServiceDependencies {
   sellerRepository: SellerRepository;
   productRepository: ProductRepository;
   catalogRepository: CatalogRepository;
+  /**
+   * Used only to read the *target* account's role before
+   * {@link SellerService.activateSeller} promotes it. A seller's own product
+   * operations never touch it: those already have the session's `UserRecord`,
+   * and ownership is re-derived from the store rather than from the user table.
+   */
+  userRepository: UserRepository;
   /**
    * Storage port for seller-uploaded product images. Supplied by
    * `createApp`, which substitutes a fail-closed implementation when the
@@ -307,6 +314,7 @@ export class SellerService {
   private readonly sellerRepository: SellerRepository;
   private readonly productRepository: ProductRepository;
   private readonly catalogRepository: CatalogRepository;
+  private readonly userRepository: UserRepository;
   /**
    * Media storage port, held here because product images belong to the seller
    * domain. Public and `readonly` so it reads as the injected dependency it is,
@@ -324,6 +332,7 @@ export class SellerService {
     this.sellerRepository = dependencies.sellerRepository;
     this.productRepository = dependencies.productRepository;
     this.catalogRepository = dependencies.catalogRepository;
+    this.userRepository = dependencies.userRepository;
     this.mediaStorage = dependencies.mediaStorage;
   }
 
@@ -346,6 +355,20 @@ export class SellerService {
       throw new AppError(
         AUTH_ERROR_CODES.ACCOUNT_DELETED,
         "This account has been deleted.",
+        403,
+      );
+    }
+    // An administrator may not apply to sell, and the refusal is on role rather
+    // than on account status because the *consequence* is the problem: approving
+    // an application promotes the owner to `seller`, so an admin who applied
+    // would be flipped out of the one role the database permits exactly one of
+    // (`users_single_admin_unique`), leaving nobody able to review sellers or
+    // bootstrap a replacement. The request is refused here, before anything is
+    // written, so no profile and no draft store are left behind.
+    if (user.role === "admin") {
+      throw new AppError(
+        AUTH_ERROR_CODES.SELLER_ONBOARDING_FORBIDDEN,
+        "Administrator accounts cannot apply to sell on this platform.",
         403,
       );
     }
@@ -1129,6 +1152,27 @@ export class SellerService {
       throw new AppError(
         AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
         "This seller profile cannot be activated.",
+        409,
+      );
+    }
+
+    // Approval promotes the applicant's `users.role` to `seller`, so an
+    // administrator must never be the subject of it. The role is re-read from
+    // the user table instead of being inferred from the profile, because the
+    // profile says nothing about the account's current role: an admin can hold
+    // one (see the `onboard` guard, and any pre-existing rows from before it),
+    // and the read also closes the window where an admin is bootstrapped or
+    // promoted between the reviewer's decision and this call.
+    const user = await this.userRepository.findById(userId);
+    if (user === null) {
+      throw new NotFoundError("No user exists for this seller profile.");
+    }
+    if (user.role === "admin") {
+      throw new AppError(
+        AUTH_ERROR_CODES.SELLER_ACTIVATION_BLOCKED,
+        "An administrator account cannot be promoted to seller: the platform permits exactly one " +
+          "administrator, and demoting it would leave no one able to review sellers or bootstrap a " +
+          "replacement. Remove the seller profile and manage the account as an administrator instead.",
         409,
       );
     }

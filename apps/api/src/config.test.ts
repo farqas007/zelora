@@ -64,11 +64,45 @@ describe("loadConfig auth defaults", () => {
     expect(loadConfig({ NODE_ENV: "production" }).sessionCookieSecure).toBe(true);
   });
 
-  it("lets an explicit SESSION_COOKIE_SECURE value win in either direction", () => {
+  it("lets an explicit SESSION_COOKIE_SECURE value win in development", () => {
+    // Local work genuinely needs both postures: Vite and `wrangler dev` serve
+    // plain HTTP, where a `Secure` cookie is silently dropped by the browser.
     expect(loadConfig({ NODE_ENV: "development", SESSION_COOKIE_SECURE: "true" }).sessionCookieSecure).toBe(true);
-    expect(loadConfig({ NODE_ENV: "production", SESSION_COOKIE_SECURE: "false" }).sessionCookieSecure).toBe(false);
+    expect(loadConfig({ NODE_ENV: "development", SESSION_COOKIE_SECURE: "false" }).sessionCookieSecure).toBe(false);
     expect(loadConfig({ NODE_ENV: "development", SESSION_COOKIE_SECURE: "1" }).sessionCookieSecure).toBe(true);
     expect(loadConfig({ NODE_ENV: "development", SESSION_COOKIE_SECURE: "0" }).sessionCookieSecure).toBe(false);
+  });
+
+  it("accepts an explicit SESSION_COOKIE_SECURE=true in production", () => {
+    expect(loadConfig({ NODE_ENV: "production", SESSION_COOKIE_SECURE: "true" }).sessionCookieSecure).toBe(true);
+  });
+
+  it("refuses to run production with the session cookie Secure flag disabled", () => {
+    // The failure this prevents is invisible from outside: sessions look fine
+    // over https and then leak, or break, on the first plain-HTTP hop. The
+    // default is a default, not a policy — an explicit opt-out must not be
+    // allowed to turn it off in production, and the refusal happens at load
+    // time in both the Node server and the Worker.
+    for (const value of ["false", "0"]) {
+      try {
+        loadConfig({ NODE_ENV: "production", SESSION_COOKIE_SECURE: value });
+        expect.unreachable(`expected loadConfig to throw for SESSION_COOKIE_SECURE=${value}`);
+      } catch (error) {
+        expect(error).toBeInstanceOf(AppError);
+        expect((error as AppError).code).toBe("APP_CONFIG_INVALID");
+        expect(String((error as AppError).message)).toContain("SESSION_COOKIE_SECURE");
+        expect(String((error as AppError).message)).toContain("production");
+      }
+    }
+  });
+
+  it("keeps the non-Secure cookie available outside production", () => {
+    // The assertion is production-only on purpose: refusing this everywhere
+    // would make local development impossible, and the test environment must be
+    // able to build a plain-HTTP config.
+    expect(loadConfig({ NODE_ENV: "test" }).sessionCookieSecure).toBe(false);
+    expect(loadConfig({ NODE_ENV: "test", SESSION_COOKIE_SECURE: "false" }).sessionCookieSecure).toBe(false);
+    expect(loadConfig({ NODE_ENV: "unknown", SESSION_COOKIE_SECURE: "false" }).sessionCookieSecure).toBe(false);
   });
 
   it("parses explicit session and pbkdf2 tuning", () => {

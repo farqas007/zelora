@@ -280,6 +280,54 @@ describe("seller repository activation", () => {
     const user = db.select().from(schema.users).where(eq(schema.users.id, userId)).get();
     expect(user?.role).toBe("customer");
   });
+
+  it("refuses to promote an administrator and writes nothing", async () => {
+    // The driver-level backstop for the service guard: `activateSeller` writes an
+    // unconditional `role = 'seller'`, and the platform allows at most one
+    // administrator, so demoting one here would leave nobody able to review
+    // sellers or bootstrap a replacement.
+    const { db } = createTestDatabase();
+    const userId = insertUser(db);
+    db.update(schema.users).set({ role: "admin" }).where(eq(schema.users.id, userId)).run();
+    const repo = createLocalSellerRepository(db);
+    const onboarding = await repo.createOnboarding(onboardingInput(userId));
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+
+    expect(await repo.activateSeller(userId)).toBeNull();
+
+    // Not merely "the role survived": the profile and store stay untouched too,
+    // so a refused activation leaves no half-applied state to reconcile.
+    const user = db.select().from(schema.users).where(eq(schema.users.id, userId)).get();
+    expect(user?.role).toBe("admin");
+    const profile = db
+      .select()
+      .from(schema.sellerProfiles)
+      .where(eq(schema.sellerProfiles.id, onboarding.sellerProfile.id))
+      .get();
+    expect(profile?.status).toBe("pending");
+    const store = db
+      .select()
+      .from(schema.stores)
+      .where(eq(schema.stores.id, onboarding.store.id))
+      .get();
+    expect(store?.status).toBe("draft");
+  });
+
+  it("refuses to activate a profile whose user row has gone", async () => {
+    const { db, sqlite } = createTestDatabase();
+    const userId = insertUser(db);
+    const repo = createLocalSellerRepository(db);
+    await repo.createOnboarding(onboardingInput(userId));
+    // Foreign keys would normally prevent this; disable them so the test
+    // exercises the guard itself rather than the constraint.
+    sqlite.pragma("foreign_keys = OFF");
+    db.delete(schema.users).where(eq(schema.users.id, userId)).run();
+    sqlite.pragma("foreign_keys = ON");
+
+    expect(await repo.activateSeller(userId)).toBeNull();
+  });
 });
 
 describe("seller repository pending review queue", () => {

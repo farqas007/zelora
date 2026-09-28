@@ -102,6 +102,28 @@ describe("worker config: session cookie posture", () => {
       expect(String((error as AppError).message)).toContain("SESSION_COOKIE_SECURE");
     }
   });
+
+  it("rejects a non-Secure cookie in the production posture", () => {
+    // The mirror image of the check above, and the reason the cookie flag is
+    // validated in `loadConfig` rather than only at this boundary: a
+    // `SESSION_COOKIE_SECURE=false` var that reaches the deployed Worker must
+    // stop the deployment, not quietly ship a session cookie over plain HTTP.
+    // Both spellings of "off" are covered; the default (unset) stays Secure, as
+    // the two tests above already assert.
+    for (const env of [
+      { DB: {}, NODE_ENV: "production", SESSION_COOKIE_SECURE: "false" },
+      { DB: {}, NODE_ENV: "production", SESSION_COOKIE_SECURE: "0" },
+    ]) {
+      try {
+        loadWorkerConfig(env as Env);
+        expect.unreachable(`expected loadWorkerConfig to throw for ${JSON.stringify(env)}`);
+      } catch (error) {
+        expect(error).toBeInstanceOf(AppError);
+        expect((error as AppError).code).toBe("APP_CONFIG_INVALID");
+        expect(String((error as AppError).message)).toContain("SESSION_COOKIE_SECURE");
+      }
+    }
+  });
 });
 
 describe("worker config: media storage", () => {

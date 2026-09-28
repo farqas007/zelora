@@ -274,6 +274,11 @@ class FakeSellerRepository implements SellerRepository {
     this.profiles.set(profile.id, profile);
   }
 
+  /** Read a seeded profile back, so a test can assert nothing was written. */
+  seededProfile(id: string): SellerProfileRecord | undefined {
+    return this.profiles.get(id);
+  }
+
   seedStore(store: StoreRecord): void {
     this.stores.set(store.id, store);
   }
@@ -549,6 +554,21 @@ describe("POST /api/admin/sellers/:userId/activate", () => {
 
     const sellerUserId = createId();
     const sellerProfileId = createId();
+    // The applicant must exist as a real account: approval re-reads the target's
+    // role before promoting it, so a profile with no user row is a 404 rather
+    // than an activation. A seller profile always has a user (foreign key), so
+    // this is the realistic shape.
+    const now = new Date();
+    userRepository.setUser({
+      id: sellerUserId,
+      email: "pending-applicant@example.test",
+      name: "Pending Applicant",
+      role: "customer",
+      status: "active",
+      passwordHash: "hash",
+      createdAt: now,
+      updatedAt: now,
+    });
     sellerRepository.seedProfile({
       id: sellerProfileId,
       userId: sellerUserId,
@@ -619,6 +639,59 @@ describe("POST /api/admin/sellers/:userId/activate", () => {
 
     const body = await expectFailure(response, "SELLER_ACTIVATION_BLOCKED", 409);
     expect(body.error.message).toBe("This seller profile cannot be activated.");
+  });
+
+  it("G: an admin cannot be promoted to seller, and no audit row is written", async () => {
+    // An admin-held seller profile must never be approved: the platform permits
+    // exactly one administrator, and approval demotes the account. Reviewed
+    // through the admin route because that is the only path into activation.
+    const { cookie, csrfToken, userId } = await registerSession();
+    const user = userRepository.getUser(userId)!;
+    userRepository.setUser({ ...user, role: "admin" });
+
+    const now = new Date();
+    const targetId = createId();
+    userRepository.setUser({
+      id: targetId,
+      email: "second-admin@example.test",
+      name: "Second Admin",
+      role: "admin",
+      status: "active",
+      passwordHash: "hash",
+      createdAt: now,
+      updatedAt: now,
+    });
+    const profileId = createId();
+    sellerRepository.seedProfile({
+      id: profileId,
+      userId: targetId,
+      slug: "admin-shop",
+      displayName: "Admin Shop",
+      status: "pending",
+      createdAt: now,
+      updatedAt: now,
+    });
+    sellerRepository.seedStore({
+      id: createId(),
+      sellerProfileId: profileId,
+      name: "Admin Shop",
+      slug: "admin-shop",
+      description: null,
+      status: "draft",
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const response = await postJson(`/api/admin/sellers/${targetId}/activate`, cookie, csrfToken);
+
+    const body = await expectFailure(response, "SELLER_ACTIVATION_BLOCKED", 409);
+    expect(body.error.message).toContain("cannot be promoted to seller");
+    // Still the administrator afterwards, and nothing was recorded as activated.
+    expect(userRepository.getUser(targetId)?.role).toBe("admin");
+    expect(sellerRepository.seededProfile(profileId)?.status).toBe("pending");
+    expect(
+      auditLogRepository.entries.filter((entry) => entry.input.action === "seller.activate"),
+    ).toHaveLength(0);
   });
 });
 

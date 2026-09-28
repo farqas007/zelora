@@ -26,6 +26,7 @@ export function describeAuthCode(code: string, fallback: string): string {
     case AUTH_ERROR_CODES.ACCOUNT_SUSPENDED:
     case AUTH_ERROR_CODES.ACCOUNT_DELETED:
     case AUTH_ERROR_CODES.SELLER_PROFILE_EXISTS:
+    case AUTH_ERROR_CODES.SELLER_ONBOARDING_FORBIDDEN:
     case AUTH_ERROR_CODES.SLUG_IN_USE:
       return fallback;
     case SELLER_PRODUCT_ERROR_CODES.SELLER_NOT_APPROVED:

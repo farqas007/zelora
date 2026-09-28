@@ -133,6 +133,14 @@ export interface SellerRepository {
    * `active`, and the owning user is promoted to the `seller` role. The whole
    * transition is atomic. Idempotent for an already-active profile (all three
    * writes become no-ops). Returns `null` when the user has no profile.
+   *
+   * The promotion is also refused — as `null`, with no writes at all — when the
+   * owning account is missing or still holds the `admin` role. The platform
+   * permits at most one administrator, so promoting one would demote the only
+   * account able to review sellers or bootstrap a replacement. `SellerService`
+   * checks the role first and reports a specific error; this is the
+   * driver-level backstop, so a caller bypassing the service still cannot
+   * demote an admin.
    */
   activateSeller(userId: string): Promise<SellerActivationResult | null>;
   /**

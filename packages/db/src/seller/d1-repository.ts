@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, or } from "drizzle-orm";
+import { and, asc, eq, gt, ne, or } from "drizzle-orm";
 import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
 import { createId } from "../ids";
@@ -100,6 +100,19 @@ export function createD1SellerRepository(
         return null;
       }
 
+      const account = await db.select({ role: users.role }).from(users).where(eq(users.id, userId)).get();
+      if (account === undefined) {
+        // A profile whose account has gone must not be promoted blind.
+        return null;
+      }
+      if (account.role === "admin") {
+        // Backstop for the service-level guard. An admin is the platform's only
+        // administrator (`users_single_admin_unique` permits at most one), so
+        // demoting one would leave no way to review sellers or bootstrap a
+        // replacement. `null` is the port's "nothing was activated" signal.
+        return null;
+      }
+
       // D1 rejects raw `BEGIN`, so the whole promotion is one `batch()`:
       // profile, every store and the user's role flip together or not at all.
       const now = new Date();
@@ -117,7 +130,14 @@ export function createD1SellerRepository(
         db
           .update(users)
           .set({ role: "seller", updatedAt: now })
-          .where(eq(users.id, userId))
+          // The role flip is additionally conditioned on the role still being
+          // non-admin at write time, closing the read-then-write window the
+          // pre-read above leaves open. A `batch()` commits before its results
+          // are returned, so this cannot roll the profile update back, but it
+          // does make the demotion itself impossible rather than merely
+          // unlikely — the invariant that matters is "an admin is never
+          // demoted", and only that half needs to be unconditional.
+          .where(and(eq(users.id, userId), ne(users.role, "admin")))
           .returning(),
       ]);
 

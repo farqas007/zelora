@@ -409,6 +409,43 @@ describe("D1 seller repository (atomic batch)", () => {
 
     expect(await sellers.activateSeller(user.id)).toBeNull();
   });
+
+  it("refuses to promote an administrator and writes nothing", async () => {
+    // The D1 half of the backstop. The pre-read refuses the promotion, and the
+    // role update is separately conditioned on the role still being non-admin at
+    // write time, so an admin is never demoted even inside the read-then-write
+    // window that a `batch()` cannot roll back.
+    const { db } = await setup();
+    const users = createD1UserRepository(db);
+    const sellers = createD1SellerRepository(db);
+
+    const admin = await users.createAdmin({
+      email: "activation-admin@example.test",
+      name: "Activation Admin",
+      passwordHash: tokenHash(16),
+      role: "admin",
+    });
+    if (!admin.ok) {
+      throw new Error("expected the admin to be created");
+    }
+    const onboarding = await sellers.createOnboarding({
+      userId: admin.user.id,
+      profileSlug: "admin-shop",
+      displayName: "Activation Admin",
+      storeName: "Admin Shop",
+      storeSlug: "admin-shop-store",
+    });
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+
+    expect(await sellers.activateSeller(admin.user.id)).toBeNull();
+
+    const persisted = await users.findById(admin.user.id);
+    expect(persisted?.role).toBe("admin");
+    expect((await sellers.findByUserId(admin.user.id))?.status).toBe("pending");
+    expect((await sellers.findStoreBySlug(onboarding.store.slug))?.status).toBe("draft");
+  });
 });
 
 describe("D1 catalog repository (real joins and keyset pagination)", () => {

@@ -786,21 +786,30 @@ a {
   pointer-events: none;
 }
 
+/* Full-bleed row: no `max-width` and no `margin: 0 auto`, so on wide viewports
+   the brand hugs the left edge and the account/cart actions hug the right one
+   instead of being trapped in a centred 72rem column. The only inset left is a
+   small gutter (`padding`) for breathing room. The flexible `.header-search`
+   below grows into all the leftover space between the categories and the
+   actions, which is what carries the actions to the right edge. */
 .market-header-inner {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0.9rem 1.5rem;
-  max-width: 72rem;
-  margin: 0 auto;
-  padding: 0.8rem 1.5rem;
+  width: 100%;
+  margin: 0;
+  padding: 0.8rem 0.75rem;
 }
 
 /* Single header row: `[Logo] [Categories] [Search] [Account] [Cart]`.
    The brand never shrinks and stays leftmost; the search form grows into the
    free space, which is what carries the actions out to the right edge. The
    actions stay shrinkable so a very narrow viewport can still compress them
-   instead of overflowing the page sideways. */
+   instead of overflowing the page sideways. `.header-search` is the only
+   growing item: `flex: 1 1 14rem` lets it take every spare pixel (no fixed
+   width, so it never forces an overflow) while `min-width: 0` keeps it
+   shrinkable down to the point where the row wraps. */
 
 .market-header-inner > .brand {
   flex: 0 0 auto;

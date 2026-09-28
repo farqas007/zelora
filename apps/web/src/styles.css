@@ -63,6 +63,10 @@
   --leading-tight: 1.15;
   --leading-normal: 1.6;
 
+  /* Sticky header offset — how tall `.market-header` is at each breakpoint.
+     Overridden per breakpoint below as the header wraps onto extra rows. */
+  --header-offset: 5.5rem;
+
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   line-height: var(--leading-normal);
 }
@@ -82,7 +86,7 @@ body {
 @media (prefers-reduced-motion: no-preference) {
   html {
     scroll-behavior: smooth;
-    scroll-padding-top: 5.5rem;
+    scroll-padding-top: var(--header-offset);
   }
 }
 
@@ -792,8 +796,23 @@ a {
   padding: 0.8rem 1.5rem;
 }
 
+/* Single header row: `[Logo] [Categories] [Search] [Account] [Cart]`.
+   The brand never shrinks and stays leftmost; the search form grows into the
+   free space, which is what carries the actions out to the right edge. The
+   actions stay shrinkable so a very narrow viewport can still compress them
+   instead of overflowing the page sideways. */
+
+.market-header-inner > .brand {
+  flex: 0 0 auto;
+}
+
+.market-header-inner > .header-actions {
+  flex: 0 1 auto;
+}
+
 .header-search {
-  flex: 1 1 18rem;
+  flex: 1 1 14rem;
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 0.35rem;
@@ -929,17 +948,23 @@ a {
 
 /* --- Category nav bar --- */
 
+/* Lives inside `.market-header-inner` now, so it inherits the sticky header
+   instead of scrolling away on its own. `min-width: 0` lets it shrink below its
+   content width (so `.categories-inner` scrolls instead of pushing the page
+   sideways) and `max-width` keeps a long chip list from crowding out the
+   search field. No border-bottom: the header already draws the rule. */
+
 .categories {
-  border-bottom: 1px solid var(--border);
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 26rem;
   background: var(--panel);
 }
 
 .categories-inner {
   display: flex;
+  align-items: center;
   gap: 0.5rem;
-  max-width: 72rem;
-  margin: 0 auto;
-  padding: 0.6rem 1.5rem 0.7rem;
   overflow-x: auto;
   scrollbar-width: none;
 }
@@ -1749,13 +1774,30 @@ a {
 }
 
 @media (max-width: 900px) {
+  :root {
+    /* Header wraps to three rows from here down, so anchors need a taller offset. */
+    --header-offset: 11.5rem;
+  }
+
   .header-search {
     order: 3;
     flex-basis: 100%;
   }
 
+  /* The search form has moved to its own row, so nothing in the first row grows
+     to push the actions out — the auto margin does it instead. */
   .header-actions {
     margin-left: auto;
+  }
+
+  /* Too narrow to share the top row with the brand and the account actions, so
+     the chips drop to their own full-width row and scroll horizontally there
+     instead of being squeezed to a single chip. `order: 4` keeps them after the
+     search field. */
+  .categories {
+    order: 4;
+    flex: 1 1 100%;
+    max-width: 100%;
   }
 
   .hero-decor--tile {
@@ -1764,6 +1806,11 @@ a {
 }
 
 @media (max-width: 640px) {
+  :root {
+    /* Header wraps to three rows here, so anchors need a taller offset. */
+    --header-offset: 11.5rem;
+  }
+
   .featured-grid {
     grid-template-columns: 1fr;
   }

@@ -5,11 +5,20 @@ import { useAuth } from "../context/AuthContext";
 import { useCart } from "../context/CartContext";
 
 /**
- * Storefront chrome: brand, search, account actions and the quick category
- * chips. The nav chips are live links pulled from the public catalog API and
- * hidden entirely while the catalog is empty or unreachable, so a storefront
- * without categories never renders dead navigation. The cart link carries a
- * live item-count badge fed by {@link useCart}; the count reflects every
+ * Storefront chrome: brand, category chips, search, account actions.
+ *
+ * Everything lives inside the single sticky `<header>`, in one flex row —
+ * `[Logo] [Categories] [Search] [Account] [Cart]`. The category chips used to
+ * render as a sibling `<nav>` *after* the header; because only the header was
+ * `position: sticky`, that sibling scrolled away on its own and came back on
+ * scroll-up, so the navigation flickered independently of the rest of the
+ * chrome. Nesting it makes it inherit the header's sticky context and pins it
+ * over the header's full combined height.
+ *
+ * The nav chips are live links pulled from the public catalog API and hidden
+ * entirely while the catalog is empty or unreachable, so a storefront without
+ * categories never renders dead navigation. The cart link carries a live
+ * item-count badge fed by {@link useCart}; the count reflects every
  * add/update/remove/clear across the marketplace.
  */
 export function MarketHeader() {
@@ -44,79 +53,77 @@ export function MarketHeader() {
   }
 
   return (
-    <>
-      <header className="market-header">
-        <div className="market-header-inner">
-          <Link className="brand" to="/">
-            <img
-              className="brand-logo"
-              src="/assets/zelora-logo.svg"
-              alt="Zelora"
-              width="132"
-              height="34"
-            />
-          </Link>
+    <header className="market-header">
+      <div className="market-header-inner">
+        <Link className="brand" to="/">
+          <img
+            className="brand-logo"
+            src="/assets/zelora-logo.svg"
+            alt="Zelora"
+            width="132"
+            height="34"
+          />
+        </Link>
 
-          <form className="header-search" role="search" onSubmit={onSearchSubmit}>
-            <label className="sr-only" htmlFor="market-search">
-              Search products
-            </label>
-            <input
-              id="market-search"
-              className="search-input"
-              type="search"
-              placeholder="Search products"
-              aria-label="Search products"
-            />
-            <button type="submit" className="search-button">
-              <SearchIcon />
-              <span>Search</span>
-            </button>
-          </form>
+        {categories !== null && categories.length > 0 && (
+          <nav className="categories" aria-label="Categories">
+            <div className="categories-inner">
+              {categories.map((category) => (
+                <Link key={category.id} className="category-chip" to={`/catalog?category=${category.slug}`}>
+                  {category.name}
+                </Link>
+              ))}
+            </div>
+          </nav>
+        )}
 
-          <div className="header-actions">
-            {status === "loading" && <span className="muted">Account…</span>}
-            {status === "signed-out" && (
-              <>
-                <Link className="header-link" to="/login">
-                  Sign in
-                </Link>
-                <Link className="btn btn-primary btn-sm" to="/register">
-                  Create account
-                </Link>
-              </>
-            )}
-            {status === "authenticated" && user !== null && (
-              <Link className="account-link" to="/dashboard">
-                <UserIcon />
-                <span className="account-name">{user.name}</span>
+        <form className="header-search" role="search" onSubmit={onSearchSubmit}>
+          <label className="sr-only" htmlFor="market-search">
+            Search products
+          </label>
+          <input
+            id="market-search"
+            className="search-input"
+            type="search"
+            placeholder="Search products"
+            aria-label="Search products"
+          />
+          <button type="submit" className="search-button">
+            <SearchIcon />
+            <span>Search</span>
+          </button>
+        </form>
+
+        <div className="header-actions">
+          {status === "loading" && <span className="muted">Account…</span>}
+          {status === "signed-out" && (
+            <>
+              <Link className="header-link" to="/login">
+                Sign in
               </Link>
-            )}
-            <Link className="btn btn-sm cart-button" to="/cart">
-              <CartIcon />
-              <span>Cart</span>
-              {itemCount > 0 && (
-                <span className="cart-count" aria-label={`${itemCount} items in cart`}>
-                  {itemCount > 99 ? "99+" : itemCount}
-                </span>
-              )}
+              <Link className="btn btn-primary btn-sm" to="/register">
+                Create account
+              </Link>
+            </>
+          )}
+          {status === "authenticated" && user !== null && (
+            <Link className="account-link" to="/dashboard">
+              <UserIcon />
+              <span className="account-name">{user.name}</span>
             </Link>
-          </div>
+          )}
+          <Link className="btn btn-sm cart-button" to="/cart">
+            <CartIcon />
+            <span>Cart</span>
+            {itemCount > 0 && (
+              <span className="cart-count" aria-label={`${itemCount} items in cart`}>
+                {itemCount > 99 ? "99+" : itemCount}
+              </span>
+            )}
+          </Link>
         </div>
-      </header>
-
-      {categories !== null && categories.length > 0 && (
-        <nav className="categories" aria-label="Categories" id="categories">
-          <div className="categories-inner">
-            {categories.map((category) => (
-              <Link key={category.id} className="category-chip" to={`/catalog?category=${category.slug}`}>
-                {category.name}
-              </Link>
-            ))}
-          </div>
-        </nav>
-      )}
-    </>
+      </div>
+    </header>
   );
 }
 

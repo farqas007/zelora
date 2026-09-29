@@ -10,6 +10,7 @@ import { createD1AuthSessionRepository } from "../auth/d1-repository";
 import { createD1SellerRepository } from "../seller/d1-repository";
 import { createD1CatalogRepository } from "../catalog/d1-repository";
 import { createD1CartRepository } from "../cart/d1-repository";
+import { createD1OrderRepository } from "../orders/d1-repository";
 import { createD1ProductRepository } from "../products/d1-repository";
 import { createD1MediaObjectRepository } from "../media/d1-repository";
 import { createId } from "../ids";
@@ -580,6 +581,70 @@ describe("D1 catalog repository (real joins and keyset pagination)", () => {
     expect(item!.priceAmountCents).toBe(7_500);
     expect(item!.compareAtAmountCents).toBeNull();
     expect(item!.currency).toBe("GBP");
+  });
+
+  it("returns only the sellable variants among the requested ids on D1", async () => {
+    const { db } = await setup();
+    const repository = createD1CatalogRepository(db);
+    const { storeId } = await seedStorefront(db, 20);
+
+    const product = await db
+      .insert(schema.products)
+      .values({
+        storeId,
+        name: "D1 Sellable",
+        slug: "d1-sellable",
+        status: "active",
+        createdAt: new Date("2026-03-01T00:00:00.000Z"),
+      })
+      .returning()
+      .get();
+
+    const variants = await db
+      .insert(schema.productVariants)
+      .values([
+        { productId: product.id, name: "In Stock", sku: "d1-sellable-a", priceAmountCents: 1_000, currency: "USD", status: "active" },
+        { productId: product.id, name: "Sold Out", sku: "d1-sellable-b", priceAmountCents: 1_000, currency: "USD", status: "active" },
+        { productId: product.id, name: "Draft", sku: "d1-sellable-c", priceAmountCents: 1_000, currency: "USD", status: "draft" },
+      ])
+      .returning();
+    await db.insert(schema.inventory).values([
+      { variantId: variants[0]!.id, quantity: 5 },
+      { variantId: variants[1]!.id, quantity: 0 },
+      { variantId: variants[2]!.id, quantity: 9 },
+    ]);
+
+    const sellable = await repository.listSellableVariantsByIds(variants.map((variant) => variant.id));
+    expect(sellable.map((variant) => variant.id)).toEqual([variants[0]!.id]);
+    expect(sellable[0]).toMatchObject({
+      productId: product.id,
+      productName: "D1 Sellable",
+      storeId,
+      priceAmountCents: 1_000,
+      currency: "USD",
+      availableQuantity: 5,
+    });
+
+    // An inactive category hides its variants on D1 too.
+    const inactiveCategory = await db
+      .insert(schema.categories)
+      .values({ name: "Offline", slug: "d1-sellable-off", status: "inactive" })
+      .returning()
+      .get();
+    const hiddenProduct = await db
+      .insert(schema.products)
+      .values({ storeId, categoryId: inactiveCategory.id, name: "Hidden", slug: "d1-sellable-hidden", status: "active" })
+      .returning()
+      .get();
+    const hiddenVariant = await db
+      .insert(schema.productVariants)
+      .values({ productId: hiddenProduct.id, name: "Hidden", priceAmountCents: 100, currency: "USD", status: "active" })
+      .returning()
+      .get();
+    await db.insert(schema.inventory).values({ variantId: hiddenVariant.id, quantity: 2 });
+
+    expect(await repository.listSellableVariantsByIds([hiddenVariant.id])).toEqual([]);
+    expect(await repository.listSellableVariantsByIds([])).toEqual([]);
   });
 });
 
@@ -1708,5 +1773,251 @@ describe("D1 cart repository (unique conflicts + cascade)", () => {
 
     expect(await carts.getCartByUserId(customer.id)).toBeNull();
     expect(await db.select().from(schema.cartItems).all()).toHaveLength(0);
+  });
+});
+
+describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
+  /**
+   * An approved seller with an active product/variant plus a separate plain
+   * customer to buy it, so order reads have real users/stores to reference.
+   */
+  async function seedSellable(
+    db: DrizzleD1Database<DatabaseSchema>,
+    seed: number,
+    quantity: number,
+  ): Promise<{ customerUserId: string; storeId: string; variantId: string; priceAmountCents: number }> {
+    const users = createD1UserRepository(db);
+    const sellers = createD1SellerRepository(db);
+    const seller = await users.create({
+      email: `order-seller-${seed}@example.test`,
+      name: `Order Seller ${seed}`,
+      passwordHash: tokenHash(200 + seed),
+    });
+    const onboarding = await sellers.createOnboarding({
+      userId: seller.id,
+      profileSlug: `order-profile-${seed}`,
+      displayName: `Order Seller ${seed}`,
+      storeName: `Order Store ${seed}`,
+      storeSlug: `order-store-${seed}`,
+    });
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+    await sellers.activateSeller(seller.id);
+
+    const customer = await users.create({
+      email: `order-customer-${seed}@example.test`,
+      name: `Order Customer ${seed}`,
+      passwordHash: tokenHash(220 + seed),
+    });
+
+    const product = await db
+      .insert(schema.products)
+      .values({
+        storeId: onboarding.store.id,
+        name: `Order Product ${seed}`,
+        slug: `order-product-${seed}`,
+        status: "active",
+      })
+      .returning()
+      .get();
+    const variant = await db
+      .insert(schema.productVariants)
+      .values({
+        productId: product.id,
+        name: `Order Variant ${seed}`,
+        sku: `order-variant-${seed}`,
+        priceAmountCents: 1_500,
+        currency: "USD",
+        status: "active",
+      })
+      .returning()
+      .get();
+    await db.insert(schema.inventory).values({ variantId: variant.id, quantity });
+
+    return {
+      customerUserId: customer.id,
+      storeId: onboarding.store.id,
+      variantId: variant.id,
+      priceAmountCents: variant.priceAmountCents,
+    };
+  }
+
+  it("creates the order, its snapshots and lines and decrements inventory on D1", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const { customerUserId, storeId, variantId, priceAmountCents } = await seedSellable(db, 1, 5);
+
+    const result = await repo.createOrder({
+      customerUserId,
+      currency: "USD",
+      subtotalAmountCents: priceAmountCents * 2,
+      shippingAmountCents: 0,
+      discountAmountCents: 0,
+      totalAmountCents: priceAmountCents * 2,
+      addresses: [
+        { kind: "shipping", recipientName: "Order Customer 1", phone: null, line1: "1 D1 Way", line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" },
+        { kind: "billing", recipientName: "Order Customer 1", phone: null, line1: "1 D1 Way", line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" },
+      ],
+      lines: [
+        {
+          variantId,
+          storeId,
+          productName: "Order Product 1",
+          variantName: "Order Variant 1",
+          sku: "order-variant-1",
+          quantity: 2,
+          unitAmountCents: priceAmountCents,
+          lineTotalAmountCents: priceAmountCents * 2,
+          currency: "USD",
+        },
+      ],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.order).toMatchObject({
+      customerUserId,
+      status: "pending",
+      currency: "USD",
+      subtotalAmountCents: priceAmountCents * 2,
+      totalAmountCents: priceAmountCents * 2,
+    });
+    expect(result.addresses).toHaveLength(2);
+    expect(result.items).toHaveLength(1);
+
+    const persisted = await db.select().from(schema.inventory).where(eq(schema.inventory.variantId, variantId)).get();
+    expect(persisted?.quantity).toBe(3);
+    expect(await db.select().from(schema.orders).where(eq(schema.orders.id, result.order.id)).get()).not.toBeNull();
+    expect(await db.select().from(schema.orderItems).where(eq(schema.orderItems.orderId, result.order.id)).all()).toHaveLength(1);
+    expect(await db.select().from(schema.orderAddresses).where(eq(schema.orderAddresses.orderId, result.order.id)).all()).toHaveLength(2);
+  });
+
+  it("rolls the whole batch back when a variant would go negative (INSUFFICIENT_STOCK)", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const { customerUserId, storeId, variantId, priceAmountCents } = await seedSellable(db, 2, 5);
+
+    const result = await repo.createOrder({
+      customerUserId,
+      currency: "USD",
+      subtotalAmountCents: priceAmountCents * 6,
+      shippingAmountCents: 0,
+      discountAmountCents: 0,
+      totalAmountCents: priceAmountCents * 6,
+      addresses: [{ kind: "shipping", recipientName: "Order Customer 2", phone: null, line1: "1 D1 Way", line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" }],
+      lines: [
+        {
+          variantId,
+          storeId,
+          productName: "Order Product 2",
+          variantName: "Order Variant 2",
+          sku: "order-variant-2",
+          quantity: 6,
+          unitAmountCents: priceAmountCents,
+          lineTotalAmountCents: priceAmountCents * 6,
+          currency: "USD",
+        },
+      ],
+    });
+
+    expect(result).toEqual({ ok: false, reason: "INSUFFICIENT_STOCK" });
+    // The batch never committed: no order rows, no snapshots, no lines.
+    expect(await db.select().from(schema.orders).all()).toHaveLength(0);
+    expect(await db.select().from(schema.orderAddresses).all()).toHaveLength(0);
+    expect(await db.select().from(schema.orderItems).all()).toHaveLength(0);
+    expect((await db.select().from(schema.inventory).where(eq(schema.inventory.variantId, variantId)).get())?.quantity).toBe(5);
+  });
+
+  it("resolves a foreign-key violation to VARIANT_NOT_FOUND and writes nothing on D1", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const { customerUserId, variantId } = await seedSellable(db, 3, 5);
+
+    const result = await repo.createOrder({
+      customerUserId,
+      currency: "USD",
+      subtotalAmountCents: 1_500,
+      shippingAmountCents: 0,
+      discountAmountCents: 0,
+      totalAmountCents: 1_500,
+      addresses: [{ kind: "shipping", recipientName: "Order Customer 3", phone: null, line1: "1 D1 Way", line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" }],
+      lines: [
+        {
+          variantId: createId(),
+          storeId: createId(),
+          productName: "Ghost",
+          variantName: "Ghost",
+          sku: null,
+          quantity: 1,
+          unitAmountCents: 1_500,
+          lineTotalAmountCents: 1_500,
+          currency: "USD",
+        },
+      ],
+    });
+
+    expect(result).toEqual({ ok: false, reason: "VARIANT_NOT_FOUND" });
+    expect(await db.select().from(schema.orders).all()).toHaveLength(0);
+    expect(await db.select().from(schema.orderItems).all()).toHaveLength(0);
+    expect((await db.select().from(schema.inventory).where(eq(schema.inventory.variantId, variantId)).get())?.quantity).toBe(5);
+  });
+
+  it("lists a customer's orders newest-first and resolves them by id, scoped to the customer", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const { customerUserId, storeId, variantId, priceAmountCents } = await seedSellable(db, 4, 100);
+
+    async function place(id: string, createdAt: Date) {
+      const result = await repo.createOrder({
+        customerUserId,
+        currency: "USD",
+        subtotalAmountCents: priceAmountCents,
+        shippingAmountCents: 0,
+        discountAmountCents: 0,
+        totalAmountCents: priceAmountCents,
+        addresses: [{ kind: "shipping", recipientName: "Order Customer 4", phone: null, line1: `1 D1 Way ${id}`, line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" }],
+        lines: [
+          {
+            variantId,
+            storeId,
+            productName: "Order Product 4",
+            variantName: "Order Variant 4",
+            sku: null,
+            quantity: 1,
+            unitAmountCents: priceAmountCents,
+            lineTotalAmountCents: priceAmountCents,
+            currency: "USD",
+          },
+        ],
+      });
+      if (!result.ok) {
+        throw new Error("expected a successful order create");
+      }
+      await db.update(schema.orders).set({ createdAt }).where(eq(schema.orders.id, result.order.id));
+      return result.order.id;
+    }
+
+    const third = await place("third", new Date("2026-02-01T00:00:00.000Z"));
+    const second = await place("second", new Date("2026-02-02T00:00:00.000Z"));
+    const first = await place("first", new Date("2026-02-03T00:00:00.000Z"));
+
+    const page = await repo.listByCustomer(customerUserId, { limit: 2, cursor: null });
+    expect(page.items.map((item) => item.order.id)).toEqual([first, second]);
+    expect(page.items[0]!.items).toHaveLength(1);
+    expect(page.nextCursor).not.toBeNull();
+
+    const rest = await repo.listByCustomer(customerUserId, { limit: 2, cursor: page.nextCursor });
+    expect(rest.items.map((item) => item.order.id)).toEqual([third]);
+    expect(rest.nextCursor).toBeNull();
+
+    const detail = await repo.findByIdForCustomer(customerUserId, first);
+    expect(detail?.items).toHaveLength(1);
+    expect(detail?.addresses[0]?.line1).toBe("1 D1 Way first");
+
+    // A different customer (or an unknown id) sees nothing.
+    const interloper = await repo.listByCustomer(createId(), { limit: 10, cursor: null });
+    expect(interloper.items).toEqual([]);
+    expect(await repo.findByIdForCustomer(createId(), first)).toBeNull();
   });
 });

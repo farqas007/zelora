@@ -4,6 +4,8 @@ import {
   normalizeEmail,
   normalizeName,
   parseLoginRequest,
+  parseOrderAddress,
+  parsePlaceOrderRequest,
   parseRegisterRequest,
   validateEmail,
   validateName,
@@ -161,6 +163,139 @@ describe("parseLoginRequest", () => {
 
   it("rejects a body that is not an object", () => {
     expectFieldErrors(() => parseLoginRequest("nope"), {
+      body: ["Request body must be a JSON object."],
+    });
+  });
+});
+
+describe("parseOrderAddress", () => {
+  it("accepts a full address and normalizes the country code to uppercase", () => {
+    const address = parseOrderAddress({
+      recipientName: "  Ada Lovelace  ",
+      phone: " +1 555 0100 ",
+      line1: " 1 Analytical Way ",
+      line2: " Suite 2 ",
+      city: " London ",
+      region: " England ",
+      postalCode: " SW1A ",
+      countryCode: "gb",
+    });
+    expect(address).toEqual({
+      recipientName: "Ada Lovelace",
+      phone: "+1 555 0100",
+      line1: "1 Analytical Way",
+      line2: "Suite 2",
+      city: "London",
+      region: "England",
+      postalCode: "SW1A",
+      countryCode: "GB",
+    });
+  });
+
+  it("accepts a minimal address with no optional fields", () => {
+    const address = parseOrderAddress({
+      recipientName: "Ada",
+      line1: "1 Way",
+      city: "London",
+      countryCode: "GB",
+    });
+    expect(address).toEqual({
+      recipientName: "Ada",
+      line1: "1 Way",
+      city: "London",
+      countryCode: "GB",
+    });
+  });
+
+  it("reports every missing required field at once", () => {
+    expectFieldErrors(() => parseOrderAddress({}), {
+      recipientName: ["Recipient name is required."],
+      line1: ["Address line 1 is required."],
+      city: ["City is required."],
+      countryCode: ["Country code is required."],
+    });
+  });
+
+  it("rejects a malformed country code", () => {
+    expectFieldErrors(() => parseOrderAddress({ recipientName: "Ada", line1: "1", city: "X", countryCode: "USA" }), {
+      countryCode: ["Country code must be a 2-letter code, e.g. US."],
+    });
+  });
+});
+
+describe("parsePlaceOrderRequest", () => {
+  it("parses a body with shipping only", () => {
+    const request = parsePlaceOrderRequest({
+      shippingAddress: { recipientName: "Ada", line1: "1 Way", city: "London", countryCode: "GB" },
+    });
+    expect(request.shippingAddress.countryCode).toBe("GB");
+    expect(request.billingAddress).toBeUndefined();
+  });
+
+  it("parses an explicit billing address", () => {
+    const request = parsePlaceOrderRequest({
+      shippingAddress: { recipientName: "Ada", line1: "1 Way", city: "London", countryCode: "GB" },
+      billingAddress: { recipientName: "Grace", line1: "7 Navy", city: "NYC", countryCode: "us" },
+    });
+    expect(request.billingAddress?.countryCode).toBe("US");
+  });
+
+  it("prefixes nested shipping field errors", () => {
+    expectFieldErrors(
+      () =>
+        parsePlaceOrderRequest({
+          shippingAddress: { recipientName: "Ada", line1: "1", city: "X", countryCode: "USA" },
+        }),
+      {
+        "shippingAddress.countryCode": ["Country code must be a 2-letter code, e.g. US."],
+      },
+    );
+  });
+
+  it("prefixes nested billing field errors alongside shipping errors", () => {
+    expectFieldErrors(
+      () =>
+        parsePlaceOrderRequest({
+          shippingAddress: { recipientName: "Ada", line1: "1", city: "X", countryCode: "GB" },
+          billingAddress: { recipientName: "Grace", line1: "7", city: "Y", countryCode: "USA" },
+        }),
+      {
+        "billingAddress.countryCode": ["Country code must be a 2-letter code, e.g. US."],
+      },
+    );
+  });
+
+  it("drops every monetary, catalog and ownership key the client adds", () => {
+    // The parser is an allowlist: it builds a fresh request from the two
+    // addresses it recognises and never copies a key it did not read. That is
+    // the first line of defence against a client naming its own total, currency
+    // or owner, so it is worth pinning here — the order service's re-pricing is
+    // the second, and a regression in either layer is silent.
+    const request = parsePlaceOrderRequest({
+      shippingAddress: { recipientName: "Ada", line1: "1 Way", city: "London", countryCode: "GB" },
+      totalAmountCents: 1,
+      subtotalAmountCents: 1,
+      shippingAmountCents: 0,
+      discountAmountCents: 0,
+      currency: "EUR",
+      customerUserId: "00000000-0000-7000-8000-00000000dead",
+      userId: "00000000-0000-7000-8000-00000000dead",
+      status: "completed",
+      items: [{ variantId: "attacker-variant", quantity: 99, priceAmountCents: 1 }],
+      lines: [{ variantId: "attacker-variant", quantity: 99, priceAmountCents: 1 }],
+    });
+
+    expect(Object.keys(request).sort()).toEqual(["shippingAddress"]);
+  });
+
+  it("rejects a missing shipping address", () => {
+    expectFieldErrors(() => parsePlaceOrderRequest({}), {
+      shippingAddress: ["A shipping address is required."],
+    });
+  });
+
+  it("rejects a body that is not an object", () => {
+    expectFieldErrors(() => parsePlaceOrderRequest("nope"), {
       body: ["Request body must be a JSON object."],
     });
   });

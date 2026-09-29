@@ -56,6 +56,8 @@ const baseConfig: AppConfig = {
   rateLimitSellerOnboardingIpWindowSeconds: 3_600,
   rateLimitProductCreateIpMax: 30,
   rateLimitProductCreateIpWindowSeconds: 3_600,
+  rateLimitOrderPlaceIpMax: 20,
+  rateLimitOrderPlaceIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,

@@ -44,6 +44,8 @@ export interface UpdateCartItemRequest {
 /** Error codes the cart endpoints can produce, as stable string values. */
 export const CART_ERROR_CODES = {
   VARIANT_NOT_FOUND: "VARIANT_NOT_FOUND",
+  /** The variant exists but is not currently sellable (inactive / sold out). */
+  VARIANT_NOT_SELLABLE: "VARIANT_NOT_SELLABLE",
   CART_ITEM_NOT_FOUND: "CART_ITEM_NOT_FOUND",
 } as const;
 export type CartErrorCode = (typeof CART_ERROR_CODES)[keyof typeof CART_ERROR_CODES];

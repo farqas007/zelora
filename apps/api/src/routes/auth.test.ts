@@ -9,6 +9,7 @@ import type { AuditLogRepository } from "@zelora/db/audit";
 import type { UserRecord, UserRepository, CreateAdminResult, CreateUserInput } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
 import type { CartRepository } from "@zelora/db/cart";
+import type { OrderRepository } from "@zelora/db/orders";
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ProductRepository } from "@zelora/db/products";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
@@ -191,6 +192,7 @@ const inertCatalogRepository: CatalogRepository = {
   listActiveProducts: unimplementedSeller,
   findProductBySlug: unimplementedSeller,
   findVariantById: unimplementedSeller,
+  listSellableVariantsByIds: unimplementedSeller,
   findActiveStoreBySlug: unimplementedSeller,
   listStoreProducts: unimplementedSeller,
 };
@@ -214,6 +216,18 @@ const inertProductRepository: ProductRepository = {
   deleteProductImage: unimplementedSeller,
   setPrimaryProductImage: unimplementedSeller,
   reorderProductImages: unimplementedSeller,
+};
+
+const inertOrderRepository: OrderRepository = {
+  createOrder: () => {
+    throw new Error("unexpected order call");
+  },
+  findByIdForCustomer: () => {
+    throw new Error("unexpected order call");
+  },
+  listByCustomer: () => {
+    throw new Error("unexpected order call");
+  },
 };
 
 const inertCartRepository: CartRepository = {
@@ -260,6 +274,8 @@ describe("auth routes", () => {
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
     rateLimitProductCreateIpMax: 30,
     rateLimitProductCreateIpWindowSeconds: 3_600,
+    rateLimitOrderPlaceIpMax: 20,
+    rateLimitOrderPlaceIpWindowSeconds: 3_600,
         sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -286,6 +302,7 @@ describe("auth routes", () => {
       catalogRepository: inertCatalogRepository,
       productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -931,6 +948,7 @@ describe("auth routes", () => {
         catalogRepository: inertCatalogRepository,
         productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
         auditLogRepository: inertAuditLogRepository,
         passwordHasher,
         clock,

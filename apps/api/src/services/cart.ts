@@ -84,7 +84,8 @@ export class CartService {
    * its quantity is incremented (never duplicated) and `created` is `false`;
    * when a genuinely new row is inserted `created` is `true`, so the route
    * can signal `201`/`200` respectively. An unknown variant raises
-   * `VARIANT_NOT_FOUND`.
+   * `VARIANT_NOT_FOUND`; a variant that exists but is not currently sellable
+   * (inactive or sold out) raises `VARIANT_NOT_SELLABLE`.
    */
   async addItem(
     user: UserRecord,
@@ -93,12 +94,25 @@ export class CartService {
     assertActiveUser(user);
     const parsed = parseAddCartItemRequest(request);
 
-    const variant = await this.catalogRepository.findVariantById(parsed.variantId);
-    if (variant === null) {
+    // Buyability is a current moment in time: the variant must be active, its
+    // product/store active, its category active (when set) and have stock left.
+    const [sellable] = await this.catalogRepository.listSellableVariantsByIds([parsed.variantId]);
+    if (sellable === undefined) {
+      // Distinguish "there is no such variant" (404) from "it exists but
+      // cannot be bought today" (409), preserving the long-standing 404 while
+      // letting the client tell the customer the shelf moved.
+      const variant = await this.catalogRepository.findVariantById(parsed.variantId);
+      if (variant === null) {
+        throw new AppError(
+          CART_ERROR_CODES.VARIANT_NOT_FOUND,
+          "The requested variant was not found.",
+          404,
+        );
+      }
       throw new AppError(
-        CART_ERROR_CODES.VARIANT_NOT_FOUND,
-        "The requested variant was not found.",
-        404,
+        CART_ERROR_CODES.VARIANT_NOT_SELLABLE,
+        "This item is no longer available for purchase.",
+        409,
       );
     }
 

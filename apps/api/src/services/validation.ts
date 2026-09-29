@@ -3,6 +3,8 @@ import { isValidId } from "@zelora/db/ids";
 import {
   AUTH_LIMITS,
   CART_ITEM_QUANTITY_LIMITS,
+  CHECKOUT_LIMITS,
+  COUNTRY_CODE_PATTERN,
   CURRENCY_PATTERN,
   EMAIL_PATTERN,
   INVENTORY_LIMITS,
@@ -16,6 +18,8 @@ import {
   type CreateProductRequest,
   type CreateProductVariantRequest,
   type LoginRequest,
+  type OrderAddressRequest,
+  type PlaceOrderRequest,
   type RegisterRequest,
   type ReorderProductImagesRequest,
   type SellerOnboardingRequest,
@@ -641,4 +645,173 @@ export function parseReorderProductImagesRequest(body: unknown): ReorderProductI
   }
 
   throw new ValidationError("The request is invalid.", fields);
+}
+
+/**
+ * Collect an optional trimmed string field against `maxLength`. Missing
+ * (`undefined`/`null`) is allowed; anything present must be a string and is
+ * trimmed, then empty results are stored as `undefined` so a client cannot
+ * slip a blank optional field into a persisted snapshot. Problems are added to
+ * `fields` and `undefined` is returned for that field.
+ */
+function collectOptionalTrimmed(
+  fields: FieldErrors,
+  record: Record<string, unknown>,
+  field: string,
+  maxLength: number,
+): string | undefined {
+  const raw = record[field];
+  if (raw === undefined || raw === null) {
+    return undefined;
+  }
+  if (typeof raw !== "string") {
+    addFieldError(fields, field, `${field} must be a string.`);
+    return undefined;
+  }
+  const value = raw.trim();
+  if (value.length > maxLength) {
+    addFieldError(fields, field, `${field} must be at most ${maxLength} characters.`);
+    return undefined;
+  }
+  if (value.length === 0) {
+    return undefined;
+  }
+  return value;
+}
+
+/**
+ * Parse and validate one checkout address against {@link CHECKOUT_LIMITS}.
+ * `recipientName`, `line1` and `city` are required (trimmed); every optional
+ * field is a trimmed string capped by the same limits. `countryCode` is
+ * trimmed and uppercased then checked against {@link COUNTRY_CODE_PATTERN}, so
+ * both `us` and `US` normalize to the schema-friendly `US`. Returns the
+ * validated (and normalized) address.
+ */
+export function parseOrderAddress(record: Record<string, unknown>): OrderAddressRequest {
+  const fields: FieldErrors = {};
+
+  const recipientName = collectField(fields, record, "recipientName", "Recipient name", normalizeName, (value) => {
+    if (value.length < CHECKOUT_LIMITS.recipientNameMinLength || value.length > CHECKOUT_LIMITS.recipientNameMaxLength) {
+      return [
+        `Recipient name must be between ${CHECKOUT_LIMITS.recipientNameMinLength} and ${CHECKOUT_LIMITS.recipientNameMaxLength} characters.`,
+      ];
+    }
+    return [];
+  });
+  const phone = collectOptionalTrimmed(fields, record, "phone", CHECKOUT_LIMITS.phoneMaxLength);
+  const line1 = collectField(fields, record, "line1", "Address line 1", normalizeName, (value) => {
+    if (value.length < CHECKOUT_LIMITS.line1MinLength || value.length > CHECKOUT_LIMITS.line1MaxLength) {
+      return [
+        `Address line 1 must be between ${CHECKOUT_LIMITS.line1MinLength} and ${CHECKOUT_LIMITS.line1MaxLength} characters.`,
+      ];
+    }
+    return [];
+  });
+  const line2 = collectOptionalTrimmed(fields, record, "line2", CHECKOUT_LIMITS.line2MaxLength);
+  const city = collectField(fields, record, "city", "City", normalizeName, (value) => {
+    if (value.length < CHECKOUT_LIMITS.cityMinLength || value.length > CHECKOUT_LIMITS.cityMaxLength) {
+      return [
+        `City must be between ${CHECKOUT_LIMITS.cityMinLength} and ${CHECKOUT_LIMITS.cityMaxLength} characters.`,
+      ];
+    }
+    return [];
+  });
+  const region = collectOptionalTrimmed(fields, record, "region", CHECKOUT_LIMITS.regionMaxLength);
+  const postalCode = collectOptionalTrimmed(fields, record, "postalCode", CHECKOUT_LIMITS.postalCodeMaxLength);
+  const countryCode = collectField(fields, record, "countryCode", "Country code", (value) => value.trim().toUpperCase(), (value) => {
+    if (!COUNTRY_CODE_PATTERN.test(value)) {
+      return ["Country code must be a 2-letter code, e.g. US."];
+    }
+    return [];
+  });
+
+  if (Object.keys(fields).length > 0) {
+    throw new ValidationError("The request is invalid.", fields);
+  }
+
+  const result: OrderAddressRequest = {
+    recipientName: recipientName as string,
+    line1: line1 as string,
+    city: city as string,
+    countryCode: countryCode as string,
+  };
+  if (phone !== undefined) {
+    result.phone = phone;
+  }
+  if (line2 !== undefined) {
+    result.line2 = line2;
+  }
+  if (region !== undefined) {
+    result.region = region;
+  }
+  if (postalCode !== undefined) {
+    result.postalCode = postalCode;
+  }
+  return result;
+}
+
+/**
+ * Parse and validate a place-order request body. `shippingAddress` is
+ * required; `billingAddress` is optional and defaults to the shipping address
+ * at the service layer. Address problems are collected into a single
+ * {@link ValidationError} keyed by `shippingAddress.field` /
+ * `billingAddress.field` so the web app can mirror per-field hints. Anything
+ * other than the two address objects is ignored (never trusted) by the
+ * service.
+ */
+export function parsePlaceOrderRequest(body: unknown): PlaceOrderRequest {
+  const record = asObjectBody(body);
+  const fields: FieldErrors = {};
+
+  const shippingRaw = record.shippingAddress;
+  if (shippingRaw === undefined || shippingRaw === null) {
+    addFieldError(fields, "shippingAddress", "A shipping address is required.");
+  } else if (typeof shippingRaw !== "object" || Array.isArray(shippingRaw)) {
+    addFieldError(fields, "shippingAddress", "shippingAddress must be an object.");
+  } else {
+    try {
+      const shippingAddress = parseOrderAddress(shippingRaw as Record<string, unknown>);
+      const billingRaw = record.billingAddress;
+      let billingAddress: OrderAddressRequest | undefined;
+      if (billingRaw !== undefined && billingRaw !== null) {
+        if (typeof billingRaw !== "object" || Array.isArray(billingRaw)) {
+          addFieldError(fields, "billingAddress", "billingAddress must be an object.");
+        } else {
+          try {
+            billingAddress = parseOrderAddress(billingRaw as Record<string, unknown>);
+          } catch (error) {
+            mergeFieldErrors(fields, "billingAddress", error);
+          }
+        }
+      }
+      if (Object.keys(fields).length === 0) {
+        const result: PlaceOrderRequest = { shippingAddress };
+        if (billingAddress !== undefined) {
+          result.billingAddress = billingAddress;
+        }
+        return result;
+      }
+    } catch (error) {
+      mergeFieldErrors(fields, "shippingAddress", error);
+    }
+  }
+
+  throw new ValidationError("The request is invalid.", fields);
+}
+
+/**
+ * Merge a nested address parse's per-field {@link ValidationError} into the
+ * outer fields record under a `prefix.field` key, so address field problems
+ * surface as `shippingAddress.recipientName` etc. A non-validation error
+ * propagates unchanged.
+ */
+function mergeFieldErrors(fields: FieldErrors, prefix: string, error: unknown): void {
+  if (!(error instanceof ValidationError) || error.fields === undefined) {
+    throw error;
+  }
+  for (const [field, messages] of Object.entries(error.fields)) {
+    for (const message of messages) {
+      addFieldError(fields, `${prefix}.${field}`, message);
+    }
+  }
 }

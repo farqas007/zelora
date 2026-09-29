@@ -87,3 +87,18 @@ export type {
   MediaObjectRepository,
   CreateMediaObjectInput,
 } from "./media/repository";
+export type {
+  OrderRecord,
+  OrderAddressRecord,
+  OrderItemRecord,
+  OrderWithDetailsRecord,
+  OrderWithItemsRecord,
+  OrderListPage,
+  OrderListQuery,
+  CreateOrderAddressInput,
+  CreateOrderLineInput,
+  CreateOrderInput,
+  CreateOrderConflictReason,
+  CreateOrderResult,
+  OrderRepository,
+} from "./orders/repository";

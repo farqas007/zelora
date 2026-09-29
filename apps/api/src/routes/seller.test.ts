@@ -37,6 +37,7 @@ import type {
   VariantRecord,
 } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
+import type { OrderRepository } from "@zelora/db/orders";
 import { AUTH_ERROR_CODES, PRODUCT_IMAGE_UPLOAD_LIMITS, type ApiFailure, type AuthUserResponse, type ProductImageDto } from "@zelora/shared";
 import { createApp } from "../app";
 import type { Clock } from "../services/clock";
@@ -686,6 +687,10 @@ class FakeCatalogRepository implements CatalogRepository {
     return null;
   }
 
+  async listSellableVariantsByIds() {
+    return [];
+  }
+
   async findActiveStoreBySlug() {
     return null;
   }
@@ -759,6 +764,8 @@ describe("POST /api/seller/onboarding", () => {
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
     rateLimitProductCreateIpMax: 30,
     rateLimitProductCreateIpWindowSeconds: 3_600,
+    rateLimitOrderPlaceIpMax: 20,
+    rateLimitOrderPlaceIpWindowSeconds: 3_600,
         sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -787,6 +794,9 @@ describe("POST /api/seller/onboarding", () => {
     findVariantById: () => {
       throw new Error("unexpected catalog call");
     },
+    listSellableVariantsByIds: () => {
+      throw new Error("unexpected catalog call");
+    },
     findActiveStoreBySlug: () => {
       throw new Error("unexpected catalog call");
     },
@@ -799,6 +809,18 @@ describe("POST /api/seller/onboarding", () => {
    * Cart routes are composed by `createApp` but never reached by seller route
    * tests. Any accidental invocation would reveal a wiring bug loudly.
    */
+  const inertOrderRepository: OrderRepository = {
+    createOrder: () => {
+      throw new Error("unexpected order call");
+    },
+    findByIdForCustomer: () => {
+      throw new Error("unexpected order call");
+    },
+    listByCustomer: () => {
+      throw new Error("unexpected order call");
+    },
+  };
+
   const inertCartRepository: CartRepository = {
     getCartByUserId: () => {
       throw new Error("unexpected cart call");
@@ -892,6 +914,7 @@ describe("POST /api/seller/onboarding", () => {
       catalogRepository: inertCatalogRepository,
       productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -1250,6 +1273,7 @@ describe("POST /api/seller/onboarding", () => {
         catalogRepository: inertCatalogRepository,
         productRepository: inertProductRepository,
         cartRepository: inertCartRepository,
+        orderRepository: inertOrderRepository,
         auditLogRepository: inertAuditLogRepository,
         passwordHasher,
         clock,
@@ -1347,6 +1371,8 @@ describe("/api/seller/products", () => {
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
     rateLimitProductCreateIpMax: 2,
     rateLimitProductCreateIpWindowSeconds: 3_600,
+    rateLimitOrderPlaceIpMax: 20,
+    rateLimitOrderPlaceIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -1364,6 +1390,18 @@ describe("/api/seller/products", () => {
     },
     listByAction: () => {
       throw new Error("unexpected audit log call");
+    },
+  };
+
+  const inertOrderRepository: OrderRepository = {
+    createOrder: () => {
+      throw new Error("unexpected order call");
+    },
+    findByIdForCustomer: () => {
+      throw new Error("unexpected order call");
+    },
+    listByCustomer: () => {
+      throw new Error("unexpected order call");
     },
   };
 
@@ -1414,6 +1452,7 @@ describe("/api/seller/products", () => {
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -2236,6 +2275,7 @@ describe("/api/seller/products", () => {
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -2288,6 +2328,7 @@ describe("/api/seller/products", () => {
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -2360,6 +2401,8 @@ describe("POST /api/seller/products/:id variants, inventory and publish", () => 
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
     rateLimitProductCreateIpMax: 100,
     rateLimitProductCreateIpWindowSeconds: 3_600,
+    rateLimitOrderPlaceIpMax: 20,
+    rateLimitOrderPlaceIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -2377,6 +2420,18 @@ describe("POST /api/seller/products/:id variants, inventory and publish", () => 
     },
     listByAction: () => {
       throw new Error("unexpected audit log call");
+    },
+  };
+
+  const inertOrderRepository: OrderRepository = {
+    createOrder: () => {
+      throw new Error("unexpected order call");
+    },
+    findByIdForCustomer: () => {
+      throw new Error("unexpected order call");
+    },
+    listByCustomer: () => {
+      throw new Error("unexpected order call");
     },
   };
 
@@ -2427,6 +2482,7 @@ describe("POST /api/seller/products/:id variants, inventory and publish", () => 
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -2980,6 +3036,7 @@ describe("POST /api/seller/products/:id variants, inventory and publish", () => 
         catalogRepository,
         productRepository,
         cartRepository: inertCartRepository,
+        orderRepository: inertOrderRepository,
         auditLogRepository: inertAuditLogRepository,
         passwordHasher,
         clock,
@@ -3097,6 +3154,8 @@ describe("POST /api/seller/products/:id/images", () => {
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
     rateLimitProductCreateIpMax: 30,
     rateLimitProductCreateIpWindowSeconds: 3_600,
+    rateLimitOrderPlaceIpMax: 20,
+    rateLimitOrderPlaceIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -3106,6 +3165,18 @@ describe("POST /api/seller/products/:id/images", () => {
 
   const headerIpResolver: ClientIpResolver = {
     resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+  };
+
+  const inertOrderRepository: OrderRepository = {
+    createOrder: () => {
+      throw new Error("unexpected order call");
+    },
+    findByIdForCustomer: () => {
+      throw new Error("unexpected order call");
+    },
+    listByCustomer: () => {
+      throw new Error("unexpected order call");
+    },
   };
 
   const inertCartRepository: CartRepository = {
@@ -3165,6 +3236,7 @@ describe("POST /api/seller/products/:id/images", () => {
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -3972,6 +4044,7 @@ describe("POST /api/seller/products/:id/images", () => {
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -4005,6 +4078,7 @@ describe("POST /api/seller/products/:id/images", () => {
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -4076,6 +4150,8 @@ describe("/api/seller/products/:id/images management", () => {
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
     rateLimitProductCreateIpMax: 30,
     rateLimitProductCreateIpWindowSeconds: 3_600,
+    rateLimitOrderPlaceIpMax: 20,
+    rateLimitOrderPlaceIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -4085,6 +4161,18 @@ describe("/api/seller/products/:id/images management", () => {
 
   const headerIpResolver: ClientIpResolver = {
     resolve: (c) => c.req.header("x-test-ip") ?? undefined,
+  };
+
+  const inertOrderRepository: OrderRepository = {
+    createOrder: () => {
+      throw new Error("unexpected order call");
+    },
+    findByIdForCustomer: () => {
+      throw new Error("unexpected order call");
+    },
+    listByCustomer: () => {
+      throw new Error("unexpected order call");
+    },
   };
 
   const inertCartRepository: CartRepository = {
@@ -4144,6 +4232,7 @@ describe("/api/seller/products/:id/images management", () => {
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,
@@ -4161,6 +4250,7 @@ describe("/api/seller/products/:id/images management", () => {
       catalogRepository,
       productRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository: inertAuditLogRepository,
       passwordHasher,
       clock,

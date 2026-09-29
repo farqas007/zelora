@@ -107,10 +107,15 @@ export function MarketHeader() {
             </>
           )}
           {status === "authenticated" && user !== null && (
-            <Link className="account-link" to="/dashboard">
-              <UserIcon />
-              <span className="account-name">{user.name}</span>
-            </Link>
+            <>
+              <Link className="header-link" to="/orders">
+                Orders
+              </Link>
+              <Link className="account-link" to="/dashboard">
+                <UserIcon />
+                <span className="account-name">{user.name}</span>
+              </Link>
+            </>
           )}
           <Link className="btn btn-sm cart-button" to="/cart">
             <CartIcon />

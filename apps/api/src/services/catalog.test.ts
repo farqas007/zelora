@@ -94,6 +94,10 @@ class FakeCatalogRepository implements CatalogRepository {
     return null;
   }
 
+  async listSellableVariantsByIds() {
+    return [];
+  }
+
   async findActiveStoreBySlug(slug: string) {
     return slug === this.storefrontStore?.slug ? this.storefrontStore : null;
   }

@@ -429,6 +429,100 @@ describe("catalog repository: store storefront", () => {
   });
 });
 
+describe("catalog repository: sellable variants", () => {
+  function addInventory(variantId: string, quantity: number) {
+    return db
+      .insert(schema.inventory)
+      .values({ variantId, quantity })
+      .returning()
+      .get();
+  }
+
+  it("returns only the requested variants that are sellable right now", async () => {
+    // Every hidden variant gets inventory too, so each exclusion is caused by
+    // exactly one condition rather than by the missing inventory row.
+    const active = addProduct({ slug: "sellable" });
+    const activeVariant = addVariant(active.id, { priceAmountCents: 1_200, currency: "GBP" });
+    addInventory(activeVariant.id, 4);
+
+    const draftVariantProduct = addProduct({ slug: "draft-variant" });
+    const draftVariant = addVariant(draftVariantProduct.id, { status: "draft" });
+    addInventory(draftVariant.id, 3);
+
+    const inactiveVariantProduct = addProduct({ slug: "inactive-variant" });
+    const inactiveVariant = addVariant(inactiveVariantProduct.id, { status: "inactive" });
+    addInventory(inactiveVariant.id, 3);
+
+    const draftProduct = addProduct({ slug: "draft-product", status: "draft" });
+    const draftProductVariant = addVariant(draftProduct.id);
+    addInventory(draftProductVariant.id, 3);
+
+    const archivedProduct = addProduct({ slug: "archived-product", status: "archived" });
+    const archivedProductVariant = addVariant(archivedProduct.id);
+    addInventory(archivedProductVariant.id, 3);
+
+    const inactiveStore = seedStore(db, { slug: "sellable-offline-store", status: "inactive" });
+    const inactiveStoreProduct = seedProduct(db, { storeId: inactiveStore.id, slug: "offline-store" });
+    const inactiveStoreProductVariant = addVariant(inactiveStoreProduct.id);
+    addInventory(inactiveStoreProductVariant.id, 3);
+
+    const inactiveCategory = seedCategory(db, { slug: "sellable-offline-cat", status: "inactive" });
+    const inactiveCategoryProduct = addProduct({ slug: "offline-category", categoryId: inactiveCategory.id });
+    const inactiveCategoryProductVariant = addVariant(inactiveCategoryProduct.id);
+    addInventory(inactiveCategoryProductVariant.id, 3);
+
+    const soldOutProduct = addProduct({ slug: "sold-out" });
+    const soldOutVariant = addVariant(soldOutProduct.id);
+    addInventory(soldOutVariant.id, 0);
+
+    const sellable = await repo.listSellableVariantsByIds([
+      activeVariant.id,
+      draftVariant.id,
+      inactiveVariant.id,
+      draftProductVariant.id,
+      archivedProductVariant.id,
+      inactiveStoreProductVariant.id,
+      inactiveCategoryProductVariant.id,
+      soldOutVariant.id,
+    ]);
+
+    expect(sellable.map((variant) => variant.id)).toEqual([activeVariant.id]);
+    expect(sellable[0]).toEqual({
+      id: activeVariant.id,
+      name: activeVariant.name,
+      sku: activeVariant.sku,
+      priceAmountCents: 1_200,
+      currency: "GBP",
+      productId: active.id,
+      productName: active.name,
+      storeId: store.id,
+      availableQuantity: 4,
+    });
+  });
+
+  it("returns an empty list for an empty input without touching the database", async () => {
+    expect(await repo.listSellableVariantsByIds([])).toEqual([]);
+  });
+
+  it("returns an empty list when none of the requested ids is sellable", async () => {
+    const product = addProduct({ slug: "only-draft-variant" });
+    const draft = addVariant(product.id, { status: "draft" });
+    addInventory(draft.id, 2);
+
+    expect(await repo.listSellableVariantsByIds([draft.id])).toEqual([]);
+    expect(await repo.listSellableVariantsByIds(["00000000-0000-7000-8000-000000000000"])).toEqual([]);
+  });
+
+  it("excludes a variant of an inactive category even when everything else is live", async () => {
+    const offlineCategory = seedCategory(db, { slug: "offline-only", status: "inactive" });
+    const product = addProduct({ slug: "in-offline-cat", categoryId: offlineCategory.id });
+    const variant = addVariant(product.id);
+    addInventory(variant.id, 9);
+
+    expect(await repo.listSellableVariantsByIds([variant.id])).toEqual([]);
+  });
+});
+
 function addVariant(productId: string, overrides: Partial<typeof schema.productVariants.$inferInsert> = {}) {
   seq += 1;
   return db

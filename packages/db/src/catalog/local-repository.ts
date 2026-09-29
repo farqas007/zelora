@@ -1,10 +1,11 @@
-import { and, asc, desc, eq, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
-import { categories, productImages, products, productVariants, stores } from "../schema";
+import { categories, inventory, productImages, products, productVariants, stores } from "../schema";
 import type {
   CatalogProductListPage,
   CatalogProductSummaryRecord,
   CatalogRepository,
+  SellableVariantRecord,
 } from "./repository";
 import { decodeCatalogCursor, encodeCatalogCursor } from "./cursor";
 
@@ -132,6 +133,10 @@ export function createLocalCatalogRepository(db: LocalDatabase): CatalogReposito
       );
     },
 
+    async listSellableVariantsByIds(ids) {
+      return sellableVariantsByIds(db, ids);
+    },
+
     async findActiveStoreBySlug(slug) {
       const row = db
         .select({
@@ -150,6 +155,52 @@ export function createLocalCatalogRepository(db: LocalDatabase): CatalogReposito
       return loadProductPage(db, { limit, cursor, storeSlug });
     },
   };
+}
+
+/**
+ * Sellable variants among the requested ids, resolved in SQL: active variant,
+ * active product, active store, active category (when set) and
+ * `inventory.quantity > 0`. Only variants meeting every condition are
+ * returned, so "exists but not buyable" and "does not exist" collapse into the
+ * same absence — callers decide which story to tell from that absence. An
+ * empty input short-circuits before the query builder runs.
+ */
+export function sellableVariantsByIds(
+  db: LocalDatabase,
+  ids: string[],
+): SellableVariantRecord[] {
+  if (ids.length === 0) {
+    return [];
+  }
+  return db
+    .select({
+      id: productVariants.id,
+      name: productVariants.name,
+      sku: productVariants.sku,
+      priceAmountCents: productVariants.priceAmountCents,
+      currency: productVariants.currency,
+      productId: products.id,
+      productName: products.name,
+      storeId: stores.id,
+      availableQuantity: inventory.quantity,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .innerJoin(stores, eq(stores.id, products.storeId))
+    .leftJoin(categories, eq(categories.id, products.categoryId))
+    .innerJoin(inventory, eq(inventory.variantId, productVariants.id))
+    .where(
+      and(
+        inArray(productVariants.id, ids),
+        eq(productVariants.status, "active"),
+        eq(products.status, "active"),
+        eq(stores.status, "active"),
+        or(isNull(products.categoryId), eq(categories.status, "active")),
+        gt(inventory.quantity, 0),
+      ),
+    )
+    .orderBy(productVariants.id)
+    .all();
 }
 
 /**

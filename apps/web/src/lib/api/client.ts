@@ -16,14 +16,18 @@ import type {
   CreateProductVariantEnvelope,
   CreateProductVariantRequest,
   DeleteProductImageEnvelope,
+  GetOrderEnvelope,
   GetSellerProductEnvelope,
   HealthResponse,
+  ListOrdersEnvelope,
   ListSellerProductImagesEnvelope,
   ListSellerProductsEnvelope,
   LoginEnvelope,
   LoginRequest,
   LogoutAllEnvelope,
   LogoutEnvelope,
+  PlaceOrderEnvelope,
+  PlaceOrderRequest,
   PublishProductEnvelope,
   RegisterEnvelope,
   RegisterRequest,
@@ -109,6 +113,19 @@ export interface ListPendingSellersRequest {
   cursor?: string;
 }
 
+/**
+ * Client-side query parameters for `GET /api/orders`.
+ *
+ * Mirrors the other paginated listings: a numeric page size (validated to the
+ * shared {@link ORDER_PAGE_LIMITS} bounds server-side) and the opaque keyset
+ * cursor the previous page returned. Both are omitted rather than sent empty so
+ * the API's own defaults apply.
+ */
+export interface ListOrdersRequest {
+  limit?: number;
+  cursor?: string;
+}
+
 /** Typed endpoints of the Zelora API, keyed by HTTP route. */
 export interface ZeloraApi {
   getHealth(): Promise<ApiEnvelope<HealthResponse>>;
@@ -145,6 +162,9 @@ export interface ZeloraApi {
   updateCartItemQuantity(itemId: string, input: UpdateCartItemRequest): Promise<CartEnvelope>;
   removeCartItem(itemId: string): Promise<CartEnvelope>;
   clearCart(): Promise<CartEnvelope>;
+  listOrders(input?: ListOrdersRequest): Promise<ListOrdersEnvelope>;
+  getOrder(orderId: string): Promise<GetOrderEnvelope>;
+  placeOrder(input: PlaceOrderRequest): Promise<PlaceOrderEnvelope>;
   listPendingSellers(input?: ListPendingSellersRequest): Promise<AdminPendingSellersEnvelope>;
   activateSeller(userId: string): Promise<SellerActivationEnvelope>;
   rejectSeller(userId: string): Promise<SellerRejectionEnvelope>;
@@ -432,6 +452,26 @@ export function createApiClient(
         csrf: true,
       }),
     clearCart: () => request<CartEnvelope>("/api/cart", { method: "DELETE", csrf: true }),
+    listOrders: (input = {}) => {
+      const params = new URLSearchParams();
+      if (input.limit !== undefined) {
+        params.set("limit", String(input.limit));
+      }
+      if (input.cursor !== undefined && input.cursor !== "") {
+        params.set("cursor", input.cursor);
+      }
+      const query = params.toString();
+      return request<ListOrdersEnvelope>(
+        `/api/orders${query === "" ? "" : `?${query}`}`,
+        { method: "GET" },
+      );
+    },
+    getOrder: (orderId) =>
+      request<GetOrderEnvelope>(`/api/orders/${encodeURIComponent(orderId)}`, {
+        method: "GET",
+      }),
+    placeOrder: (input) =>
+      request<PlaceOrderEnvelope>("/api/orders", { method: "POST", body: input, csrf: true }),
     listPendingSellers: (input = {}) => {
       const params = new URLSearchParams();
       if (input.limit !== undefined) {

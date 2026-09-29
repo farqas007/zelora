@@ -99,6 +99,26 @@ export function CartPage() {
   const ready = status === "ready" && cart !== null;
   const showError = status !== "loading" && status !== "signed-out" && loadError !== null;
 
+  const subtotal = (() => {
+    if (lookup === undefined || lookup === null || items.length === 0) {
+      return null;
+    }
+    let total = 0;
+    let currency: string | null = null;
+    for (const item of items) {
+      const reference = lookup.get(item.variantId);
+      if (reference === undefined) {
+        return null;
+      }
+      if (currency !== null && currency !== reference.variant.currency) {
+        return null;
+      }
+      currency = reference.variant.currency;
+      total += reference.variant.priceAmountCents * item.quantity;
+    }
+    return currency === null ? null : { total, currency };
+  })();
+
   return (
     <div className="shell">
       <a className="skip-link" href="#main-content">
@@ -164,6 +184,25 @@ export function CartPage() {
                   onRemove={onRemove}
                 />
               ))}
+            </div>
+
+            <div className="cart-summary">
+              <div className="cart-summary-lines">
+                <span className="muted">
+                  {itemCount} {itemCount === 1 ? "item" : "items"}
+                </span>
+                {subtotal !== null ? (
+                  <span className="cart-summary-total">
+                    Subtotal{" "}
+                    <strong>{formatCents(subtotal.total, subtotal.currency)}</strong>
+                  </span>
+                ) : (
+                  <span className="muted">Prices confirm at checkout.</span>
+                )}
+              </div>
+              <Link className="btn btn-primary" to="/checkout">
+                Checkout
+              </Link>
             </div>
 
             <div className="cart-foot">

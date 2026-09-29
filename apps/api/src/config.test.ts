@@ -148,6 +148,8 @@ describe("loadConfig auth defaults", () => {
     expect(defaults.rateLimitSellerOnboardingIpWindowSeconds).toBe(3_600);
     expect(defaults.rateLimitProductCreateIpMax).toBe(30);
     expect(defaults.rateLimitProductCreateIpWindowSeconds).toBe(3_600);
+    expect(defaults.rateLimitOrderPlaceIpMax).toBe(20);
+    expect(defaults.rateLimitOrderPlaceIpWindowSeconds).toBe(3_600);
 
     const config = loadConfig({
       NODE_ENV: "test",
@@ -163,6 +165,8 @@ describe("loadConfig auth defaults", () => {
       RATE_LIMIT_SELLER_ONBOARDING_IP_WINDOW_SECONDS: "720",
       RATE_LIMIT_PRODUCT_CREATE_IP_MAX: "12",
       RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS: "1800",
+      RATE_LIMIT_ORDER_PLACE_IP_MAX: "5",
+      RATE_LIMIT_ORDER_PLACE_IP_WINDOW_SECONDS: "900",
     });
 
     expect(config.rateLimitEnabled).toBe(false);
@@ -177,6 +181,8 @@ describe("loadConfig auth defaults", () => {
     expect(config.rateLimitSellerOnboardingIpWindowSeconds).toBe(720);
     expect(config.rateLimitProductCreateIpMax).toBe(12);
     expect(config.rateLimitProductCreateIpWindowSeconds).toBe(1_800);
+    expect(config.rateLimitOrderPlaceIpMax).toBe(5);
+    expect(config.rateLimitOrderPlaceIpWindowSeconds).toBe(900);
   });
 });
 
@@ -223,6 +229,10 @@ describe("loadConfig invalid values", () => {
     { name: "negative product create IP max", env: { RATE_LIMIT_PRODUCT_CREATE_IP_MAX: "-3" } },
     { name: "fractional product create IP window", env: { RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS: "1800.5" } },
     { name: "non-numeric product create IP window", env: { RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS: "hour" } },
+    { name: "zero order place IP max", env: { RATE_LIMIT_ORDER_PLACE_IP_MAX: "0" } },
+    { name: "negative order place IP max", env: { RATE_LIMIT_ORDER_PLACE_IP_MAX: "-4" } },
+    { name: "fractional order place IP window", env: { RATE_LIMIT_ORDER_PLACE_IP_WINDOW_SECONDS: "3600.5" } },
+    { name: "non-numeric order place IP window", env: { RATE_LIMIT_ORDER_PLACE_IP_WINDOW_SECONDS: "hour" } },
     { name: "zero session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "0" } },
     { name: "negative session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "-60" } },
     { name: "fractional session last-used throttle", env: { SESSION_LAST_USED_THROTTLE_SECONDS: "10.5" } },

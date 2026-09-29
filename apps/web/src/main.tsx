@@ -8,8 +8,12 @@ import { CartProvider } from "./context/CartContext";
 import { AdminSellersPage } from "./pages/AdminSellers";
 import { CartPage } from "./pages/Cart";
 import { CatalogPage } from "./pages/Catalog";
+import { CheckoutPage } from "./pages/Checkout";
 import { DashboardPage } from "./pages/Dashboard";
 import { LoginPage } from "./pages/Login";
+import { OrderConfirmationPage } from "./pages/OrderConfirmation";
+import { OrderDetailPage } from "./pages/OrderDetail";
+import { OrdersPage } from "./pages/Orders";
 import { ProductDetailPage } from "./pages/ProductDetail";
 import { RegisterPage } from "./pages/Register";
 import { SellerOnboardingPage } from "./pages/SellerOnboarding";
@@ -89,6 +93,16 @@ createRoot(rootElement).render(
               }
             />
             <Route path="/cart" element={<CartPage />} />
+            <Route path="/checkout" element={<RequireAuth><CheckoutPage /></RequireAuth>} />
+            <Route
+              path="/checkout/confirmation"
+              element={<RequireAuth><OrderConfirmationPage /></RequireAuth>}
+            />
+            <Route path="/orders" element={<RequireAuth><OrdersPage /></RequireAuth>} />
+            <Route
+              path="/orders/:orderId"
+              element={<RequireAuth><OrderDetailPage /></RequireAuth>}
+            />
             <Route path="/catalog" element={<CatalogPage />} />
             <Route path="/catalog/products/:slug" element={<ProductDetailPage />} />
             <Route path="/store/:slug" element={<StorefrontPage />} />

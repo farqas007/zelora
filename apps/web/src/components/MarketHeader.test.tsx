@@ -230,5 +230,28 @@ describe("MarketHeader", () => {
       expect(screen.queryByRole("link", { name: "Sign in" })).toBeNull();
       expect(screen.getByLabelText("3 items in cart")).toBeDefined();
     });
+
+    it("shows the orders link for an authenticated shopper, pointing at order history", async () => {
+      const api = givenCategories(CATEGORIES);
+      givenSession(api, "authenticated");
+      givenCart();
+
+      const header = await renderHeader();
+      await findCategoryNav();
+
+      const orders = within(header).getByRole("link", { name: "Orders" });
+      expect(orders.getAttribute("href")).toBe("/orders");
+      expect(within(header).getAllByRole("link")).toContain(orders);
+    });
+
+    it("hides the orders link for a signed-out shopper", async () => {
+      givenCategories(CATEGORIES);
+      givenCart();
+
+      await renderHeader();
+      await findCategoryNav();
+
+      expect(screen.queryByRole("link", { name: "Orders" })).toBeNull();
+    });
   });
 });

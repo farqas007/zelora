@@ -8,6 +8,7 @@ import type { SellerRepository } from "@zelora/db/seller";
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ProductRepository } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
+import type { OrderRepository } from "@zelora/db/orders";
 import { createLogger, type AppConfig, type PasswordHasher } from "@zelora/core";
 import { createErrorHandler, notFoundHandler } from "./middleware/error";
 import { requestLogger } from "./middleware/request-log";
@@ -17,12 +18,14 @@ import { createCartRoutes } from "./routes/cart";
 import { createCatalogRoutes } from "./routes/catalog";
 import { createHealthRoutes } from "./routes/health";
 import { createMediaRoutes } from "./routes/media";
+import { createOrderRoutes } from "./routes/orders";
 import { createSellerRoutes } from "./routes/seller";
 import { createStorefrontRoutes } from "./routes/storefront";
 import { AdminService } from "./services/admin";
 import { AuthService } from "./services/auth";
 import { CartService } from "./services/cart";
 import { CatalogService } from "./services/catalog";
+import { OrderService } from "./services/orders";
 import { SellerService } from "./services/seller";
 import type { Clock } from "./services/clock";
 import type { ClientIpResolver } from "./services/client-ip";
@@ -60,6 +63,7 @@ export interface AppDependencies {
   catalogRepository: CatalogRepository;
   productRepository: ProductRepository;
   cartRepository: CartRepository;
+  orderRepository: OrderRepository;
   auditLogRepository: AuditLogRepository;
   passwordHasher: PasswordHasher;
   clock: Clock;
@@ -112,7 +116,7 @@ export function resolveAppMediaStorage(mediaStorage: MediaStorage | undefined): 
 const SECURITY_HEADERS = secureHeaders({ crossOriginResourcePolicy: "cross-origin" });
 
 export function createApp(dependencies: AppDependencies): Hono {
-  const { config, userRepository, sessionRepository, sellerRepository, catalogRepository, productRepository, cartRepository, auditLogRepository, passwordHasher, clock } = dependencies;
+  const { config, userRepository, sessionRepository, sellerRepository, catalogRepository, productRepository, cartRepository, orderRepository, auditLogRepository, passwordHasher, clock } = dependencies;
   const rateLimiter = dependencies.rateLimiter ?? new MemoryWindowRateLimiter(clock);
   const clientIpResolver: ClientIpResolver = dependencies.clientIpResolver ?? {
     resolve: () => undefined,
@@ -155,6 +159,11 @@ export function createApp(dependencies: AppDependencies): Hono {
   });
   const catalogService = new CatalogService({ catalogRepository });
   const cartService = new CartService({ cartRepository, catalogRepository });
+  const orderService = new OrderService({
+    cartRepository,
+    catalogRepository,
+    orderRepository,
+  });
   const adminService = new AdminService({
     config,
     userRepository,
@@ -182,6 +191,19 @@ export function createApp(dependencies: AppDependencies): Hono {
       sessionRepository,
       userRepository,
       clock,
+    }),
+  );
+
+  app.route(
+    "/api/orders",
+    createOrderRoutes({
+      config,
+      orderService,
+      sessionRepository,
+      userRepository,
+      clock,
+      rateLimiter,
+      clientIpResolver,
     }),
   );
 

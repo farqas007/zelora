@@ -538,6 +538,10 @@ class FakeCatalogRepository implements CatalogRepository {
     throw new Error("not exercised by seller service tests");
   }
 
+  async listSellableVariantsByIds(): Promise<never> {
+    throw new Error("not exercised by seller service tests");
+  }
+
   async findActiveStoreBySlug(): Promise<never> {
     throw new Error("not exercised by seller service tests");
   }

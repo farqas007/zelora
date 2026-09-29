@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "@zelora/core";
 import type { UserRecord } from "@zelora/db/users";
-import type { CatalogRepository, CatalogVariantRecord } from "@zelora/db/catalog";
+import type { CatalogRepository, CatalogVariantRecord, SellableVariantRecord } from "@zelora/db/catalog";
 import type {
   AddCartItemResult,
   CartItemRecord,
@@ -133,11 +133,60 @@ class FakeCartRepository implements CartRepository {
 
 class FakeCatalogRepository implements CatalogRepository {
   private variants: Map<string, CatalogVariantRecord> = new Map();
+  /** Full sellable projections, keyed by variant id. */
+  private sellableVariants: Map<string, SellableVariantRecord> = new Map();
 
+  /** A variant that exists and is buyable (existing tests' default posture). */
   seedVariant(id: string): void {
     this.variants.set(id, {
       id,
       name: "Variant",
+      sku: null,
+      priceAmountCents: 1_000,
+      compareAtAmountCents: null,
+      currency: "USD",
+    });
+    this.sellableVariants.set(id, {
+      id,
+      name: "Variant",
+      sku: null,
+      priceAmountCents: 1_000,
+      currency: "USD",
+      productId: "p1",
+      productName: "Product",
+      storeId: "s1",
+      availableQuantity: 5,
+    });
+  }
+
+  /** A variant with a controlled available quantity (0 = sold out). */
+  seedSellableVariant(id: string, availableQuantity: number): void {
+    this.variants.set(id, {
+      id,
+      name: "Variant",
+      sku: null,
+      priceAmountCents: 1_000,
+      compareAtAmountCents: null,
+      currency: "USD",
+    });
+    this.sellableVariants.set(id, {
+      id,
+      name: "Variant",
+      sku: null,
+      priceAmountCents: 1_000,
+      currency: "USD",
+      productId: "p1",
+      productName: "Product",
+      storeId: "s1",
+      availableQuantity,
+    });
+  }
+
+  /** A variant that exists (findVariantById resolves) but is not sellable. */
+  seedUnavailableVariant(id: string): void {
+    this.variants.set(id, {
+      id,
+      name: "Unavailable",
       sku: null,
       priceAmountCents: 1_000,
       compareAtAmountCents: null,
@@ -159,6 +208,14 @@ class FakeCatalogRepository implements CatalogRepository {
 
   async findVariantById(id: string): Promise<CatalogVariantRecord | null> {
     return this.variants.get(id) ?? null;
+  }
+
+  async listSellableVariantsByIds(ids: string[]): Promise<SellableVariantRecord[]> {
+    return ids
+      .map((id) => this.sellableVariants.get(id))
+      .filter((record): record is SellableVariantRecord =>
+        record !== undefined && record.availableQuantity > 0,
+      );
   }
 
   async findActiveStoreBySlug() {
@@ -238,6 +295,41 @@ const result = await service.addItem(user, { variantId: "v1", quantity: 3 });
       const { service } = setup();
       const user = makeUser();
       await expectCodeError(service.addItem(user, { variantId: "missing", quantity: 1 }), "VARIANT_NOT_FOUND", 404);
+    });
+
+    it("rejects a variant that exists but is not sellable with VARIANT_NOT_SELLABLE", async () => {
+      const { service, catalogRepository } = setup();
+      const user = makeUser();
+      catalogRepository.seedUnavailableVariant("v-off");
+
+      await expectCodeError(
+        service.addItem(user, { variantId: "v-off", quantity: 1 }),
+        "VARIANT_NOT_SELLABLE",
+        409,
+      );
+    });
+
+    it("rejects a variant with no available inventory with VARIANT_NOT_SELLABLE", async () => {
+      const { service, catalogRepository } = setup();
+      const user = makeUser();
+      catalogRepository.seedSellableVariant("v-sold-out", 0);
+
+      await expectCodeError(
+        service.addItem(user, { variantId: "v-sold-out", quantity: 1 }),
+        "VARIANT_NOT_SELLABLE",
+        409,
+      );
+    });
+
+    it("adds a sellable variant carrying a positive inventory", async () => {
+      const { service, catalogRepository } = setup();
+      const user = makeUser();
+      catalogRepository.seedSellableVariant("v-in-stock", 4);
+
+      const result = await service.addItem(user, { variantId: "v-in-stock", quantity: 2 });
+
+      expect(result.created).toBe(true);
+      expect(result.data.items).toMatchObject([{ variantId: "v-in-stock", quantity: 2 }]);
     });
 
     it("increments an existing item instead of duplicating", async () => {

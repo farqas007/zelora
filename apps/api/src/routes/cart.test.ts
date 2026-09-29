@@ -4,8 +4,9 @@ import type { AuthSessionRecord, AuthSessionRepository, CreateAuthSessionInput }
 import type { AuditLogRepository } from "@zelora/db/audit";
 import type { UserRecord, UserRepository, CreateAdminResult, CreateUserInput } from "@zelora/db/users";
 import type { SellerRepository } from "@zelora/db/seller";
-import type { CatalogRepository, CatalogVariantRecord } from "@zelora/db/catalog";
+import type { CatalogRepository, CatalogVariantRecord, SellableVariantRecord } from "@zelora/db/catalog";
 import type { ProductRepository } from "@zelora/db/products";
+import type { OrderRepository } from "@zelora/db/orders";
 import type {
   AddCartItemInput,
   AddCartItemResult,
@@ -230,11 +231,35 @@ class FakeCartRepository implements CartRepository {
 
 class FakeCatalogRepository implements CatalogRepository {
   private variants: Map<string, CatalogVariantRecord> = new Map();
+  private sellableVariants: Map<string, SellableVariantRecord> = new Map();
 
   seedVariant(id: string): void {
     this.variants.set(id, {
       id,
       name: "Variant",
+      sku: null,
+      priceAmountCents: 1_000,
+      compareAtAmountCents: null,
+      currency: "USD",
+    });
+    this.sellableVariants.set(id, {
+      id,
+      name: "Variant",
+      sku: null,
+      priceAmountCents: 1_000,
+      currency: "USD",
+      productId: "p1",
+      productName: "Product",
+      storeId: "s1",
+      availableQuantity: 5,
+    });
+  }
+
+  /** A variant that exists (findVariantById resolves) but is not sellable. */
+  seedUnavailableVariant(id: string): void {
+    this.variants.set(id, {
+      id,
+      name: "Unavailable",
       sku: null,
       priceAmountCents: 1_000,
       compareAtAmountCents: null,
@@ -256,6 +281,14 @@ class FakeCatalogRepository implements CatalogRepository {
 
   async findVariantById(id: string): Promise<CatalogVariantRecord | null> {
     return this.variants.get(id) ?? null;
+  }
+
+  async listSellableVariantsByIds(ids: string[]): Promise<SellableVariantRecord[]> {
+    return ids
+      .map((id) => this.sellableVariants.get(id))
+      .filter((record): record is SellableVariantRecord =>
+        record !== undefined && record.availableQuantity > 0,
+      );
   }
 
   async findActiveStoreBySlug() {
@@ -294,6 +327,8 @@ describe("cart routes", () => {
     rateLimitSellerOnboardingIpWindowSeconds: 3_600,
     rateLimitProductCreateIpMax: 30,
     rateLimitProductCreateIpWindowSeconds: 3_600,
+    rateLimitOrderPlaceIpMax: 20,
+    rateLimitOrderPlaceIpWindowSeconds: 3_600,
     sessionLastUsedThrottleSeconds: 300,
     sessionPurgeIntervalSeconds: 3_600,
     adminBootstrapSecret: null,
@@ -343,6 +378,11 @@ describe("cart routes", () => {
         reorderProductImages: inert,
       } satisfies ProductRepository,
       cartRepository,
+      orderRepository: {
+        createOrder: inert,
+        findByIdForCustomer: inert,
+        listByCustomer: inert,
+      } satisfies OrderRepository,
       auditLogRepository: {
         create: inert,
         listByAction: inert,
@@ -540,6 +580,19 @@ describe("cart routes", () => {
     });
 
     await expectFailure(response, "VARIANT_NOT_FOUND", 404);
+  });
+
+  it("C: adding an existing but unsellable variant returns 409 VARIANT_NOT_SELLABLE", async () => {
+    catalogRepository.seedUnavailableVariant("variant-off");
+    const { cookie, csrfToken } = await registerSession();
+
+    const response = await method("POST", "/api/cart/items", {
+      cookie,
+      csrfToken,
+      body: { variantId: "variant-off", quantity: 1 },
+    });
+
+    await expectFailure(response, "VARIANT_NOT_SELLABLE", 409);
   });
 
   it("C: malformed add bodies return a 422 validation envelope", async () => {

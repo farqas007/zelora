@@ -92,6 +92,29 @@ export interface CatalogProductDetailRecord {
   images: CatalogProductImageRecord[];
 }
 
+/**
+ * One variant that can be bought *right now*, resolved from live database
+ * state at the moment of use.
+ *
+ * Sellability is stricter than storefront visibility: the variant, its
+ * product, its store and (when set) its category must all be `active`, and
+ * the variant must have inventory left (`quantity > 0`). The projection
+ * carries everything checkout needs to trust money and stock without a second
+ * round-trip: the live selling price and currency, the owning product and
+ * store, and the available quantity.
+ */
+export interface SellableVariantRecord {
+  id: string;
+  name: string;
+  sku: string | null;
+  priceAmountCents: number;
+  currency: string;
+  productId: string;
+  productName: string;
+  storeId: string;
+  availableQuantity: number;
+}
+
 export interface CatalogRepository {
   /** Every category currently active, in name order. */
   listActiveCategories(): Promise<CatalogCategoryRecord[]>;
@@ -118,6 +141,15 @@ export interface CatalogRepository {
    * public display. Returns `null` when the variant does not exist.
    */
   findVariantById(id: string): Promise<CatalogVariantRecord | null>;
+
+  /**
+   * Resolve the requested variants that are currently sellable (see
+   * {@link SellableVariantRecord}). Variants that do not exist, or exist but
+   * are not currently sellable (non-active variant/product/store, inactive
+   * category, or zero inventory), are omitted from the result. An empty input
+   * returns an empty list without touching the database.
+   */
+  listSellableVariantsByIds(ids: string[]): Promise<SellableVariantRecord[]>;
 
   /**
    * Resolve one active store by slug for its public storefront. Returns

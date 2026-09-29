@@ -27,6 +27,8 @@ export interface AppConfig {
   rateLimitSellerOnboardingIpWindowSeconds: number;
   rateLimitProductCreateIpMax: number;
   rateLimitProductCreateIpWindowSeconds: number;
+  rateLimitOrderPlaceIpMax: number;
+  rateLimitOrderPlaceIpWindowSeconds: number;
   /**
    * Secret gating the initial-admin bootstrap endpoint, or `null` when the
    * endpoint is disabled. When set, it must be at least
@@ -78,6 +80,8 @@ const DEFAULT_CONFIG: Omit<AppConfig, "nodeEnv"> = {
   rateLimitSellerOnboardingIpWindowSeconds: 3_600,
   rateLimitProductCreateIpMax: 30,
   rateLimitProductCreateIpWindowSeconds: 3_600,
+  rateLimitOrderPlaceIpMax: 20,
+  rateLimitOrderPlaceIpWindowSeconds: 3_600,
   /** Admin bootstrap is opt-in: disabled unless a secret is provided. */
   adminBootstrapSecret: null,
   /**
@@ -368,6 +372,16 @@ export function loadConfig(
       env.RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS,
       DEFAULT_CONFIG.rateLimitProductCreateIpWindowSeconds,
       "RATE_LIMIT_PRODUCT_CREATE_IP_WINDOW_SECONDS",
+    ),
+    rateLimitOrderPlaceIpMax: parsePositiveInteger(
+      env.RATE_LIMIT_ORDER_PLACE_IP_MAX,
+      DEFAULT_CONFIG.rateLimitOrderPlaceIpMax,
+      "RATE_LIMIT_ORDER_PLACE_IP_MAX",
+    ),
+    rateLimitOrderPlaceIpWindowSeconds: parsePositiveInteger(
+      env.RATE_LIMIT_ORDER_PLACE_IP_WINDOW_SECONDS,
+      DEFAULT_CONFIG.rateLimitOrderPlaceIpWindowSeconds,
+      "RATE_LIMIT_ORDER_PLACE_IP_WINDOW_SECONDS",
     ),
     adminBootstrapSecret: parseAdminBootstrapSecret(env.ADMIN_BOOTSTRAP_SECRET),
     mediaPublicBaseUrl: parseMediaPublicBaseUrl(env.MEDIA_PUBLIC_BASE_URL),

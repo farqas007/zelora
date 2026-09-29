@@ -8,6 +8,7 @@ import { createLocalSellerRepository } from "@zelora/db/seller/local";
 import { createLocalCatalogRepository } from "@zelora/db/catalog/local";
 import { createLocalProductRepository } from "@zelora/db/products/local";
 import { createLocalCartRepository } from "@zelora/db/cart/local";
+import { createLocalOrderRepository } from "@zelora/db/orders/local";
 import { createLocalAuditLogRepository } from "@zelora/db/audit/local";
 import { createApp } from "./app";
 import { systemClock } from "./services/clock";
@@ -70,6 +71,7 @@ const app = createApp({
   catalogRepository: createLocalCatalogRepository(db),
   productRepository: createLocalProductRepository(db),
   cartRepository: createLocalCartRepository(db),
+  orderRepository: createLocalOrderRepository(db),
   auditLogRepository: createLocalAuditLogRepository(db),
   passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
   clock: systemClock,

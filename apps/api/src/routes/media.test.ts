@@ -3,6 +3,7 @@ import { PBKDF2PasswordHasher, type AppConfig } from "@zelora/core";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { AuditLogRepository } from "@zelora/db/audit";
 import type { CartRepository } from "@zelora/db/cart";
+import type { OrderRepository } from "@zelora/db/orders";
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ProductRepository } from "@zelora/db/products";
 import type { SellerRepository } from "@zelora/db/seller";
@@ -45,6 +46,8 @@ const config: AppConfig = {
   rateLimitSellerOnboardingIpWindowSeconds: 3_600,
   rateLimitProductCreateIpMax: 100,
   rateLimitProductCreateIpWindowSeconds: 3_600,
+  rateLimitOrderPlaceIpMax: 20,
+  rateLimitOrderPlaceIpWindowSeconds: 3_600,
   sessionLastUsedThrottleSeconds: 300,
   sessionPurgeIntervalSeconds: 3_600,
   adminBootstrapSecret: null,
@@ -112,6 +115,7 @@ beforeEach(() => {
     catalogRepository: inertRepository<CatalogRepository>("catalogRepository"),
     productRepository: inertRepository<ProductRepository>("productRepository"),
     cartRepository: inertRepository<CartRepository>("cartRepository"),
+    orderRepository: inertRepository<OrderRepository>("orderRepository"),
     auditLogRepository: inertRepository<AuditLogRepository>("auditLogRepository"),
     passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
     clock: { now: () => new Date("2026-06-01T00:00:00.000Z") } satisfies Clock,
@@ -360,6 +364,7 @@ describe("GET /media/*", () => {
       catalogRepository: inertRepository<CatalogRepository>("catalogRepository"),
       productRepository: inertRepository<ProductRepository>("productRepository"),
       cartRepository: inertRepository<CartRepository>("cartRepository"),
+    orderRepository: inertRepository<OrderRepository>("orderRepository"),
       auditLogRepository: inertRepository<AuditLogRepository>("auditLogRepository"),
       passwordHasher: new PBKDF2PasswordHasher(config.pbkdf2Iterations),
       clock: { now: () => new Date("2026-06-01T00:00:00.000Z") } satisfies Clock,

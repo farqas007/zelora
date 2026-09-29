@@ -1,12 +1,13 @@
-import { and, asc, desc, eq, inArray, isNull, lt, or } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lt, or } from "drizzle-orm";
 import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
-import { categories, productImages, products, productVariants, stores } from "../schema";
+import { categories, inventory, productImages, products, productVariants, stores } from "../schema";
 import type {
   CatalogCategoryRecord,
   CatalogProductListPage,
   CatalogProductSummaryRecord,
   CatalogRepository,
+  SellableVariantRecord,
 } from "./repository";
 import { decodeCatalogCursor, encodeCatalogCursor } from "./cursor";
 
@@ -133,6 +134,10 @@ export function createD1CatalogRepository(
       return row ?? null;
     },
 
+    async listSellableVariantsByIds(ids) {
+      return sellableVariantsByIds(db, ids);
+    },
+
     async findActiveStoreBySlug(slug) {
       const row = await db
         .select({
@@ -151,6 +156,49 @@ export function createD1CatalogRepository(
       return loadProductPage(db, { limit, cursor, storeSlug });
     },
   };
+}
+
+/**
+ * Async twin of the local `sellableVariantsByIds`: sellable variants among the
+ * requested ids, with every status check and the `quantity > 0` guard resolved
+ * in SQL so no sellability decision lives in application code. An empty input
+ * short-circuits before the query builder runs.
+ */
+export async function sellableVariantsByIds(
+  db: DrizzleD1Database<DatabaseSchema>,
+  ids: string[],
+): Promise<SellableVariantRecord[]> {
+  if (ids.length === 0) {
+    return [];
+  }
+  return db
+    .select({
+      id: productVariants.id,
+      name: productVariants.name,
+      sku: productVariants.sku,
+      priceAmountCents: productVariants.priceAmountCents,
+      currency: productVariants.currency,
+      productId: products.id,
+      productName: products.name,
+      storeId: stores.id,
+      availableQuantity: inventory.quantity,
+    })
+    .from(productVariants)
+    .innerJoin(products, eq(products.id, productVariants.productId))
+    .innerJoin(stores, eq(stores.id, products.storeId))
+    .leftJoin(categories, eq(categories.id, products.categoryId))
+    .innerJoin(inventory, eq(inventory.variantId, productVariants.id))
+    .where(
+      and(
+        inArray(productVariants.id, ids),
+        eq(productVariants.status, "active"),
+        eq(products.status, "active"),
+        eq(stores.status, "active"),
+        or(isNull(products.categoryId), eq(categories.status, "active")),
+        gt(inventory.quantity, 0),
+      ),
+    )
+    .orderBy(productVariants.id);
 }
 
 /**

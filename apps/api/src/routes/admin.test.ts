@@ -17,6 +17,7 @@ import type {
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ProductRepository } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
+import type { OrderRepository } from "@zelora/db/orders";
 import { createId } from "@zelora/db";
 import type { ApiFailure, AuthUserResponse } from "@zelora/shared";
 import { createApp } from "../app";
@@ -312,6 +313,8 @@ const baseConfig: AppConfig = {
   rateLimitSellerOnboardingIpWindowSeconds: 3_600,
   rateLimitProductCreateIpMax: 30,
   rateLimitProductCreateIpWindowSeconds: 3_600,
+  rateLimitOrderPlaceIpMax: 20,
+  rateLimitOrderPlaceIpWindowSeconds: 3_600,
   sessionLastUsedThrottleSeconds: 300,
   sessionPurgeIntervalSeconds: 3_600,
   adminBootstrapSecret: null,
@@ -356,6 +359,9 @@ const inertCatalogRepository: CatalogRepository = {
   findVariantById: () => {
     throw new Error("unexpected catalog call");
   },
+  listSellableVariantsByIds: () => {
+    throw new Error("unexpected catalog call");
+  },
   findActiveStoreBySlug: () => {
     throw new Error("unexpected catalog call");
   },
@@ -368,6 +374,18 @@ const inertCatalogRepository: CatalogRepository = {
  * Cart routes are composed by `createApp` but never reached by admin route
  * tests. Any accidental invocation would reveal a wiring bug loudly.
  */
+const inertOrderRepository: OrderRepository = {
+  createOrder: () => {
+    throw new Error("unexpected order call");
+  },
+  findByIdForCustomer: () => {
+    throw new Error("unexpected order call");
+  },
+  listByCustomer: () => {
+    throw new Error("unexpected order call");
+  },
+};
+
 const inertCartRepository: CartRepository = {
   getCartByUserId: () => {
     throw new Error("unexpected cart call");
@@ -460,6 +478,7 @@ describe("POST /api/admin/sellers/:userId/activate", () => {
       catalogRepository: inertCatalogRepository,
       productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository,
       passwordHasher,
       clock,
@@ -718,6 +737,7 @@ describe("POST /api/admin/bootstrap", () => {
       catalogRepository: inertCatalogRepository,
       productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository,
       passwordHasher,
       clock: new FakeClock(),
@@ -745,6 +765,7 @@ describe("POST /api/admin/bootstrap", () => {
       catalogRepository: inertCatalogRepository,
       productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository,
       passwordHasher: new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations),
       clock: new FakeClock(),
@@ -880,6 +901,7 @@ describe("GET /api/admin/sellers/pending", () => {
       catalogRepository: inertCatalogRepository,
       productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository,
       passwordHasher: new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations),
       clock,
@@ -1069,6 +1091,7 @@ describe("POST /api/admin/sellers/:userId/reject", () => {
       catalogRepository: inertCatalogRepository,
       productRepository: inertProductRepository,
       cartRepository: inertCartRepository,
+      orderRepository: inertOrderRepository,
       auditLogRepository,
       passwordHasher: new PBKDF2PasswordHasher(baseConfig.pbkdf2Iterations),
       clock,

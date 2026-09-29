@@ -4,6 +4,7 @@ import { loadConfig } from "@zelora/core";
 import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ProductRepository } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
+import type { OrderRepository } from "@zelora/db/orders";
 import type { AuditLogRepository } from "@zelora/db/audit";
 import type { ApiFailure } from "@zelora/shared";
 import { createApp, type AppDependencies } from "../app";
@@ -66,6 +67,10 @@ class FakeCatalogRepository implements CatalogRepository {
 
   async findVariantById(_id: string) {
     return null;
+  }
+
+  async listSellableVariantsByIds() {
+    return [];
   }
 
   async findActiveStoreBySlug() {
@@ -149,6 +154,11 @@ describe("catalog routes", () => {
         removeItem: inert,
         clearCart: inert,
       } satisfies CartRepository,
+      orderRepository: {
+        createOrder: inert,
+        findByIdForCustomer: inert,
+        listByCustomer: inert,
+      } satisfies OrderRepository,
       passwordHasher: { hash: inert, verify: inert },
       clock: new FakeClock(),
     };

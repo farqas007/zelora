@@ -45,6 +45,30 @@ describe("order conflict mapping", () => {
     expect(mapCreateOrderConflict(fakeError)).toBe("INSUFFICIENT_STOCK");
   });
 
+  it("maps the idempotency UNIQUE failure to DUPLICATE_IDEMPOTENCY_KEY", () => {
+    // The shape SQLite emits locally, and the shape D1 forwards wrapped.
+    expect(
+      mapCreateOrderConflict(
+        new Error("UNIQUE constraint failed: orders.customer_user_id, orders.idempotency_key"),
+      ),
+    ).toBe("DUPLICATE_IDEMPOTENCY_KEY");
+    expect(
+      mapCreateOrderConflict(
+        new Error(
+          "D1_ERROR: UNIQUE constraint failed: orders.customer_user_id, orders.idempotency_key: SQLITE_CONSTRAINT_UNIQUE",
+        ),
+      ),
+    ).toBe("DUPLICATE_IDEMPOTENCY_KEY");
+  });
+
+  it("does not mistake another unique index on orders for the idempotency one", () => {
+    expect(mapCreateOrderConflict(new Error("UNIQUE constraint failed: orders.id"))).toBeNull();
+    // Right column, wrong table: an order_addresses collision is not ours.
+    expect(
+      mapCreateOrderConflict(new Error("UNIQUE constraint failed: order_addresses.order_id, order_addresses.kind")),
+    ).toBeNull();
+  });
+
   it("returns null for unrelated failures so they propagate unchanged", () => {
     expect(mapCreateOrderConflict(new Error("UNIQUE constraint failed: orders.id"))).toBeNull();
     expect(mapCreateOrderConflict(new Error("D1_ERROR: no such table: orders"))).toBeNull();

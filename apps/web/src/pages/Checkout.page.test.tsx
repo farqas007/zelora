@@ -11,6 +11,7 @@ import type {
   PlaceOrderEnvelope,
   UserDto,
 } from "@zelora/shared";
+import { IDEMPOTENCY_KEY_PATTERN } from "@zelora/shared";
 import type { ZeloraApi } from "../lib/api/client";
 import type { AuthContextValue } from "../context/AuthContext";
 import { useAuth } from "../context/AuthContext";
@@ -437,5 +438,88 @@ describe("CheckoutPage", SUITE, () => {
     );
     expect(screen.queryByText(/reached confirmation/)).toBeNull();
     expect(screen.getByRole("button", { name: "Place order" })).toBeDefined();
+  });
+
+  it("sends a generated idempotency key alongside the body", async () => {
+    const { calls } = givenPage();
+
+    renderPage();
+    fireEvent.click(await whenSubmittable());
+    fillRequiredShippingAddress();
+    fireEvent.click(placeOrderButton());
+
+    await waitFor(() => expect(calls.filter((call) => call.method === "placeOrder")).toHaveLength(1));
+    const call = calls.find((entry) => entry.method === "placeOrder")!;
+    const key = call.args[1];
+    // As the second argument, not in the body: the API reads the header before
+    // the body, and a body-borne key could be lost in a rebuild.
+    expect(call.args[0]).not.toHaveProperty("idempotencyKey");
+    expect(typeof key).toBe("string");
+    expect(key).toMatch(IDEMPOTENCY_KEY_PATTERN);
+  });
+
+  it("reuses one key across retries of an unchanged request", async () => {
+    // The whole point of the key. A shopper whose first attempt failed on the
+    // network presses the button again, and that second request must be
+    // recognisable as the same checkout or the server charges them twice.
+    const { calls } = givenPage({
+      cart: cartWith(2),
+      placeOrder: () => Promise.reject(new TypeError("Failed to fetch")),
+    });
+
+    renderPage();
+    fireEvent.click(await whenSubmittable());
+    fillRequiredShippingAddress();
+    fireEvent.click(placeOrderButton());
+    await screen.findByRole("alert");
+
+    fireEvent.click(placeOrderButton());
+    await waitFor(() => expect(calls.filter((call) => call.method === "placeOrder")).toHaveLength(2));
+
+    const keys = calls.filter((call) => call.method === "placeOrder").map((call) => call.args[1]);
+    expect(keys[0]).toBe(keys[1]);
+  });
+
+  it("mints a new key once the shopper changes what they are buying", async () => {
+    // The same key carrying different details is a conflict, so an edited
+    // request has to start a new attempt rather than collide with the old one.
+    const { calls } = givenPage({
+      cart: cartWith(2),
+      placeOrder: () => Promise.reject(new TypeError("Failed to fetch")),
+    });
+
+    renderPage();
+    fireEvent.click(await whenSubmittable());
+    fillRequiredShippingAddress();
+    fireEvent.click(placeOrderButton());
+    await screen.findByRole("alert");
+
+    fireEvent.change(screen.getByLabelText("Address line 1"), { target: { value: "2 Other Parade" } });
+    fireEvent.click(placeOrderButton());
+    await waitFor(() => expect(calls.filter((call) => call.method === "placeOrder")).toHaveLength(2));
+
+    const keys = calls.filter((call) => call.method === "placeOrder").map((call) => call.args[1]);
+    expect(keys[0]).not.toBe(keys[1]);
+  });
+
+  it("explains a key conflict as a finished checkout, not a retryable error", async () => {
+    givenPage({
+      cart: cartWith(2),
+      placeOrder: {
+        ok: false,
+        error: { code: "IDEMPOTENCY_CONFLICT", message: "raw server wording" },
+      },
+    });
+
+    renderPage();
+    fireEvent.click(await whenSubmittable());
+    fillRequiredShippingAddress();
+    fireEvent.click(placeOrderButton());
+
+    // Retrying a collided key can only collide again, so the copy has to send
+    // the shopper somewhere else instead of inviting another press.
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("already been placed");
+    expect(alert.textContent).not.toContain("raw server wording");
   });
 });

@@ -10,16 +10,23 @@ import type { CreateOrderConflictReason } from "./repository";
  * read and the create. `order_items.order_id`/`store_id` and
  * `orders.customer_user_id` can never be the violator (the order row was just
  * inserted and the store/customer were resolved moments earlier).
+ *
+ * UNIQUE is the idempotency index. Both drivers emit SQLite's own wording
+ * (`UNIQUE constraint failed: orders.customer_user_id,
+ * orders.idempotency_key`; D1 wraps it but does not rewrite it), so the
+ * composite is matched in its declared column order like every other unique
+ * matcher in this package.
  */
 const CONFLICT_PATTERNS = {
   INSUFFICIENT_STOCK: /CHECK constraint failed:\s*(?:inventory|inventory_quantity_non_negative)/i,
   VARIANT_NOT_FOUND: /FOREIGN KEY constraint failed/i,
+  DUPLICATE_IDEMPOTENCY_KEY: /UNIQUE constraint failed:\s+orders\.customer_user_id,\s*orders\.idempotency_key/i,
 } as const satisfies Record<CreateOrderConflictReason, RegExp>;
 
 /**
- * Translate an SQLite CHECK/FK failure into the driver-neutral order conflict
- * reason, or `null` when the error is unrelated. Identical to how the seller
- * and products repositories translate UNIQUE conflicts: tolerant of D1's
+ * Translate an SQLite CHECK/FK/UNIQUE failure into the driver-neutral order
+ * conflict reason, or `null` when the error is unrelated. Identical to how the
+ * seller and products repositories translate UNIQUE conflicts: tolerant of D1's
  * wrapper prefixes, trailing `SQLITE_CONSTRAINT_*` codes and nested `cause`
  * chains.
  *

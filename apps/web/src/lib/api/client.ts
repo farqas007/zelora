@@ -43,6 +43,7 @@ import type {
   StorefrontRequest,
   UpdateCartItemRequest,
 } from "@zelora/shared";
+import { IDEMPOTENCY_HEADER } from "@zelora/shared";
 
 /**
  * Browser-safe Zelora API client.
@@ -164,7 +165,14 @@ export interface ZeloraApi {
   clearCart(): Promise<CartEnvelope>;
   listOrders(input?: ListOrdersRequest): Promise<ListOrdersEnvelope>;
   getOrder(orderId: string): Promise<GetOrderEnvelope>;
-  placeOrder(input: PlaceOrderRequest): Promise<PlaceOrderEnvelope>;
+  /**
+   * Place an order. The idempotency key is required rather than optional: the
+   * caller must supply one value that it reuses for every attempt at the same
+   * checkout, so a retry cannot place a second order. Generate it with
+   * `createIdempotencyKey()` and keep it until the attempt finally succeeds or
+   * the shopper abandons the checkout.
+   */
+  placeOrder(input: PlaceOrderRequest, idempotencyKey: string): Promise<PlaceOrderEnvelope>;
   listPendingSellers(input?: ListPendingSellersRequest): Promise<AdminPendingSellersEnvelope>;
   activateSeller(userId: string): Promise<SellerActivationEnvelope>;
   rejectSeller(userId: string): Promise<SellerRejectionEnvelope>;
@@ -215,6 +223,8 @@ export function createApiClient(
     body?: unknown;
     /** Send the CSRF header when a token is available. */
     csrf?: boolean;
+    /** Per-request headers, e.g. the checkout idempotency key. */
+    headers?: Record<string, string>;
   }
 
   /** Populate the CSRF header from the injected token holder, when asked for. */
@@ -270,6 +280,7 @@ export function createApiClient(
       headers["Content-Type"] = "application/json";
     }
     applyCsrf(headers, options.csrf);
+    Object.assign(headers, options.headers);
 
     return send<E>(url, {
       method: options.method,
@@ -470,8 +481,13 @@ export function createApiClient(
       request<GetOrderEnvelope>(`/api/orders/${encodeURIComponent(orderId)}`, {
         method: "GET",
       }),
-    placeOrder: (input) =>
-      request<PlaceOrderEnvelope>("/api/orders", { method: "POST", body: input, csrf: true }),
+    placeOrder: (input, idempotencyKey) =>
+      request<PlaceOrderEnvelope>("/api/orders", {
+        method: "POST",
+        body: input,
+        csrf: true,
+        headers: { [IDEMPOTENCY_HEADER]: idempotencyKey },
+      }),
     listPendingSellers: (input = {}) => {
       const params = new URLSearchParams();
       if (input.limit !== undefined) {

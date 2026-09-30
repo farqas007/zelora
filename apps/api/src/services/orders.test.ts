@@ -28,6 +28,15 @@ import { OrderService, type OrderServiceDependencies } from "./orders";
 const NOW = new Date("2026-01-01T00:00:00.000Z");
 const ORDER_ID = "00000000-0000-7000-8000-0000000000ab";
 
+/**
+ * The client-generated idempotency key a checkout carries.
+ *
+ * Checkout is retryable, so every call needs one. Replay-specific tests mint a
+ * distinct key per case (see `idempotencyKey`); these use the shared constant,
+ * which is fine because each test builds a fresh service over a fresh fake.
+ */
+const CHECKOUT_KEY = "checkout-key-0001";
+
 let seq = 0;
 
 function makeUser(overrides: Partial<UserRecord> = {}): UserRecord {
@@ -109,6 +118,20 @@ class FakeCatalogRepository implements CatalogRepository {
   }
 }
 
+/** The shape `createOrder` is called with, as this fake reads it. */
+interface CreateOrderCall {
+  customerUserId: string;
+  idempotencyKey: string;
+  idempotencyFingerprint: string;
+  currency: string;
+  subtotalAmountCents: number;
+  shippingAmountCents: number;
+  discountAmountCents: number;
+  totalAmountCents: number;
+  addresses: Array<{ kind: "shipping" | "billing"; recipientName: string; line1: string }>;
+  lines: Array<{ variantId: string; quantity: number }>;
+}
+
 class FakeOrderRepository implements OrderRepository {
   /** Sellable projections shared with the catalog fake, re-read when projecting a created order. */
   sellables = new Map<string, SellableVariantRecord>();
@@ -117,8 +140,30 @@ class FakeOrderRepository implements OrderRepository {
     | ((customerUserId: string, opts: OrderListQuery) => Promise<{ items: OrderWithItemsRecord[]; nextCursor: string | null }>)
     | undefined = undefined;
   /** Force the atomic write to report a conflict the mapper must translate. */
-  forceCreateConflict: "INSUFFICIENT_STOCK" | "VARIANT_NOT_FOUND" | null = null;
+  forceCreateConflict: "INSUFFICIENT_STOCK" | "VARIANT_NOT_FOUND" | "DUPLICATE_IDEMPOTENCY_KEY" | null = null;
   createCalls: unknown[] = [];
+  /**
+   * Orders created here, keyed by `(customer, idempotency key)` exactly as the
+   * real schema's unique index keys them, so `findByIdempotencyKeyForCustomer`
+   * behaves like a lookup rather than a stub. Replay and conflict tests depend
+   * on that being true.
+   */
+  private byIdempotencyKey = new Map<string, OrderWithDetailsRecord>();
+  /** Every key lookup the service performed, as `[customer, key]`. */
+  lookupCalls: Array<[string, string]> = [];
+  /**
+   * When set, the next `createOrder` pretends a concurrent request with the same
+   * key committed first: it stores that winner under the key and reports the
+   * collision. `null` means the winner was this same request (the service should
+   * answer with it); a string is a different request's fingerprint (the service
+   * should report a conflict).
+   */
+  private raceWinnerFingerprint: string | null | undefined = undefined;
+
+  /** Make the next `createOrder` lose the insert race for its idempotency key. */
+  raceWithWinner(winnerFingerprint: string | null = null): void {
+    this.raceWinnerFingerprint = winnerFingerprint;
+  }
 
   overrideList(list: (customerUserId: string, opts: OrderListQuery) => Promise<{ items: OrderWithItemsRecord[]; nextCursor: string | null }>): void {
     this.listImpl = list;
@@ -138,16 +183,29 @@ class FakeOrderRepository implements OrderRepository {
     if (this.forceCreateConflict !== null) {
       return { ok: false, reason: this.forceCreateConflict };
     }
-    const call = input as {
-      customerUserId: string;
-      currency: string;
-      subtotalAmountCents: number;
-      shippingAmountCents: number;
-      discountAmountCents: number;
-      totalAmountCents: number;
-      addresses: Array<{ kind: "shipping" | "billing"; recipientName: string; line1: string }>;
-      lines: Array<{ variantId: string; quantity: number }>;
-    };
+    const call = input as CreateOrderCall;
+    const raced = this.raceWinnerFingerprint;
+    if (raced !== undefined) {
+      this.raceWinnerFingerprint = undefined;
+      // Store the winner under the key before reporting the collision, so the
+      // service's re-read finds it — exactly what the real unique index leaves
+      // behind for the losing transaction.
+      this.byIdempotencyKey.set(
+        `${call.customerUserId}\u0000${call.idempotencyKey}`,
+        this.buildRecord({ ...call, idempotencyFingerprint: raced ?? call.idempotencyFingerprint }),
+      );
+      return { ok: false, reason: "DUPLICATE_IDEMPOTENCY_KEY" };
+    }
+    const record = this.buildRecord(call);
+    this.byIdempotencyKey.set(
+      `${call.customerUserId}\u0000${call.idempotencyKey}`,
+      record,
+    );
+    return { ok: true, order: record.order, addresses: record.addresses, items: record.items };
+  }
+
+  /** Project the order a `createOrder` call would persist, without persisting it. */
+  private buildRecord(call: CreateOrderCall): OrderWithDetailsRecord {
     const line = call.lines[0] as { variantId: string; quantity: number };
     const variant = this.sellables.get(line.variantId) ?? makeVariant({ id: line.variantId });
     const lineTotal = variant.priceAmountCents * line.quantity;
@@ -170,6 +228,8 @@ class FakeOrderRepository implements OrderRepository {
     const order = {
       id: ORDER_ID,
       customerUserId: call.customerUserId,
+      idempotencyKey: call.idempotencyKey,
+      idempotencyFingerprint: call.idempotencyFingerprint,
       status: "pending" as const,
       currency: call.currency,
       subtotalAmountCents: call.subtotalAmountCents,
@@ -203,8 +263,21 @@ class FakeOrderRepository implements OrderRepository {
         updatedAt: NOW,
       };
     };
-    return { ok: true, order, addresses: [address("shipping"), address("billing")], items: [item] };
+    return {
+      order,
+      addresses: [address("shipping"), address("billing")],
+      items: [item],
+    };
   }
+
+  async findByIdempotencyKeyForCustomer(
+    customerUserId: string,
+    idempotencyKey: string,
+  ): Promise<OrderWithDetailsRecord | null> {
+    this.lookupCalls.push([customerUserId, idempotencyKey]);
+    return this.byIdempotencyKey.get(`${customerUserId}\u0000${idempotencyKey}`) ?? null;
+  }
+
 
   async findByIdForCustomer(customerUserId: string, orderId: string): Promise<OrderWithDetailsRecord | null> {
     return this.detailsByCustomer.get(customerUserId)?.get(orderId) ?? null;
@@ -342,7 +415,7 @@ async function expectCodeError(promise: Promise<unknown>, code: string, statusCo
 describe("OrderService.placeOrder", () => {
   it("rejects a checkout when the session cart is empty", async () => {
     const { service } = buildService();
-    await expectCodeError(service.placeOrder(makeUser(), { shippingAddress: makeAddress() }), "CART_EMPTY", 409);
+    await expectCodeError(service.placeOrder(makeUser(), { shippingAddress: makeAddress() }, CHECKOUT_KEY), "CART_EMPTY", 409);
   });
 
   it("rejects a line whose variant is not sellable as LINE_UNAVAILABLE", async () => {
@@ -352,7 +425,7 @@ describe("OrderService.placeOrder", () => {
     // (inactive product/taken down/sold out) — only a different variant sells.
     cart.seedCart(user.id, "variant-dead", 1);
     catalog.sellables.set("variant-other", makeVariant({ id: "variant-other" }));
-    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }), "LINE_UNAVAILABLE", 409);
+    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }, CHECKOUT_KEY), "LINE_UNAVAILABLE", 409);
   });
 
   it("distinguishes STOCK_CHANGED when the line is sellable but stock is short", async () => {
@@ -360,7 +433,7 @@ describe("OrderService.placeOrder", () => {
     const user = makeUser();
     catalog.sellables.set("variant-1", makeVariant({ id: "variant-1", availableQuantity: 1 }));
     cart.seedCart(user.id, "variant-1", 5);
-    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }), "STOCK_CHANGED", 409);
+    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }, CHECKOUT_KEY), "STOCK_CHANGED", 409);
   });
 
   it("rejects CURRENCY_MIX when lines span multiple currencies", async () => {
@@ -370,7 +443,7 @@ describe("OrderService.placeOrder", () => {
     catalog.sellables.set("variant-2", makeVariant({ id: "variant-2", currency: "EUR" }));
     cart.seedCart(user.id, "variant-1", 1);
     cart.seedCart(user.id, "variant-2", 1);
-    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }), "CURRENCY_MIX", 422);
+    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }, CHECKOUT_KEY), "CURRENCY_MIX", 422);
   });
 
   it("re-prices lines server-side, persists totals, defaults billing to shipping and clears the cart", async () => {
@@ -379,7 +452,7 @@ describe("OrderService.placeOrder", () => {
     catalog.sellables.set("variant-1", makeVariant({ id: "variant-1", priceAmountCents: 1250, availableQuantity: 10 }));
     cart.seedCart(user.id, "variant-1", 2);
 
-    const data = await service.placeOrder(user, { shippingAddress: makeAddress() });
+    const data = await service.placeOrder(user, { shippingAddress: makeAddress() }, CHECKOUT_KEY);
 
     expect(data.totalAmountCents).toBe(2500);
     expect(data.subtotalAmountCents).toBe(2500);
@@ -403,7 +476,7 @@ describe("OrderService.placeOrder", () => {
     cart.seedCart(user.id, "variant-1", 1);
 
     const billing = makeAddress({ recipientName: "Grace Hopper", line1: "7 Navy Yard" });
-    const data = await service.placeOrder(user, { shippingAddress: makeAddress(), billingAddress: billing });
+    const data = await service.placeOrder(user, { shippingAddress: makeAddress(), billingAddress: billing }, CHECKOUT_KEY);
 
     const call = orders.createCalls[0] as { addresses: Array<{ kind: string; recipientName: string; line1: string }> };
     expect(call.addresses).toEqual([
@@ -419,7 +492,7 @@ describe("OrderService.placeOrder", () => {
     catalog.sellables.set("variant-1", makeVariant({ id: "variant-1", availableQuantity: 10 }));
     cart.seedCart(user.id, "variant-1", 2);
     orders.forceCreateConflict = "INSUFFICIENT_STOCK";
-    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }), "STOCK_CHANGED", 409);
+    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }, CHECKOUT_KEY), "STOCK_CHANGED", 409);
   });
 
   it("maps an atomic VARIANT_NOT_FOUND conflict to LINE_UNAVAILABLE", async () => {
@@ -428,7 +501,7 @@ describe("OrderService.placeOrder", () => {
     catalog.sellables.set("variant-1", makeVariant({ id: "variant-1" }));
     cart.seedCart(user.id, "variant-1", 1);
     orders.forceCreateConflict = "VARIANT_NOT_FOUND";
-    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }), "LINE_UNAVAILABLE", 409);
+    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }, CHECKOUT_KEY), "LINE_UNAVAILABLE", 409);
   });
 
   it("rejects a checkout from a suspended account", async () => {
@@ -436,7 +509,7 @@ describe("OrderService.placeOrder", () => {
     const user = makeUser({ status: "suspended" });
     catalog.sellables.set("variant-1", makeVariant({ id: "variant-1" }));
     cart.seedCart(user.id, "variant-1", 1);
-    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }), "ACCOUNT_SUSPENDED", 403);
+    await expectCodeError(service.placeOrder(user, { shippingAddress: makeAddress() }, CHECKOUT_KEY), "ACCOUNT_SUSPENDED", 403);
   });
 
   it("rejects an invalid address body with a VALIDATION_ERROR envelope", async () => {
@@ -447,12 +520,84 @@ describe("OrderService.placeOrder", () => {
     await expectCodeError(
       service.placeOrder(user, {
         shippingAddress: { ...makeAddress(), countryCode: "USA" },
-      }),
+      }, CHECKOUT_KEY),
       "VALIDATION_ERROR",
       422,
     );
   });
 });
+
+/** The live price the seeded sellable variant is actually selling at. */
+const LIVE_PRICE_CENTS = 1_250;
+const LIVE_CURRENCY = "USD";
+const CART_QUANTITY = 2;
+
+/**
+ * A checkout body an attacker would hand-craft: valid addresses, plus every
+ * monetary/catalog/ownership field a naive implementation might read straight
+ * off the request. Each poisoned value differs from the live truth so a
+ * persisted value equal to it is unambiguous evidence of trust.
+ */
+function tamperedBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    shippingAddress: makeAddress(),
+    billingAddress: makeAddress({ recipientName: "Mallory" }),
+    // Order-level money, all zero so any acceptance is visible.
+    totalAmountCents: 1,
+    subtotalAmountCents: 1,
+    shippingAmountCents: 999_999,
+    discountAmountCents: 999_999,
+    currency: "EUR",
+    // Ownership and identity.
+    customerUserId: "00000000-0000-7000-8000-00000000dead",
+    userId: "00000000-0000-7000-8000-00000000dead",
+    status: "completed",
+    // Line composition and per-line money, under several plausible names.
+    items: [
+      {
+        variantId: "attacker-variant",
+        storeId: "attacker-store",
+        productName: "Free Shipping",
+        variantName: "Free",
+        sku: null,
+        quantity: 99,
+        unitAmountCents: 1,
+        lineTotalAmountCents: 1,
+        priceAmountCents: 1,
+        currency: "EUR",
+      },
+    ],
+    lines: [
+      {
+        variantId: "attacker-variant",
+        quantity: 99,
+        unitAmountCents: 1,
+        lineTotalAmountCents: 1,
+        priceAmountCents: 1,
+        currency: "EUR",
+      },
+    ],
+    ...overrides,
+  };
+}
+
+/** Seed one sellable variant holding two units in a two-deep cart. */
+function seededCheckout(): ReturnType<typeof buildService> & { user: ReturnType<typeof makeUser> } {
+  const built = buildService();
+  const user = makeUser();
+  built.catalog.sellables.set(
+    "variant-1",
+    makeVariant({
+      id: "variant-1",
+      priceAmountCents: LIVE_PRICE_CENTS,
+      currency: LIVE_CURRENCY,
+      availableQuantity: 10,
+    }),
+  );
+  built.cart.seedCart(user.id, "variant-1", CART_QUANTITY);
+  return { ...built, user };
+}
+
 
 /**
  * Client-price tampering.
@@ -463,81 +608,11 @@ describe("OrderService.placeOrder", () => {
  * all derived from the live catalog and the authenticated session's cart.
  */
 describe("OrderService.placeOrder ignores client-supplied money and catalog fields", () => {
-  /** The live price the seeded sellable variant is actually selling at. */
-  const LIVE_PRICE_CENTS = 1_250;
-  const LIVE_CURRENCY = "USD";
-  const CART_QUANTITY = 2;
-
-  /**
-   * A checkout body an attacker would hand-craft: valid addresses, plus every
-   * monetary/catalog/ownership field a naive implementation might read straight
-   * off the request. Each poisoned value differs from the live truth so a
-   * persisted value equal to it is unambiguous evidence of trust.
-   */
-  function tamperedBody(overrides: Record<string, unknown> = {}): Record<string, unknown> {
-    return {
-      shippingAddress: makeAddress(),
-      billingAddress: makeAddress({ recipientName: "Mallory" }),
-      // Order-level money, all zero so any acceptance is visible.
-      totalAmountCents: 1,
-      subtotalAmountCents: 1,
-      shippingAmountCents: 999_999,
-      discountAmountCents: 999_999,
-      currency: "EUR",
-      // Ownership and identity.
-      customerUserId: "00000000-0000-7000-8000-00000000dead",
-      userId: "00000000-0000-7000-8000-00000000dead",
-      status: "completed",
-      // Line composition and per-line money, under several plausible names.
-      items: [
-        {
-          variantId: "attacker-variant",
-          storeId: "attacker-store",
-          productName: "Free Shipping",
-          variantName: "Free",
-          sku: null,
-          quantity: 99,
-          unitAmountCents: 1,
-          lineTotalAmountCents: 1,
-          priceAmountCents: 1,
-          currency: "EUR",
-        },
-      ],
-      lines: [
-        {
-          variantId: "attacker-variant",
-          quantity: 99,
-          unitAmountCents: 1,
-          lineTotalAmountCents: 1,
-          priceAmountCents: 1,
-          currency: "EUR",
-        },
-      ],
-      ...overrides,
-    };
-  }
-
-  /** Seed one sellable variant holding two units in a two-deep cart. */
-  function seededCheckout(): ReturnType<typeof buildService> & { user: ReturnType<typeof makeUser> } {
-    const built = buildService();
-    const user = makeUser();
-    built.catalog.sellables.set(
-      "variant-1",
-      makeVariant({
-        id: "variant-1",
-        priceAmountCents: LIVE_PRICE_CENTS,
-        currency: LIVE_CURRENCY,
-        availableQuantity: 10,
-      }),
-    );
-    built.cart.seedCart(user.id, "variant-1", CART_QUANTITY);
-    return { ...built, user };
-  }
 
   it("prices the order from the live catalog, ignoring a client-supplied total", async () => {
     const { service, orders, user } = seededCheckout();
 
-    const data = await service.placeOrder(user, tamperedBody({ totalAmountCents: 1 }));
+    const data = await service.placeOrder(user, tamperedBody({ totalAmountCents: 1 }), CHECKOUT_KEY);
 
     // 1 250 x 2 from the catalog, not the 1 cent the client asked for.
     expect(data.totalAmountCents).toBe(LIVE_PRICE_CENTS * CART_QUANTITY);
@@ -552,7 +627,7 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
   it("prices every line from the live catalog, ignoring a client-supplied unit price", async () => {
     const { service, orders, user } = seededCheckout();
 
-    const data = await service.placeOrder(user, tamperedBody());
+    const data = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
 
     const line = data.items[0]!;
     expect(line.variantId).toBe("variant-1");
@@ -573,7 +648,7 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
   it("takes the currency from the live catalog, ignoring a client-supplied currency", async () => {
     const { service, orders, user } = seededCheckout();
 
-    const data = await service.placeOrder(user, tamperedBody({ currency: "EUR" }));
+    const data = await service.placeOrder(user, tamperedBody({ currency: "EUR" }), CHECKOUT_KEY);
 
     expect(data.currency).toBe(LIVE_CURRENCY);
     expect(data.items[0]!.currency).toBe(LIVE_CURRENCY);
@@ -584,7 +659,7 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
   it("builds the lines from the session cart, ignoring injected items and lines", async () => {
     const { service, orders, user } = seededCheckout();
 
-    const data = await service.placeOrder(user, tamperedBody());
+    const data = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
 
     // The attacker's variant is nowhere in the cart, so it cannot be bought.
     expect(data.items.map((item) => item.variantId)).toEqual(["variant-1"]);
@@ -599,7 +674,7 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
   it("ignores a client quantity and keeps the cart's own quantity", async () => {
     const { service, orders, user } = seededCheckout();
 
-    await service.placeOrder(user, tamperedBody({ quantity: 99 }));
+    await service.placeOrder(user, tamperedBody({ quantity: 99 }), CHECKOUT_KEY);
 
     const persisted = orders.createCalls[0] as { lines: Array<{ quantity: number }> };
     expect(persisted.lines[0]!.quantity).toBe(CART_QUANTITY);
@@ -608,7 +683,7 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
   it("orders the cart for the session user, ignoring a spoofed owner and status", async () => {
     const { service, orders, user } = seededCheckout();
 
-    const data = await service.placeOrder(user, tamperedBody());
+    const data = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
 
     expect(data.status).toBe("pending");
     const persisted = orders.createCalls[0] as { customerUserId: string };
@@ -619,25 +694,34 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
   it("persists only the validated addresses, discarding every other body key", async () => {
     const { service, orders, user } = seededCheckout();
 
-    await service.placeOrder(user, tamperedBody());
+    await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
 
     const persisted = orders.createCalls[0] as {
       addresses: Array<{ kind: string; recipientName: string }>;
+      idempotencyKey: string;
+      idempotencyFingerprint: string;
     };
     expect(persisted.addresses.map((address) => address.kind)).toEqual(["shipping", "billing"]);
     expect(persisted.addresses[0]!.recipientName).toBe("Ada Lovelace");
     expect(persisted.addresses[1]!.recipientName).toBe("Mallory");
     // No field of the create call was copied wholesale from the request body.
+    // The idempotency pair is the only addition: it comes from the header and
+    // the server's own fingerprint, never from the body.
     expect(Object.keys(persisted).sort()).toEqual([
       "addresses",
       "currency",
       "customerUserId",
       "discountAmountCents",
+      "idempotencyFingerprint",
+      "idempotencyKey",
       "lines",
       "shippingAmountCents",
       "subtotalAmountCents",
       "totalAmountCents",
     ]);
+    expect(persisted.idempotencyKey).toBe(CHECKOUT_KEY);
+    // A body-supplied key/fingerprint is ignored like any other extra body key.
+    expect(persisted.idempotencyFingerprint).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it("still enforces live stock against the cart quantity, not a client quantity", async () => {
@@ -652,7 +736,7 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
 
     // A client claiming quantity 1 must not buy 5 units' worth, nor sneak past
     // the stock guard by understating what it wants.
-    await expectCodeError(service.placeOrder(user, tamperedBody({ quantity: 1 })), "STOCK_CHANGED", 409);
+    await expectCodeError(service.placeOrder(user, tamperedBody({ quantity: 1 }), CHECKOUT_KEY), "STOCK_CHANGED", 409);
     expect(orders.createCalls).toHaveLength(0);
   });
 
@@ -667,8 +751,126 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
     built.cart.seedCart(user.id, "variant-1", 1);
     const { service, orders } = built;
 
-    await expectCodeError(service.placeOrder(user, tamperedBody()), "LINE_UNAVAILABLE", 409);
+    await expectCodeError(service.placeOrder(user, tamperedBody(), CHECKOUT_KEY), "LINE_UNAVAILABLE", 409);
     expect(orders.createCalls).toHaveLength(0);
+  });
+});
+
+/**
+ * Checkout is retryable. These are the cases that make the retry safe: the same
+ * key with the same request always resolves to the same order, and the same key
+ * with a different request is refused rather than answered with the wrong order.
+ */
+describe("OrderService.placeOrder idempotency", () => {
+  /** A checkout that succeeded: the cart is now empty, as it is after a real one. */
+  it("returns the original order for a retry of the same request", async () => {
+    const { service, orders, cart, user } = seededCheckout();
+
+    const first = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+    // The first attempt really did clear the cart, which is exactly the state a
+    // retry arrives in — the moment a non-idempotent checkout would double-charge.
+    expect(cart.clearCalls).toHaveLength(1);
+
+    const retry = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+
+    expect(retry).toEqual(first);
+    // One order, one write: the retry read the committed order instead of
+    // creating another.
+    expect(orders.createCalls).toHaveLength(1);
+    expect(cart.clearCalls).toHaveLength(1);
+  });
+
+  it("replays even when the cart has been refilled since, without clearing it", async () => {
+    // A shopper whose first attempt succeeded, then put something in the cart
+    // again, is retrying the *same* checkout. Emptying their new cart would
+    // destroy a cart the retry never touched.
+    const { service, orders, cart, user } = seededCheckout();
+    await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+    cart.seedCart(user.id, "variant-1", 1);
+
+    await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+
+    expect(cart.clearCalls).toHaveLength(1);
+    expect(orders.createCalls).toHaveLength(1);
+  });
+
+  it("refuses a reused key whose request is materially different", async () => {
+    const { service, orders, user } = seededCheckout();
+    await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+
+    // Same key, different shipping address. Answering with the first order would
+    // hand back merchandise that was never asked for.
+    const changed = tamperedBody({
+      shippingAddress: makeAddress({ line1: "2 Different Street" }),
+    });
+    await expectCodeError(service.placeOrder(user, changed, CHECKOUT_KEY), "IDEMPOTENCY_CONFLICT", 409);
+
+    // The losing request must not have written anything.
+    expect(orders.createCalls).toHaveLength(1);
+  });
+
+  it("never lets one customer replay or read another customer's key", async () => {
+    const { service, orders, cart, catalog, user } = seededCheckout();
+    await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+
+    const intruder = makeUser();
+    catalog.sellables.set(
+      "variant-1",
+      makeVariant({ id: "variant-1", priceAmountCents: LIVE_PRICE_CENTS, availableQuantity: 10 }),
+    );
+    cart.seedCart(intruder.id, "variant-1", CART_QUANTITY);
+
+    // Same key, same addresses — but the lookup is scoped to the caller's own
+    // account, so the victim's order is invisible here and this is a genuinely
+    // new checkout rather than a replay of theirs.
+    const placed = await service.placeOrder(intruder, tamperedBody(), CHECKOUT_KEY);
+
+    // Two orders now exist: the victim's, and this one for the intruder.
+    expect(orders.createCalls).toHaveLength(2);
+    expect(orders.lookupCalls).toContainEqual([intruder.id, CHECKOUT_KEY]);
+    expect(placed.id).toBe(ORDER_ID);
+    expect(placed.addresses[0]!.recipientName).toBe("Ada Lovelace");
+  });
+
+  it("does not consume the key when the checkout fails", async () => {
+    // The key is spent by a *commit*, not by an attempt: a shopper whose
+    // checkout failed has to be able to fix the problem and retry with the very
+    // key the client already sent, or the retry would look like a replay and
+    // hand back an order for a cart that was never bought.
+    const built = buildService();
+    const user = makeUser();
+    const { service, orders } = built;
+
+    await expectCodeError(service.placeOrder(user, tamperedBody(), CHECKOUT_KEY), "CART_EMPTY", 409);
+    expect(orders.createCalls).toHaveLength(0);
+    expect(orders.lookupCalls).toEqual([[user.id, CHECKOUT_KEY]]);
+
+    built.catalog.sellables.set("variant-1", makeVariant({ id: "variant-1", availableQuantity: 10 }));
+    built.cart.seedCart(user.id, "variant-1", 1);
+    const retried = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+    expect(retried.id).toBe(ORDER_ID);
+  });
+
+  it("answers a race winner's order when the insert loses on the key", async () => {
+    // Two requests with one key arrive together: both miss the pre-check, both
+    // try to insert, and the unique index picks a winner. The loser must be
+    // answered with the winner's order rather than reported as an error.
+    const { service, orders, cart, user } = seededCheckout();
+    orders.raceWithWinner();
+
+    const data = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+
+    expect(data.id).toBe(ORDER_ID);
+    expect(cart.clearCalls).toHaveLength(0);
+  });
+
+  it("reports a conflict when the race winner stored a different request", async () => {
+    // The same race, but the winner was a different checkout. Reporting a
+    // conflict is the only answer that cannot hand back the wrong order.
+    const { service, orders, user } = seededCheckout();
+    orders.raceWithWinner("b".repeat(64));
+
+    await expectCodeError(service.placeOrder(user, tamperedBody(), CHECKOUT_KEY), "IDEMPOTENCY_CONFLICT", 409);
   });
 });
 
@@ -679,6 +881,9 @@ describe("OrderService.listOrders", () => {
     const order = {
       id: ORDER_ID,
       customerUserId: user.id,
+      // Reads never look at these; the shape still has to be a real OrderRecord.
+      idempotencyKey: CHECKOUT_KEY,
+      idempotencyFingerprint: "a".repeat(64),
       status: "pending" as const,
       currency: "USD",
       subtotalAmountCents: 2000,
@@ -743,6 +948,9 @@ describe("OrderService.getOrder", () => {
       order: {
         id: ORDER_ID,
         customerUserId: user.id,
+        // Reads never look at these; the shape still has to be a real OrderRecord.
+        idempotencyKey: CHECKOUT_KEY,
+        idempotencyFingerprint: "a".repeat(64),
         status: "pending",
         currency: "USD",
         subtotalAmountCents: 2000,
@@ -782,6 +990,8 @@ describe("OrderService.getOrder", () => {
       order: {
         id: ORDER_ID,
         customerUserId: "owner",
+        idempotencyKey: CHECKOUT_KEY,
+        idempotencyFingerprint: "a".repeat(64),
         status: "pending",
         currency: "USD",
         subtotalAmountCents: 0,

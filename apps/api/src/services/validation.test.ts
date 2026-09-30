@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { ValidationError } from "@zelora/core";
+import { IDEMPOTENCY_KEY_LIMITS } from "@zelora/shared";
 import {
   normalizeEmail,
   normalizeName,
+  parseIdempotencyKey,
   parseLoginRequest,
   parseOrderAddress,
   parsePlaceOrderRequest,
@@ -297,6 +299,84 @@ describe("parsePlaceOrderRequest", () => {
   it("rejects a body that is not an object", () => {
     expectFieldErrors(() => parsePlaceOrderRequest("nope"), {
       body: ["Request body must be a JSON object."],
+    });
+  });
+});
+
+describe("parseIdempotencyKey", () => {
+  it("accepts a key inside the shared bounds and returns it byte for byte", () => {
+    // Returning it verbatim matters: a key the client will retry with has to
+    // hash to the same stored value, so no trimming, folding or padding.
+    for (const key of [
+      "checkout-key-0001",
+      "a".repeat(IDEMPOTENCY_KEY_LIMITS.minLength),
+      "a".repeat(IDEMPOTENCY_KEY_LIMITS.maxLength),
+      "A.b_c~d:e-f",
+      "01955f00-0000-7000-8000-0000000000e3",
+    ]) {
+      expect(parseIdempotencyKey(key)).toBe(key);
+    }
+  });
+
+  it("requires the header: a missing key is refused, never defaulted", () => {
+    // A server-side default would differ per attempt and turn every retry into
+    // a second order, so absence is an error rather than a fresh key.
+    for (const missing of [undefined, ""]) {
+      expectFieldErrors(() => parseIdempotencyKey(missing), {
+        idempotencyKey: ["A checkout idempotency key is required."],
+      });
+    }
+  });
+
+  it("refuses keys outside the shared length bounds", () => {
+    const tooShort = "a".repeat(IDEMPOTENCY_KEY_LIMITS.minLength - 1);
+    const tooLong = "a".repeat(IDEMPOTENCY_KEY_LIMITS.maxLength + 1);
+    const message = [
+      `Idempotency key must be between ${IDEMPOTENCY_KEY_LIMITS.minLength} and ${IDEMPOTENCY_KEY_LIMITS.maxLength} characters.`,
+    ];
+    expectFieldErrors(() => parseIdempotencyKey(tooShort), { idempotencyKey: message });
+    expectFieldErrors(() => parseIdempotencyKey(tooLong), { idempotencyKey: message });
+  });
+
+  it("refuses characters that are unsafe in a header, an index or a log line", () => {
+    // Every one of these is either a header/log delimiter, a control character
+    // or non-ASCII — the reasons the shared character set is narrow.
+    const malformed = [
+      "key with spaces",
+      "key\nwith-newline",
+      "key\rwith-cr",
+      "key,other",
+      "key;other",
+      'key"quoted',
+      "key\\backslash",
+      "key\twith-tab",
+      "kéy-ünicode",
+      "key/with/slash",
+      "key?with=query",
+      "key#with-fragment",
+      "key(with-parens)",
+    ];
+    for (const key of malformed) {
+      expectFieldErrors(() => parseIdempotencyKey(key.padEnd(20, "x")), {
+        idempotencyKey: ["Idempotency key may only contain letters, digits and the characters . _ ~ : -"],
+      });
+    }
+  });
+
+  it("refuses a header folded from several values", () => {
+    // A repeated header is folded by the HTTP layer into one comma-joined
+    // value, which is ambiguous rather than a key anyone chose. The comma makes
+    // it fail the character set instead of silently picking the first value.
+    expectFieldErrors(() => parseIdempotencyKey("first-key-0001,second-key-0001"), {
+      idempotencyKey: ["Idempotency key may only contain letters, digits and the characters . _ ~ : -"],
+    });
+  });
+
+  it("refuses surrounding whitespace instead of trimming it", () => {
+    // Trimming would accept a key the client never sent back verbatim, and the
+    // retry would then miss the stored key and place a second order.
+    expectFieldErrors(() => parseIdempotencyKey(" checkout-key-0001 "), {
+      idempotencyKey: ["Idempotency key may only contain letters, digits and the characters . _ ~ : -"],
     });
   });
 });

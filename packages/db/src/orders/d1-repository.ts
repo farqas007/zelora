@@ -29,6 +29,13 @@ import type {
  * drive a variant negative the whole batch rolls back and the conflict is
  * surfaced as the driver-neutral {@link CreateOrderConflictReason} result.
  *
+ * The idempotency key travels in the order insert statement of that same batch,
+ * which is what gives D1 the same guarantee the local transaction has: the key
+ * is committed with the order and nothing else, and a rolled-back batch leaves
+ * it free. Two checkouts that race on the same `(customer, key)` are separated
+ * by the unique index — the loser's whole batch is rejected and reported as
+ * {@link CreateOrderConflictReason.DUPLICATE_IDEMPOTENCY_KEY}.
+ *
  * Worker-safe: only the Drizzle D1 driver and the order contract are imported
  * (conflict mapping lives in a pure, driver-free module); the Node-only
  * SQLite stack is never pulled into the Worker bundle.
@@ -52,6 +59,8 @@ export function createD1OrderRepository(
             .values({
               id: orderId,
               customerUserId: input.customerUserId,
+              idempotencyKey: input.idempotencyKey,
+              idempotencyFingerprint: input.idempotencyFingerprint,
               status: "pending",
               currency: input.currency,
               subtotalAmountCents: input.subtotalAmountCents,
@@ -96,6 +105,20 @@ export function createD1OrderRepository(
         }
         throw error;
       }
+    },
+
+    async findByIdempotencyKeyForCustomer(customerUserId, idempotencyKey) {
+      const order = await db
+        .select()
+        .from(orders)
+        .where(and(eq(orders.customerUserId, customerUserId), eq(orders.idempotencyKey, idempotencyKey)))
+        .get();
+      if (order === undefined) {
+        return null;
+      }
+
+      const [addresses, items] = await loadOrderDetails(db, order.id);
+      return { order, addresses, items };
     },
 
     async findByIdForCustomer(customerUserId, orderId) {

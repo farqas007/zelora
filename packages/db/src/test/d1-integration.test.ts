@@ -1808,6 +1808,13 @@ describe("D1 cart repository (unique conflicts + cascade)", () => {
 
 describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
   /**
+   * The idempotency fingerprint the checkouts below carry. Any 64-character
+   * value would do: the repository stores it and compares it, it never
+   * verifies that it is a real digest.
+   */
+  const CHECKOUT_FINGERPRINT = "a".repeat(64);
+
+  /**
    * An approved seller with an active product/variant plus a separate plain
    * customer to buy it, so order reads have real users/stores to reference.
    */
@@ -1880,6 +1887,8 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
 
     const result = await repo.createOrder({
       customerUserId,
+      idempotencyKey: "d1-checkout-0001",
+      idempotencyFingerprint: CHECKOUT_FINGERPRINT,
       currency: "USD",
       subtotalAmountCents: priceAmountCents * 2,
       shippingAmountCents: 0,
@@ -1930,6 +1939,8 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
 
     const result = await repo.createOrder({
       customerUserId,
+      idempotencyKey: "d1-checkout-0002",
+      idempotencyFingerprint: CHECKOUT_FINGERPRINT,
       currency: "USD",
       subtotalAmountCents: priceAmountCents * 6,
       shippingAmountCents: 0,
@@ -1966,6 +1977,8 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
 
     const result = await repo.createOrder({
       customerUserId,
+      idempotencyKey: "d1-checkout-0003",
+      idempotencyFingerprint: CHECKOUT_FINGERPRINT,
       currency: "USD",
       subtotalAmountCents: 1_500,
       shippingAmountCents: 0,
@@ -1993,6 +2006,164 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
     expect((await db.select().from(schema.inventory).where(eq(schema.inventory.variantId, variantId)).get())?.quantity).toBe(5);
   });
 
+  it("commits the idempotency key inside the batch and rejects a reused one", async () => {
+    // D1's parity claim for idempotency is two-sided: the key must commit with
+    // the order (so a retry finds it), and a colliding key must abort the whole
+    // batch (so a duplicate checkout never half-writes).
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const { customerUserId, storeId, variantId, priceAmountCents } = await seedSellable(db, 5, 5);
+
+    const input = {
+      customerUserId,
+      idempotencyKey: "d1-checkout-key-1",
+      idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+      currency: "USD",
+      subtotalAmountCents: priceAmountCents,
+      shippingAmountCents: 0,
+      discountAmountCents: 0,
+      totalAmountCents: priceAmountCents,
+      addresses: [
+        { kind: "shipping" as const, recipientName: "Order Customer 5", phone: null, line1: "1 D1 Way", line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" },
+      ],
+      lines: [
+        {
+          variantId,
+          storeId,
+          productName: "Order Product 5",
+          variantName: "Order Variant 5",
+          sku: null,
+          quantity: 1,
+          unitAmountCents: priceAmountCents,
+          lineTotalAmountCents: priceAmountCents,
+          currency: "USD",
+        },
+      ],
+    };
+
+    const created = await repo.createOrder(input);
+    expect(created.ok).toBe(true);
+    if (!created.ok) return;
+    expect(created.order.idempotencyKey).toBe(input.idempotencyKey);
+    expect(created.order.idempotencyFingerprint).toBe(CHECKOUT_FINGERPRINT);
+
+    // The key is readable back on D1, with its fingerprint.
+    const replay = await repo.findByIdempotencyKeyForCustomer(customerUserId, input.idempotencyKey);
+    expect(replay?.order.id).toBe(created.order.id);
+    expect(replay?.order.idempotencyFingerprint).toBe(CHECKOUT_FINGERPRINT);
+
+    // A second insert on the same key is refused whole: no second order, no
+    // second decrement.
+    const duplicate = await repo.createOrder({
+      ...input,
+      // Same key, different fingerprint: a materially different checkout.
+      idempotencyFingerprint: "b".repeat(64),
+    });
+    expect(duplicate).toEqual({ ok: false, reason: "DUPLICATE_IDEMPOTENCY_KEY" });
+    expect(await db.select().from(schema.orders).all()).toHaveLength(1);
+    expect(await db.select().from(schema.orderItems).all()).toHaveLength(1);
+    expect((await db.select().from(schema.inventory).where(eq(schema.inventory.variantId, variantId)).get())?.quantity).toBe(4);
+  });
+
+  it("frees the D1 key when the batch it was sent with rolls back", async () => {
+    // The same guarantee the local transaction gives: a failed checkout must
+    // leave the key unused so the shopper can retry with it.
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const { customerUserId, storeId, variantId, priceAmountCents } = await seedSellable(db, 6, 2);
+
+    const input = {
+      customerUserId,
+      idempotencyKey: "d1-checkout-key-2",
+      idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+      currency: "USD",
+      subtotalAmountCents: priceAmountCents * 4,
+      shippingAmountCents: 0,
+      discountAmountCents: 0,
+      totalAmountCents: priceAmountCents * 4,
+      addresses: [
+        { kind: "shipping" as const, recipientName: "Order Customer 6", phone: null, line1: "1 D1 Way", line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" },
+      ],
+      lines: [
+        {
+          variantId,
+          storeId,
+          productName: "Order Product 6",
+          variantName: "Order Variant 6",
+          sku: null,
+          quantity: 4,
+          unitAmountCents: priceAmountCents,
+          lineTotalAmountCents: priceAmountCents * 4,
+          currency: "USD",
+        },
+      ],
+    };
+
+    // Only 2 in stock: this batch rolls back, key included.
+    expect(await repo.createOrder(input)).toEqual({ ok: false, reason: "INSUFFICIENT_STOCK" });
+    expect(await repo.findByIdempotencyKeyForCustomer(customerUserId, input.idempotencyKey)).toBeNull();
+
+    // The retry, with the same key and a quantity that fits, commits.
+    const retried = await repo.createOrder({
+      ...input,
+      subtotalAmountCents: priceAmountCents * 2,
+      totalAmountCents: priceAmountCents * 2,
+      lines: [{ ...input.lines[0]!, quantity: 2, lineTotalAmountCents: priceAmountCents * 2 }],
+    });
+    expect(retried.ok).toBe(true);
+    if (!retried.ok) return;
+    expect(retried.order.idempotencyKey).toBe(input.idempotencyKey);
+    expect((await db.select().from(schema.inventory).where(eq(schema.inventory.variantId, variantId)).get())?.quantity).toBe(0);
+  });
+
+  it("gives two customers the same key without either seeing the other's order", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const first = await seedSellable(db, 7, 5);
+    const second = await seedSellable(db, 8, 5);
+    const shared = "d1-shared-checkout-key";
+
+    function checkoutFor(customer: { customerUserId: string; storeId: string; variantId: string; priceAmountCents: number }, index: number) {
+      return {
+        customerUserId: customer.customerUserId,
+        idempotencyKey: shared,
+        idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+        currency: "USD",
+        subtotalAmountCents: customer.priceAmountCents,
+        shippingAmountCents: 0,
+        discountAmountCents: 0,
+        totalAmountCents: customer.priceAmountCents,
+        addresses: [
+          { kind: "shipping" as const, recipientName: `Order Customer ${index}`, phone: null, line1: "1 D1 Way", line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" },
+        ],
+        lines: [
+          {
+            variantId: customer.variantId,
+            storeId: customer.storeId,
+            productName: `Order Product ${index}`,
+            variantName: `Order Variant ${index}`,
+            sku: null,
+            quantity: 1,
+            unitAmountCents: customer.priceAmountCents,
+            lineTotalAmountCents: customer.priceAmountCents,
+            currency: "USD",
+          },
+        ],
+      };
+    }
+
+    const one = await repo.createOrder(checkoutFor(first, 7));
+    const two = await repo.createOrder(checkoutFor(second, 8));
+    expect(one.ok).toBe(true);
+    expect(two.ok).toBe(true);
+    if (!one.ok || !two.ok) return;
+
+    // Each lookup answers with their own order and never the other customer's.
+    expect((await repo.findByIdempotencyKeyForCustomer(first.customerUserId, shared))?.order.id).toBe(one.order.id);
+    expect((await repo.findByIdempotencyKeyForCustomer(second.customerUserId, shared))?.order.id).toBe(two.order.id);
+    expect(await repo.findByIdempotencyKeyForCustomer(createId(), shared)).toBeNull();
+  });
+
   it("lists a customer's orders newest-first and resolves them by id, scoped to the customer", async () => {
     const { db } = await setup();
     const repo = createD1OrderRepository(db);
@@ -2001,6 +2172,9 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
     async function place(id: string, createdAt: Date) {
       const result = await repo.createOrder({
         customerUserId,
+        // Distinct keys: the unique index is per (customer, key).
+        idempotencyKey: `d1-checkout-${id}`,
+        idempotencyFingerprint: CHECKOUT_FINGERPRINT,
         currency: "USD",
         subtotalAmountCents: priceAmountCents,
         shippingAmountCents: 0,

@@ -415,6 +415,17 @@ export const FIXTURE_IMAGES: readonly FixtureImage[] = [
 export interface FixtureOrder {
   id: string;
   customerUserId: string;
+  /**
+   * Checkout is idempotent and orders carry the client-generated key with it.
+   * The seed writes orders straight into the table instead of replaying a
+   * checkout, so it stands in for the pair a real checkout would send: a fixed
+   * key (re-seeding must be idempotent, and this customer has exactly one
+   * fixture order) and the all-zero fingerprint the `0008` migration backfills
+   * for orders that predate idempotency. Neither is a reachable SHA-256
+   * output, so a fixture order can never be mistaken for a replay of itself.
+   */
+  idempotencyKey: string;
+  idempotencyFingerprint: string;
   status: OrderStatus;
   currency: string;
   subtotalAmountCents: number;
@@ -427,6 +438,8 @@ export const FIXTURE_ORDERS: readonly FixtureOrder[] = [
   {
     id: nextFixtureId(),
     customerUserId: FIXTURE_USERS[0]!.id,
+    idempotencyKey: "dev-fixture-order-1",
+    idempotencyFingerprint: "0".repeat(64),
     status: "confirmed",
     currency: "USD",
     subtotalAmountCents: 179_98,

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { IDEMPOTENCY_HEADER } from "@zelora/shared";
 import { createApiClient, CSRF_HEADER } from "./client";
 import type { ZeloraApi } from "./client";
+
+/** A well-formed key the API's own validation would accept. */
+const IDEMPOTENCY_KEY = "checkout-key-0001";
 
 /**
  * Transport-level tests for the order and cart methods of the real client.
@@ -131,7 +135,7 @@ describe("orders client", () => {
       countryCode: "GB",
     };
 
-    await client().placeOrder({ shippingAddress });
+    await client().placeOrder({ shippingAddress }, IDEMPOTENCY_KEY);
 
     const { url, method, headers, body } = firstRequest(fetchMock);
     expect(url).toBe(`${BASE_URL}/api/orders`);
@@ -139,6 +143,22 @@ describe("orders client", () => {
     expect(headers[CSRF_HEADER]).toBe(CSRF_TOKEN);
     expect(headers["Content-Type"]).toBe("application/json");
     expect(JSON.parse(body!)).toEqual({ shippingAddress });
+    // The key travels as a header, never in the body: the server reads it before
+    // the body is parsed, and a body-borne key would be absent exactly when the
+    // request that most needs it - a retry - is the one being rebuilt.
+    expect(headers[IDEMPOTENCY_HEADER]).toBe(IDEMPOTENCY_KEY);
+    expect(JSON.parse(body!)).not.toHaveProperty("idempotencyKey");
+  });
+
+  it("sends the caller's exact key, without rewriting it", async () => {
+    // The key is the identity of the attempt. Normalising it here would break the
+    // retry that has to look like the first one.
+    const fetchMock = stubFetch();
+    const key = "Order-Attempt.2f9c~7:aa";
+
+    await client().placeOrder({ shippingAddress: {} as never }, key);
+
+    expect(firstRequest(fetchMock).headers[IDEMPOTENCY_HEADER]).toBe(key);
   });
 
   it("sends the CSRF token only on the mutating order call", async () => {
@@ -155,15 +175,18 @@ describe("orders client", () => {
     // as a client that thought it had a session.
     const fetchMock = stubFetch();
 
-    await client(null).placeOrder({
-      shippingAddress: {
-        recipientName: "Ada Lovelace",
-        line1: "1 Analytical Engine Parade",
-        city: "London",
-        postalCode: "SW1A 1AA",
-        countryCode: "GB",
+    await client(null).placeOrder(
+      {
+        shippingAddress: {
+          recipientName: "Ada Lovelace",
+          line1: "1 Analytical Engine Parade",
+          city: "London",
+          postalCode: "SW1A 1AA",
+          countryCode: "GB",
+        },
       },
-    });
+      IDEMPOTENCY_KEY,
+    );
 
     expect(CSRF_HEADER in firstRequest(fetchMock).headers).toBe(false);
   });

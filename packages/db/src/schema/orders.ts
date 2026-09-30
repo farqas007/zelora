@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import { check, index, integer, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { IDEMPOTENCY_FINGERPRINT_HEX_LENGTH, IDEMPOTENCY_KEY_LIMITS } from "@zelora/shared";
 import { createdAtColumn, currencyColumn, enumCheck, idColumn, updatedAtColumn } from "./_common";
 import { productVariants } from "./catalog";
 import { stores, users } from "./identities";
@@ -18,11 +19,37 @@ import { ORDER_ADDRESS_KINDS, ORDER_ITEM_STATUSES, ORDER_STATUSES } from "./enum
  *
  * Order rows are append-only business records: deleting an order (or its
  * users/stores/variants) is blocked by RESTRICT referential actions.
+ *
+ * Checkout is idempotent, and the two idempotency columns are how. The client
+ * generates `idempotency_key`; the API records the `idempotency_fingerprint` it
+ * derived from the authenticated customer plus the normalized addresses of that
+ * request. Replaying the key returns the original order; replaying it with a
+ * different fingerprint is refused.
+ *
+ * The key lives on `orders` rather than in a separate idempotency table because
+ * that makes the guarantee transactional for free: the key is consumed by the
+ * very same insert (inside the same local transaction / the same D1 batch) that
+ * decrements stock. A failed checkout rolls the key back with it, so a retry
+ * that follows a real failure is not mistaken for a replay, and a checkout that
+ * committed can never be lost.
+ *
+ * The uniqueness is per customer, not global. A shared `(customer_user_id,
+ * idempotency_key)` means two customers may legitimately pick the same key
+ * (their generators can collide, and guessing another's key is trivial if the
+ * key alone were the lookup), each gets their own order, and neither can ever
+ * observe or replay the other's.
+ *
+ * Orders that predate this migration are backfilled with their own id as the
+ * key and an all-zero fingerprint. The zeroes are not a reachable SHA-256
+ * output, so such a row can only ever answer "conflict" and never replays an
+ * order that did not exist when the key was sent.
  */
 
 export const orders = sqliteTable("orders", {
   id: idColumn(),
   customerUserId: text("customer_user_id").notNull().references(() => users.id, { onDelete: "restrict" }),
+  idempotencyKey: text("idempotency_key").notNull(),
+  idempotencyFingerprint: text("idempotency_fingerprint").notNull(),
   status: text("status", { enum: ORDER_STATUSES }).notNull().default("pending"),
   currency: currencyColumn(),
   subtotalAmountCents: integer("subtotal_amount_cents").notNull().default(0),
@@ -33,7 +60,10 @@ export const orders = sqliteTable("orders", {
   updatedAt: updatedAtColumn(),
 }, (table) => [
   index("orders_customer_created_at_idx").on(table.customerUserId, table.createdAt),
+  unique("orders_customer_idempotency_key_unique").on(table.customerUserId, table.idempotencyKey),
   check("orders_currency_length", sql`length(${table.currency}) = 3`),
+  check("orders_idempotency_key_length", sql`length(${table.idempotencyKey}) between ${IDEMPOTENCY_KEY_LIMITS.minLength} and ${IDEMPOTENCY_KEY_LIMITS.maxLength}`),
+  check("orders_idempotency_fingerprint_length", sql`length(${table.idempotencyFingerprint}) = ${IDEMPOTENCY_FINGERPRINT_HEX_LENGTH}`),
   check("orders_subtotal_non_negative", sql`${table.subtotalAmountCents} >= 0`),
   check("orders_shipping_non_negative", sql`${table.shippingAmountCents} >= 0`),
   check("orders_discount_non_negative", sql`${table.discountAmountCents} >= 0`),

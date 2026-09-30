@@ -25,6 +25,11 @@ import type {
  * {@link CreateOrderConflictReason} result. This keeps local behavior byte
  * identical to the D1 twin, which cannot inspect intermediate `batch()`
  * results and relies on the same CHECK instead.
+ *
+ * The idempotency key is inserted by that same transaction, so it is
+ * consumed only by a checkout that committed: a stock or variant conflict rolls
+ * the key back with the stock decrements, and the caller's retry starts from an
+ * unused key rather than being mistaken for a replay.
  */
 export function createLocalOrderRepository(db: LocalDatabase): OrderRepository {
   return {
@@ -52,6 +57,8 @@ export function createLocalOrderRepository(db: LocalDatabase): OrderRepository {
             .values({
               id: orderId,
               customerUserId: input.customerUserId,
+              idempotencyKey: input.idempotencyKey,
+              idempotencyFingerprint: input.idempotencyFingerprint,
               status: "pending",
               currency: input.currency,
               subtotalAmountCents: input.subtotalAmountCents,
@@ -88,6 +95,20 @@ export function createLocalOrderRepository(db: LocalDatabase): OrderRepository {
         }
         throw error;
       }
+    },
+
+    async findByIdempotencyKeyForCustomer(customerUserId, idempotencyKey) {
+      const order = db
+        .select()
+        .from(orders)
+        .where(and(eq(orders.customerUserId, customerUserId), eq(orders.idempotencyKey, idempotencyKey)))
+        .get();
+      if (order === undefined) {
+        return null;
+      }
+
+      const [addresses, items] = loadOrderDetails(db, order.id);
+      return { order, addresses, items };
     },
 
     async findByIdForCustomer(customerUserId, orderId) {

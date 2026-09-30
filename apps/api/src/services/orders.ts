@@ -24,6 +24,7 @@ import type {
   OrderRepository,
   OrderWithItemsRecord,
 } from "@zelora/db/orders";
+import { fingerprintCheckoutRequest } from "./order-fingerprint";
 import { parsePlaceOrderRequest } from "./validation";
 
 /**
@@ -45,6 +46,16 @@ import { parsePlaceOrderRequest } from "./validation";
  * in the race window surfaces as a conflict the service maps to a stable
  * {@link ORDER_ERROR_CODES} value. `CURRENCY_MIX` is rejected here because one
  * order holds a single currency.
+ *
+ * Checkout is idempotent. Each call carries a client-generated
+ * `idempotencyKey`, and the key is written by the same atomic insert that
+ * decrements inventory — so the key is consumed exactly when an order commits,
+ * and a checkout that rolled back leaves it free for the shopper to retry. A
+ * repeat of the same key and request returns the original order untouched
+ * (including not clearing the cart again); a repeat of the same key with a
+ * different request is refused with `IDEMPOTENCY_CONFLICT` rather than being
+ * answered with the wrong order. See {@link fingerprintCheckoutRequest} for
+ * what makes two requests "the same".
  *
  * Money is always present at checkout but the cart itself stays money-free —
  * the shared {@link CartDto} never carries a price, and the subtotal the web
@@ -205,6 +216,12 @@ export class OrderService {
   /**
    * Place an order from the session cart and the submitted addresses.
    *
+   * `idempotencyKey` is the caller's client-generated key (already validated by
+   * {@link parseIdempotencyKey} at the edge). Checkout is retryable: the same
+   * key plus the same request always resolves to the same order, however many
+   * times it is sent, and a key the checkout then fails on is left unused so the
+   * shopper can retry with it.
+   *
    * The request body is parsed (and only addresses are accepted), then the
    * cart is re-read from the repository and every line is re-priced from live
    * sellable variants. Failures map to stable codes:
@@ -220,9 +237,35 @@ export class OrderService {
    * inventory is decremented, then the cart is cleared. The returned detail
    * always carries both address snapshots (billing defaults to shipping).
    */
-  async placeOrder(user: UserRecord, request: unknown): Promise<OrderDetailDto> {
+  async placeOrder(
+    user: UserRecord,
+    request: unknown,
+    idempotencyKey: string,
+  ): Promise<OrderDetailDto> {
     assertActiveUser(user);
     const parsed = parsePlaceOrderRequest(request);
+    const fingerprint = await fingerprintCheckoutRequest(user.id, parsed);
+
+    // The replay check comes before any cart or pricing work. A retry of a
+    // checkout that already committed arrives with an empty cart, so reading it
+    // first would answer `CART_EMPTY` for a request that in fact succeeded.
+    const existing = await this.orderRepository.findByIdempotencyKeyForCustomer(user.id, idempotencyKey);
+    if (existing !== null) {
+      if (existing.order.idempotencyFingerprint !== fingerprint) {
+        // Same key, different request. Returning the first order would hand the
+        // shopper merchandise they did not ask for; refusing is the only safe
+        // answer.
+        throw new AppError(
+          ORDER_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+          "This idempotency key was already used for a different checkout.",
+          409,
+        );
+      }
+      // A genuine retry: the original order is the answer, and the cart is not
+      // cleared again — the first attempt already emptied it, and this call may
+      // even be answering for a cart the shopper has since refilled.
+      return toOrderDetailDto(existing.order, existing.addresses, existing.items);
+    }
 
     const cart = await this.getCartOrNull(user.id);
     if (cart === null || cart.items.length === 0) {
@@ -284,6 +327,8 @@ export class OrderService {
     const billingAddress = parsed.billingAddress ?? parsed.shippingAddress;
     const createOrderResult = await this.orderRepository.createOrder({
       customerUserId: user.id,
+      idempotencyKey,
+      idempotencyFingerprint: fingerprint,
       currency: currency as string,
       subtotalAmountCents,
       shippingAmountCents,
@@ -297,9 +342,16 @@ export class OrderService {
     });
 
     if (!createOrderResult.ok) {
+      if (createOrderResult.reason === "DUPLICATE_IDEMPOTENCY_KEY") {
+        // A concurrent request with this key committed between the read above
+        // and this insert, so its order is the one this request asked for.
+        return this.resolveConcurrentReplay(user.id, idempotencyKey, fingerprint);
+      }
       // A line the service believed buyable ran out of stock (or its variant
       // was removed) in the narrow window before the atomic write. Map the
-      // driver-neutral conflict back to the customer-facing code.
+      // driver-neutral conflict back to the customer-facing code. The
+      // idempotency key was rolled back with the write, so the shopper can
+      // retry with it once the cart is fixed.
       if (createOrderResult.reason === "INSUFFICIENT_STOCK") {
         throw new AppError(
           ORDER_ERROR_CODES.STOCK_CHANGED,
@@ -319,6 +371,32 @@ export class OrderService {
       createOrderResult.order,
       createOrderResult.addresses,
       createOrderResult.items,
+    );
+  }
+
+  /**
+   * Re-read the order that won the race for an idempotency key and answer with
+   * it, or report the conflict.
+   *
+   * Only reachable when `createOrder` reported `DUPLICATE_IDEMPOTENCY_KEY`, so
+   * the winner's row is committed and readable by the time the losing
+   * transaction was rejected. If it is somehow not there, the safe answer is
+   * still a conflict: the API must never place or return an order it cannot
+   * account for.
+   */
+  private async resolveConcurrentReplay(
+    customerUserId: string,
+    idempotencyKey: string,
+    fingerprint: string,
+  ): Promise<OrderDetailDto> {
+    const winner = await this.orderRepository.findByIdempotencyKeyForCustomer(customerUserId, idempotencyKey);
+    if (winner !== null && winner.order.idempotencyFingerprint === fingerprint) {
+      return toOrderDetailDto(winner.order, winner.addresses, winner.items);
+    }
+    throw new AppError(
+      ORDER_ERROR_CODES.IDEMPOTENCY_CONFLICT,
+      "This idempotency key was already used for a different checkout.",
+      409,
     );
   }
 

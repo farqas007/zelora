@@ -131,11 +131,24 @@ export function createChain(db: LocalDatabase, opts: { order?: boolean } = {}): 
   return chain;
 }
 
+/**
+ * The idempotency pair every directly-inserted fixture order carries.
+ *
+ * These rows are written straight into `orders` rather than through an
+ * idempotent checkout, so they carry a fixed key (each test database is fresh,
+ * so the constant cannot collide) and the all-zero fingerprint the `0008`
+ * migration backfills for pre-idempotency orders.
+ */
+const FIXTURE_IDEMPOTENCY_KEY = "fixture-order-checkout";
+const FIXTURE_IDEMPOTENCY_FINGERPRINT = "0".repeat(64);
+
 export function createMultiVendorOrder(db: LocalDatabase, chain: Chain): string {
   const order = db
     .insert(schema.orders)
     .values({
       customerUserId: chain.customerUserId,
+      idempotencyKey: FIXTURE_IDEMPOTENCY_KEY,
+      idempotencyFingerprint: FIXTURE_IDEMPOTENCY_FINGERPRINT,
       status: "confirmed",
       subtotalAmountCents: 84_998,
       totalAmountCents: 84_998,

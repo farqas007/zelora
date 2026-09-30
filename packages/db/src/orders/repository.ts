@@ -15,15 +15,20 @@ import type { OrderAddressKind, OrderItemStatus, OrderStatus } from "../schema/e
  * user id.
  *
  * Order creation is atomic and inventory is decremented as part of the same
- * transaction/batch as the order rows. Stock is never *checked* separately:
- * each line is an unconditional `quantity - n` decrement guarded by the
- * `inventory_quantity_non_negative` CHECK constraint, so an undershoot aborts
- * the whole operation and surfaces as the driver-neutral
- * {@link CreateOrderConflictReason.INSUFFICIENT_STOCK} result — no partial
- * decrement, no order without lines, and no oversell even under concurrent
- * checkouts. A foreign-key violation on a line (the only FK reachable at
- * write time is a variant deleted in the race window after the sellability
- * read) surfaces as {@link CreateOrderConflictReason.VARIANT_NOT_FOUND}.
+ * transaction/batch as the order rows. The idempotency key is written by that
+ * same statement, which is what makes checkout retryable: the key is consumed
+ * exactly when the order commits, and a rolled-back checkout leaves the key
+ * unused. Stock is never *checked* separately: each line is an unconditional
+ * `quantity - n` decrement guarded by the `inventory_quantity_non_negative`
+ * CHECK constraint, so an undershoot aborts the whole operation and surfaces as
+ * the driver-neutral {@link CreateOrderConflictReason.INSUFFICIENT_STOCK}
+ * result — no partial decrement, no order without lines, and no oversell even
+ * under concurrent checkouts. A foreign-key violation on a line (the only FK
+ * reachable at write time is a variant deleted in the race window after the
+ * sellability read) surfaces as
+ * {@link CreateOrderConflictReason.VARIANT_NOT_FOUND}, and a concurrent request
+ * that already inserted the same `(customer, key)` surfaces as
+ * {@link CreateOrderConflictReason.DUPLICATE_IDEMPOTENCY_KEY}.
  *
  * Order rows are append-only: `createOrder` never updates or deletes a
  * previous order, and the schema's RESTRICT referential actions make orders
@@ -34,6 +39,8 @@ import type { OrderAddressKind, OrderItemStatus, OrderStatus } from "../schema/e
 export interface OrderRecord {
   id: string;
   customerUserId: string;
+  idempotencyKey: string;
+  idempotencyFingerprint: string;
   status: OrderStatus;
   currency: string;
   subtotalAmountCents: number;
@@ -140,6 +147,12 @@ export interface CreateOrderLineInput {
  * the repository persists what it is given and never trusts the client
  * directly.
  *
+ * `idempotencyKey` is the caller's client-supplied key, and
+ * `idempotencyFingerprint` is what the server derived from the authenticated
+ * customer plus the request's addresses. Both are stored with the order by the
+ * same atomic write that decrements inventory, so a key is consumed by a
+ * checkout that committed and is still free after one that rolled back.
+ *
  * Precondition: `addresses` and `lines` must each be non-empty. The service
  * guarantees that (a checkout always carries a shipping snapshot and at least
  * one line); a caller violating it gets an error rather than a half-written
@@ -147,6 +160,8 @@ export interface CreateOrderLineInput {
  */
 export interface CreateOrderInput {
   customerUserId: string;
+  idempotencyKey: string;
+  idempotencyFingerprint: string;
   currency: string;
   subtotalAmountCents: number;
   shippingAmountCents: number;
@@ -161,8 +176,15 @@ export interface CreateOrderInput {
  * backstops behind the sellability/lock step the service already performs; the
  * single atomic write reports them so the service never inspects raw
  * SQLite/D1 errors.
+ *
+ * `DUPLICATE_IDEMPOTENCY_KEY` is the one that matters most to callers: it means
+ * a concurrent request with the same (customer, key) won the insert, so the
+ * caller must read that order instead of retrying blindly.
  */
-export type CreateOrderConflictReason = "INSUFFICIENT_STOCK" | "VARIANT_NOT_FOUND";
+export type CreateOrderConflictReason =
+  | "INSUFFICIENT_STOCK"
+  | "VARIANT_NOT_FOUND"
+  | "DUPLICATE_IDEMPOTENCY_KEY";
 
 export type CreateOrderResult =
   | { ok: true; order: OrderRecord; addresses: OrderAddressRecord[]; items: OrderItemRecord[] }
@@ -171,11 +193,22 @@ export type CreateOrderResult =
 export interface OrderRepository {
   /**
    * Atomically decrement inventory and write the order, its address snapshots
-   * and its lines. On a stock undershoot or a missing variant the entire
-   * operation rolls back and a conflict reason is returned; no order is ever
-   * left behind.
+   * and its lines. On a stock undershoot, a missing variant or an
+   * already-taken `(customer, idempotency key)` the entire operation rolls back
+   * and a conflict reason is returned; no order is ever left behind.
    */
   createOrder(input: CreateOrderInput): Promise<CreateOrderResult>;
+  /**
+   * Resolve the order this customer placed under `idempotencyKey`, or `null`
+   * when the key is unused. Scoped to the customer, so a key another customer
+   * also happens to use resolves to this customer's own order (or `null`) and
+   * can never leak theirs.
+   *
+   * This is the read side of the replay guarantee: the service calls it before
+   * repricing so a retry is answered from the original order instead of from a
+   * second repricing pass.
+   */
+  findByIdempotencyKeyForCustomer(customerUserId: string, idempotencyKey: string): Promise<OrderWithDetailsRecord | null>;
   /**
    * Resolve one customer's order with its addresses and lines, or `null`.
    * Scoped to the customer: another customer's order id resolves to `null`.

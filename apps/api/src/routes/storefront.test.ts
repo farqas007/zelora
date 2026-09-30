@@ -150,6 +150,7 @@ describe("storefront routes", () => {
       } satisfies CartRepository,
       orderRepository: {
         createOrder: inert,
+        findByIdempotencyKeyForCustomer: inert,
         findByIdForCustomer: inert,
         listByCustomer: inert,
       } satisfies OrderRepository,

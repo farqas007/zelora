@@ -380,6 +380,7 @@ describe("cart routes", () => {
       cartRepository,
       orderRepository: {
         createOrder: inert,
+        findByIdempotencyKeyForCustomer: inert,
         findByIdForCustomer: inert,
         listByCustomer: inert,
       } satisfies OrderRepository,

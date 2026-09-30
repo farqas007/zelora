@@ -54,6 +54,51 @@ export const ORDER_PAGE_LIMITS = {
 } as const;
 
 /**
+ * The header carrying the client-generated idempotency key on `POST
+ * /api/orders`. It is a header rather than a body field so the key never
+ * reaches repricing, and so intermediaries treat it as metadata.
+ */
+export const IDEMPOTENCY_HEADER = "Idempotency-Key";
+
+/**
+ * Bounds on an idempotency key. The floor keeps a key from being trivially
+ * guessable or accidentally constant (a key that collides by accident turns
+ * two unrelated checkouts into one); the ceiling keeps it inside what a single
+ * `text` column, an index entry and an HTTP header all hold cheaply, which is
+ * what the orders schema's `CHECK (length BETWEEN ...)` mirrors.
+ *
+ * 64 also covers a UUIDv4 (36), a UUIDv7 (36) and a ULID (26) with room to
+ * spare, so the natural choices of client-side generators all fit.
+ */
+export const IDEMPOTENCY_KEY_LIMITS = {
+  minLength: 8,
+  maxLength: 64,
+} as const;
+
+/**
+ * The characters an idempotency key may contain: alphanumerics plus `.`, `_`,
+ * `~`, `:` and `-`.
+ *
+ * The set is deliberately narrow. A key is echoed back into a header, indexed
+ * and logged, so it excludes every delimiter that would make those ambiguous
+ * (`"` and `\` for logs, CR and LF for headers, `,` and `;` for multi-value
+ * header folding) and everything outside printable ASCII.
+ *
+ * The character class carries no length quantifier on purpose: length is
+ * `IDEMPOTENCY_KEY_LIMITS`' job, and a second bound baked into the pattern is
+ * one more place for the two to drift apart. `POST /api/orders` therefore
+ * applies both, and `limits.test.ts` holds them in agreement.
+ */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._~:-]+$/;
+
+/**
+ * Length of an `idempotency_fingerprint`: a SHA-256 digest rendered as hex.
+ * The orders schema's `CHECK (length = ...)` is derived from this so a digest
+ * of the wrong width cannot be stored.
+ */
+export const IDEMPOTENCY_FINGERPRINT_HEX_LENGTH = 64;
+
+/**
  * One address snapshot to persist at checkout. Every address field is
  * collected server-side from the request (never from a stored address book) so
  * the order is self-describing.
@@ -163,5 +208,11 @@ export const ORDER_ERROR_CODES = {
   CURRENCY_MIX: "CURRENCY_MIX",
   /** The requested order does not exist for this customer. */
   ORDER_NOT_FOUND: "ORDER_NOT_FOUND",
+  /**
+   * The idempotency key was already used by this customer for a materially
+   * different checkout. Reusing a key is safe, changing what it means is not:
+   * silently honouring the first order would hand back the wrong merchandise.
+   */
+  IDEMPOTENCY_CONFLICT: "IDEMPOTENCY_CONFLICT",
 } as const;
 export type OrderErrorCode = (typeof ORDER_ERROR_CODES)[keyof typeof ORDER_ERROR_CODES];

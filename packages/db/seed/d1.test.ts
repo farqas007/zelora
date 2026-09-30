@@ -563,7 +563,7 @@ describe("remote D1 seed tooling (rehearsal, generated SQL verbatim)", () => {
     await binding.exec(
       [
         `INSERT INTO users (id, email, role, status, name, password_hash, created_at, updated_at) VALUES ('${foreign}', 'other-customer@example.com', 'customer', 'active', 'Other Customer', NULL, ${FIXTURE_CREATED_AT_MS}, ${FIXTURE_CREATED_AT_MS})`,
-        `INSERT INTO orders (id, customer_user_id, status, currency, subtotal_amount_cents, shipping_amount_cents, discount_amount_cents, total_amount_cents, created_at, updated_at) VALUES ('${foreignOrder}', '${foreign}', 'confirmed', 'USD', 12999, 0, 0, 12999, ${FIXTURE_CREATED_AT_MS}, ${FIXTURE_CREATED_AT_MS})`,
+        `INSERT INTO orders (id, customer_user_id, idempotency_key, idempotency_fingerprint, status, currency, subtotal_amount_cents, shipping_amount_cents, discount_amount_cents, total_amount_cents, created_at, updated_at) VALUES ('${foreignOrder}', '${foreign}', 'other-customer-checkout', '${"0".repeat(64)}', 'confirmed', 'USD', 12999, 0, 0, 12999, ${FIXTURE_CREATED_AT_MS}, ${FIXTURE_CREATED_AT_MS})`,
         `INSERT INTO order_items (id, order_id, variant_id, store_id, product_name, variant_name, sku, quantity, unit_amount_cents, line_total_amount_cents, currency, status, created_at, updated_at) VALUES ('0192a0ff-0000-0000-0000-000000000003', '${foreignOrder}', '${variantId}', (SELECT id FROM stores WHERE slug = 'zelora-test-store'), 'Wireless Headphones', 'Matte Black', 'DEV-WH-BLK', 1, 12999, 12999, 'USD', 'confirmed', ${FIXTURE_CREATED_AT_MS}, ${FIXTURE_CREATED_AT_MS})`,
       ].join("; "),
     );

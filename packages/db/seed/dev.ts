@@ -396,6 +396,8 @@ function upsertFixtureOrder(
     .values({
       id: FIXTURE_ORDERS[0]!.id,
       customerUserId: customer.id,
+      idempotencyKey: FIXTURE_ORDERS[0]!.idempotencyKey,
+      idempotencyFingerprint: FIXTURE_ORDERS[0]!.idempotencyFingerprint,
       status: FIXTURE_ORDERS[0]!.status,
       currency: FIXTURE_ORDERS[0]!.currency,
       subtotalAmountCents: FIXTURE_ORDERS[0]!.subtotalAmountCents,

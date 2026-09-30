@@ -9,6 +9,7 @@ import type { CatalogRepository } from "@zelora/db/catalog";
 import type { ProductRepository } from "@zelora/db/products";
 import type { CartRepository } from "@zelora/db/cart";
 import type { OrderRepository } from "@zelora/db/orders";
+import { IDEMPOTENCY_HEADER } from "@zelora/shared";
 import { createLogger, type AppConfig, type PasswordHasher } from "@zelora/core";
 import { createErrorHandler, notFoundHandler } from "./middleware/error";
 import { requestLogger } from "./middleware/request-log";
@@ -131,7 +132,11 @@ export function createApp(dependencies: AppDependencies): Hono {
     cors({
       origin: config.corsOrigin,
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["Content-Type", "Accept", "X-Request-Id", "X-Zelora-CSRF"],
+      // `Idempotency-Key` is a *request* header the SPA must be allowed to send:
+      // a browser strips any header not listed here, and checkout is refused
+      // without one, so leaving it out would make every checkout fail in the
+      // browser while passing in tests.
+      allowHeaders: ["Content-Type", "Accept", "X-Request-Id", "X-Zelora-CSRF", IDEMPOTENCY_HEADER],
       exposeHeaders: ["X-Request-Id"],
       credentials: true,
     }),

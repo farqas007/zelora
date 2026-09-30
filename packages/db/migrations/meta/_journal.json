@@ -57,6 +57,13 @@
       "when": 1790439511475,
       "tag": "0007_lucky_amazoness",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790770682981,
+      "tag": "0008_cooing_aqueduct",
+      "breakpoints": true
     }
   ]
 }

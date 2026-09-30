@@ -1,9 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
+import { IDEMPOTENCY_FINGERPRINT_HEX_LENGTH, IDEMPOTENCY_KEY_LIMITS } from "@zelora/shared";
 import * as schema from "../schema";
 import { createTestDatabase, expectConstraintError } from "./helpers";
 import { createChain } from "./fixtures";
 import type { UserRole } from "../schema";
+
+/**
+ * The idempotency pair a valid order insert carries. Spread into the insert so
+ * each constraint test can vary exactly one field and leave the rest valid.
+ */
+function validIdempotency() {
+  return { idempotencyKey: "checkout-key-0001", idempotencyFingerprint: "a".repeat(IDEMPOTENCY_FINGERPRINT_HEX_LENGTH) };
+}
 
 describe("unique constraints", () => {
   it("rejects duplicate user emails", () => {
@@ -200,9 +209,52 @@ describe("check constraints", () => {
     const { db } = createTestDatabase();
     const chain = createChain(db);
     expectConstraintError(
-      () => db.insert(schema.orders).values({ customerUserId: chain.customerUserId, currency: "US" }).run(),
+      () =>
+        db
+          .insert(schema.orders)
+          .values({ customerUserId: chain.customerUserId, ...validIdempotency(), currency: "US" })
+          .run(),
       /CHECK constraint failed: orders_currency_length/,
     );
+  });
+
+  it("rejects an idempotency key outside the shared length bounds", () => {
+    // The API rejects these before they reach the database; the CHECK is the
+    // last line of defence for any other writer (a script, a migration, an
+    // operator) and must not drift from `IDEMPOTENCY_KEY_LIMITS`.
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+
+    for (const idempotencyKey of ["short", "k".repeat(IDEMPOTENCY_KEY_LIMITS.maxLength + 1)]) {
+      expectConstraintError(
+        () =>
+          db
+            .insert(schema.orders)
+            .values({ customerUserId: chain.customerUserId, currency: "USD", ...validIdempotency(), idempotencyKey })
+            .run(),
+        /CHECK constraint failed: orders_idempotency_key_length/,
+      );
+    }
+  });
+
+  it("rejects an idempotency fingerprint that is not a hex digest's width", () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+
+    for (const idempotencyFingerprint of [
+      "",
+      "a".repeat(IDEMPOTENCY_FINGERPRINT_HEX_LENGTH - 1),
+      "a".repeat(IDEMPOTENCY_FINGERPRINT_HEX_LENGTH + 1),
+    ]) {
+      expectConstraintError(
+        () =>
+          db
+            .insert(schema.orders)
+            .values({ customerUserId: chain.customerUserId, currency: "USD", ...validIdempotency(), idempotencyFingerprint })
+            .run(),
+        /CHECK constraint failed: orders_idempotency_fingerprint_length/,
+      );
+    }
   });
 
   it("rejects malformed country codes", () => {
@@ -243,7 +295,7 @@ describe("foreign keys", () => {
       () =>
         db
           .insert(schema.orders)
-          .values({ customerUserId: "00000000-0000-7000-8000-000000000001", currency: "USD" })
+          .values({ customerUserId: "00000000-0000-7000-8000-000000000001", ...validIdempotency(), currency: "USD" })
           .run(),
       /FOREIGN KEY constraint failed/,
     );

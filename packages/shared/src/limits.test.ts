@@ -7,6 +7,9 @@ import {
   CURRENCY_PATTERN,
   DEFAULT_PRODUCT_CURRENCY,
   EMAIL_PATTERN,
+  IDEMPOTENCY_FINGERPRINT_HEX_LENGTH,
+  IDEMPOTENCY_KEY_LIMITS,
+  IDEMPOTENCY_KEY_PATTERN,
   INVENTORY_LIMITS,
   ORDER_PAGE_LIMITS,
   PENDING_SELLERS_PAGE_LIMITS,
@@ -80,6 +83,10 @@ const BOUNDED_LIMITS: ReadonlyArray<readonly [string, { min: number; max: number
     { min: CHECKOUT_LIMITS.line1MinLength, max: CHECKOUT_LIMITS.line1MaxLength },
   ],
   ["CHECKOUT_LIMITS.city", { min: CHECKOUT_LIMITS.cityMinLength, max: CHECKOUT_LIMITS.cityMaxLength }],
+  [
+    "IDEMPOTENCY_KEY_LIMITS",
+    { min: IDEMPOTENCY_KEY_LIMITS.minLength, max: IDEMPOTENCY_KEY_LIMITS.maxLength },
+  ],
 ];
 
 /** The three published page-size windows, all keyset-paginated by the same rule. */
@@ -291,5 +298,55 @@ describe("the closed product-image content-type list stays closed", () => {
       expect(contentType.startsWith("image/")).toBe(true);
       expect(contentType.slice("image/".length)).toMatch(/^[a-z0-9]+$/);
     }
+  });
+});
+
+describe("the idempotency key contract stays internally consistent", () => {
+  it("accepts the characters the web client's own generator can produce", () => {
+    // The browser mints keys with crypto.randomUUID(), which emits hex digits
+    // and dashes. If the pattern ever stopped admitting them, every checkout in
+    // production would 422 while all the hand-written test keys still passed.
+    for (const valid of [
+      "01955f00-0000-7000-8000-0000000000a1",
+      ofLength(IDEMPOTENCY_KEY_LIMITS.minLength),
+      ofLength(IDEMPOTENCY_KEY_LIMITS.maxLength),
+      ofLength(IDEMPOTENCY_KEY_LIMITS.maxLength, "-"),
+      "a.b_c~d:e",
+    ]) {
+      expect(IDEMPOTENCY_KEY_PATTERN.test(valid)).toBe(true);
+    }
+  });
+
+  it("rejects characters that are unsafe in a header or ambiguous in a URL", () => {
+    // A space would split the value in transit, and CR/LF is the header-injection
+    // pair; the rest are punctuation a key has no reason to carry. NUL is
+    // included because the fetch layer refuses to send it at all, which is why
+    // the pattern still has to name it.
+    for (const invalid of ["", "has space", "a\r\nb", "a\u0000b", "a/b", "a+b", "a=b", "a?b", "a,b"]) {
+      expect(IDEMPOTENCY_KEY_PATTERN.test(invalid)).toBe(false);
+    }
+  });
+
+  it("leaves length to the declared limits, because the pattern cannot enforce it", () => {
+    // The pattern has no {n,m} quantifier, so it admits a key of any length and
+    // IDEMPOTENCY_KEY_LIMITS is the only thing bounding it. Both halves have to
+    // be applied by every caller or the limit means nothing.
+    expect(IDEMPOTENCY_KEY_PATTERN.test(ofLength(IDEMPOTENCY_KEY_LIMITS.maxLength + 1))).toBe(true);
+    expect(IDEMPOTENCY_KEY_PATTERN.test(ofLength(IDEMPOTENCY_KEY_LIMITS.maxLength * 4))).toBe(true);
+  });
+
+  it("fits a whole UUID, which is the form the web client actually sends", () => {
+    // 36 characters of UUID v4 have to sit inside the window, or every generated
+    // key is rejected for being too long.
+    expect(36).toBeGreaterThanOrEqual(IDEMPOTENCY_KEY_LIMITS.minLength);
+    expect(36).toBeLessThanOrEqual(IDEMPOTENCY_KEY_LIMITS.maxLength);
+  });
+
+  it("stores a fingerprint as exactly the hex width the database CHECK asserts", () => {
+    // The server computes a SHA-256 digest and writes it to a column constrained
+    // to this width. A drift here would be a 500 on the first checkout, and the
+    // mismatch would only surface once a real digest met the constraint.
+    expect(IDEMPOTENCY_FINGERPRINT_HEX_LENGTH).toBe(64);
+    expect(ofLength(IDEMPOTENCY_FINGERPRINT_HEX_LENGTH, "0")).toMatch(/^[0-9a-f]+$/);
   });
 });

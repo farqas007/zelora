@@ -813,6 +813,9 @@ describe("POST /api/seller/onboarding", () => {
     createOrder: () => {
       throw new Error("unexpected order call");
     },
+    findByIdempotencyKeyForCustomer: () => {
+      throw new Error("unexpected order call");
+    },
     findByIdForCustomer: () => {
       throw new Error("unexpected order call");
     },
@@ -1395,6 +1398,9 @@ describe("/api/seller/products", () => {
 
   const inertOrderRepository: OrderRepository = {
     createOrder: () => {
+      throw new Error("unexpected order call");
+    },
+    findByIdempotencyKeyForCustomer: () => {
       throw new Error("unexpected order call");
     },
     findByIdForCustomer: () => {
@@ -2427,6 +2433,9 @@ describe("POST /api/seller/products/:id variants, inventory and publish", () => 
     createOrder: () => {
       throw new Error("unexpected order call");
     },
+    findByIdempotencyKeyForCustomer: () => {
+      throw new Error("unexpected order call");
+    },
     findByIdForCustomer: () => {
       throw new Error("unexpected order call");
     },
@@ -3169,6 +3178,9 @@ describe("POST /api/seller/products/:id/images", () => {
 
   const inertOrderRepository: OrderRepository = {
     createOrder: () => {
+      throw new Error("unexpected order call");
+    },
+    findByIdempotencyKeyForCustomer: () => {
       throw new Error("unexpected order call");
     },
     findByIdForCustomer: () => {
@@ -4165,6 +4177,9 @@ describe("/api/seller/products/:id/images management", () => {
 
   const inertOrderRepository: OrderRepository = {
     createOrder: () => {
+      throw new Error("unexpected order call");
+    },
+    findByIdempotencyKeyForCustomer: () => {
       throw new Error("unexpected order call");
     },
     findByIdForCustomer: () => {

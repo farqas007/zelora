@@ -29,11 +29,25 @@ function addAddresses(input: CreateOrderInput, recipientName: string): CreateOrd
   };
 }
 
+/**
+ * The idempotency pair a normal checkout carries. Any hex digest would do —
+ * the repository only stores and compares it — so a repeated letter keeps the
+ * expectations readable.
+ */
+const CHECKOUT_KEY = "checkout-key-0001";
+const CHECKOUT_FINGERPRINT = "a".repeat(64);
+
 /** A two-line USD checkout against a fresh `createChain` (camera qty 1, lens qty 1). */
-function twoLineCheckout(chain: Chain, quantity = 1): CreateOrderInput {
+function twoLineCheckout(
+  chain: Chain,
+  quantity = 1,
+  idempotency: { key?: string; fingerprint?: string } = {},
+): CreateOrderInput {
   return addAddresses(
     {
       customerUserId: chain.customerUserId,
+      idempotencyKey: idempotency.key ?? CHECKOUT_KEY,
+      idempotencyFingerprint: idempotency.fingerprint ?? CHECKOUT_FINGERPRINT,
       currency: "USD",
       subtotalAmountCents: 84_998,
       shippingAmountCents: 0,
@@ -138,6 +152,73 @@ describe("orders repository: createOrder", () => {
     expect(inventoryQuantity(db, chain.lensVariantId)).toBe(5);
   });
 
+  it("rejects a reused (customer, key) as DUPLICATE_IDEMPOTENCY_KEY and writes nothing", async () => {
+    // This is what two concurrent checkouts with one key look like from the
+    // loser's side: the key is the only thing that collides, so the batch must
+    // roll back whole and be reported distinctly from a stock problem.
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+
+    const first = await repo.createOrder(twoLineCheckout(chain));
+    if (!first.ok) {
+      throw new Error("expected a successful order create");
+    }
+
+    // Same customer, same key, different fingerprint (a materially different checkout).
+    const replay = await repo.createOrder(
+      twoLineCheckout(chain, 1, { fingerprint: "b".repeat(64) }),
+    );
+    expect(replay).toEqual({ ok: false, reason: "DUPLICATE_IDEMPOTENCY_KEY" });
+
+    // Nothing from the rejected attempt survived: still one order, and stock was
+    // decremented exactly once.
+    expect(db.select().from(schema.orders).all()).toHaveLength(1);
+    expect(db.select().from(schema.orderItems).all()).toHaveLength(2);
+    expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(9);
+    expect(inventoryQuantity(db, chain.lensVariantId)).toBe(4);
+  });
+
+  it("keeps the idempotency key consumed by the committed order", async () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+
+    const created = await repo.createOrder(twoLineCheckout(chain));
+    if (!created.ok) {
+      throw new Error("expected a successful order create");
+    }
+
+    // The write is what makes the key durable: it is readable back with the
+    // order, fingerprint and all.
+    const stored = db
+      .select()
+      .from(schema.orders)
+      .where(eq(schema.orders.id, created.order.id))
+      .get();
+    expect(stored?.idempotencyKey).toBe(CHECKOUT_KEY);
+    expect(stored?.idempotencyFingerprint).toBe(CHECKOUT_FINGERPRINT);
+  });
+
+  it("frees the key again when the checkout it was sent with fails", async () => {
+    // A key is consumed by a *commit*, never by an attempt: a shopper whose
+    // checkout failed for a real reason (out of stock) must be able to fix the
+    // cart and retry with the very same key.
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+
+    // Camera stock is 10, so 11 units undershoot and abort the transaction.
+    const failed = await repo.createOrder(twoLineCheckout(chain, 11));
+    expect(failed).toEqual({ ok: false, reason: "INSUFFICIENT_STOCK" });
+
+    const retried = await repo.createOrder(twoLineCheckout(chain, 1));
+    expect(retried.ok).toBe(true);
+    if (!retried.ok) return;
+    expect(retried.order.idempotencyKey).toBe(CHECKOUT_KEY);
+    expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(9);
+  });
+
   it("maps a missing variant to VARIANT_NOT_FOUND and writes nothing", async () => {
     const { db } = createTestDatabase();
     const chain = createChain(db);
@@ -182,6 +263,48 @@ describe("orders repository: reads", () => {
     expect(await repo.findByIdForCustomer(chain.customerUserId, createId())).toBeNull();
   });
 
+  it("resolves the order a customer placed under a key, with its details", async () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+
+    const created = await repo.createOrder(twoLineCheckout(chain));
+    if (!created.ok) {
+      throw new Error("expected a successful order create");
+    }
+
+    const found = await repo.findByIdempotencyKeyForCustomer(chain.customerUserId, CHECKOUT_KEY);
+    expect(found?.order.id).toBe(created.order.id);
+    // The fingerprint travels with it: this is what lets the caller tell a replay
+    // of the same request from a reuse of the key for something else.
+    expect(found?.order.idempotencyFingerprint).toBe(CHECKOUT_FINGERPRINT);
+    expect(found?.addresses).toHaveLength(2);
+    expect(found?.items).toHaveLength(2);
+
+    // An unused key resolves to nothing rather than throwing.
+    expect(await repo.findByIdempotencyKeyForCustomer(chain.customerUserId, "never-used-key")).toBeNull();
+  });
+
+  it("never resolves one customer's key to another customer's order", async () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+
+    const created = await repo.createOrder(twoLineCheckout(chain));
+    if (!created.ok) {
+      throw new Error("expected a successful order create");
+    }
+
+    // Guessing somebody else's key must not expose their order: the lookup is
+    // scoped to the caller, so it can only ever return null.
+    const interloper = db
+      .insert(schema.users)
+      .values({ email: "order-key-other@example.test", name: "Other" })
+      .returning()
+      .get();
+    expect(await repo.findByIdempotencyKeyForCustomer(interloper.id, CHECKOUT_KEY)).toBeNull();
+  });
+
   it("paginates one customer's orders newest-first and is scoped to them", async () => {
     const { db } = createTestDatabase();
     const chain = createChain(db);
@@ -197,6 +320,10 @@ describe("orders repository: reads", () => {
         .insert(schema.orders)
         .values({
           customerUserId: chain.customerUserId,
+          // Distinct keys: the unique index is per (customer, key), so these
+          // three orders must not collide with each other.
+          idempotencyKey: `checkout-key-000${index}`,
+          idempotencyFingerprint: CHECKOUT_FINGERPRINT,
           status: "pending",
           currency: "USD",
           subtotalAmountCents: 1_000,
@@ -213,6 +340,10 @@ describe("orders repository: reads", () => {
     db.insert(schema.orders)
       .values({
         customerUserId: other.id,
+        // The same key the chain customer's orders use: the index is per
+        // (customer, key), so this must still be accepted.
+        idempotencyKey: CHECKOUT_KEY,
+        idempotencyFingerprint: CHECKOUT_FINGERPRINT,
         status: "pending",
         currency: "USD",
         subtotalAmountCents: 1,

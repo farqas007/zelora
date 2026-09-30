@@ -99,6 +99,7 @@ const cartRepository: CartRepository = {
 
 const orderRepository: OrderRepository = {
   createOrder: unimplemented,
+  findByIdempotencyKeyForCustomer: unimplemented,
   findByIdForCustomer: unimplemented,
   listByCustomer: unimplemented,
 };

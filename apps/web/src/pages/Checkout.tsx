@@ -1,6 +1,6 @@
-import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { CHECKOUT_LIMITS, type OrderAddressRequest } from "@zelora/shared";
+import { CHECKOUT_LIMITS, type OrderAddressRequest, type PlaceOrderRequest } from "@zelora/shared";
 import { FormField } from "../components/FormField";
 import { LoadingState } from "../components/LoadingState";
 import { MarketFooter } from "../components/MarketFooter";
@@ -10,6 +10,7 @@ import { useCart } from "../context/CartContext";
 import { ApiFailureError } from "../lib/api/client";
 import { loadCartVariantLookup, type CartVariantReference } from "../lib/cart/catalog";
 import { resolveOrderFailure } from "../lib/orders/errors";
+import { createIdempotencyKey } from "../lib/orders/idempotency";
 import { formatCents } from "../lib/format";
 
 const MAX_SHORT = CHECKOUT_LIMITS.line1MaxLength;
@@ -102,6 +103,13 @@ export function CheckoutPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [lookup, setLookup] = useState<Map<string, CartVariantReference> | null>(null);
+  /**
+   * The idempotency key for the current attempt, and the request it was minted
+   * for. Retries reuse the key so the server recognises them as the same
+   * checkout; editing the request mints a new one, because the server treats a
+   * reused key carrying different details as a conflict and answers 409.
+   */
+  const attempt = useRef<{ key: string; signature: string } | null>(null);
 
   const lookupKey = items.map((item) => `${item.id}:${item.variantId}`).join("|");
 
@@ -203,15 +211,24 @@ export function CheckoutPage() {
       return;
     }
 
+    const request: PlaceOrderRequest = {
+      shippingAddress: toAddressRequest(shipping),
+      ...(billingDiffers ? { billingAddress: toAddressRequest(billing) } : {}),
+    };
+    const signature = JSON.stringify(request);
+    if (attempt.current === null || attempt.current.signature !== signature) {
+      attempt.current = { key: createIdempotencyKey(), signature };
+    }
+
     setSubmitting(true);
     try {
-      const envelope = await api.placeOrder({
-        shippingAddress: toAddressRequest(shipping),
-        ...(billingDiffers ? { billingAddress: toAddressRequest(billing) } : {}),
-      });
+      const envelope = await api.placeOrder(request, attempt.current.key);
       if (!envelope.ok) {
         throw new ApiFailureError(envelope.error);
       }
+      // The order exists and the cart is gone; this attempt is over, so a later
+      // checkout starts from a clean key rather than reusing a spent one.
+      attempt.current = null;
       await refresh();
       navigate("/checkout/confirmation", { state: { order: envelope.data }, replace: true });
     } catch (cause) {

@@ -7,6 +7,8 @@ import {
   COUNTRY_CODE_PATTERN,
   CURRENCY_PATTERN,
   EMAIL_PATTERN,
+  IDEMPOTENCY_KEY_LIMITS,
+  IDEMPOTENCY_KEY_PATTERN,
   INVENTORY_LIMITS,
   PRODUCT_IMAGE_LIMITS,
   PRODUCT_LIMITS,
@@ -197,6 +199,39 @@ export function validateCurrency(currency: string): string[] {
     return ["Currency must be a 3-letter ISO 4217 code, e.g. USD."];
   }
   return [];
+}
+
+/**
+ * Validate the `Idempotency-Key` header of a checkout.
+ *
+ * The header is required, not optional: a checkout without one cannot be
+ * replayed safely, and silently treating it as absent would let a retry place a
+ * second order — exactly the failure this mechanism exists to prevent. So a
+ * missing, blank or malformed key is a {@link ValidationError} naming
+ * `idempotencyKey`, which the web app renders against the checkout form.
+ *
+ * The value is returned as-is (never trimmed or case-folded): the key is an
+ * opaque token, so any "helpfulness" here would silently turn two distinct
+ * keys into one, or a key the client will retry with into a different one.
+ */
+export function parseIdempotencyKey(raw: string | undefined): string {
+  const { minLength, maxLength } = IDEMPOTENCY_KEY_LIMITS;
+  if (raw === undefined || raw === "") {
+    throw new ValidationError("The request is invalid.", {
+      idempotencyKey: ["A checkout idempotency key is required."],
+    });
+  }
+  if (raw.length < minLength || raw.length > maxLength) {
+    throw new ValidationError("The request is invalid.", {
+      idempotencyKey: [`Idempotency key must be between ${minLength} and ${maxLength} characters.`],
+    });
+  }
+  if (!IDEMPOTENCY_KEY_PATTERN.test(raw)) {
+    throw new ValidationError("The request is invalid.", {
+      idempotencyKey: ["Idempotency key may only contain letters, digits and the characters . _ ~ : -"],
+    });
+  }
+  return raw;
 }
 
 /** Reject anything that is not a plain JSON object body. */

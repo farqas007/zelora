@@ -43,6 +43,14 @@ import { MemoryWindowRateLimiter } from "../services/rate-limit";
 
 const NOW = new Date("2026-01-01T00:00:00.000Z");
 
+/**
+ * The client-generated idempotency key every checkout POST carries by default.
+ *
+ * Each test gets a fresh repository fake, so one shared value is enough; the
+ * header-contract tests pass `idempotencyKey` explicitly to vary it.
+ */
+const CHECKOUT_KEY = "checkout-key-0001";
+
 class FakeClock implements Clock {
   now(): Date {
     return new Date(NOW.getTime());
@@ -311,6 +319,7 @@ class FakeCatalogRepository implements CatalogRepository {
 
 class FakeOrderRepository implements OrderRepository {
   private orders: Map<string, OrderWithDetailsRecord> = new Map();
+  private ordersByKey: Map<string, OrderWithDetailsRecord> = new Map();
   private recordsByUser: Map<string, OrderWithDetailsRecord[]> = new Map();
 
   createCalls: CreateOrderInput[] = [];
@@ -341,6 +350,10 @@ class FakeOrderRepository implements OrderRepository {
     const order: OrderRecord = {
       id,
       customerUserId,
+      // Seeded rows stand in for orders placed earlier; they are only ever
+      // read back, never replayed, so the key is a stand-in value.
+      idempotencyKey: `seeded-${id}`,
+      idempotencyFingerprint: "a".repeat(64),
       status: "pending",
       currency: "USD",
       subtotalAmountCents: opts.totalAmountCents ?? 2_500,
@@ -400,6 +413,8 @@ class FakeOrderRepository implements OrderRepository {
     const order: OrderRecord = {
       id,
       customerUserId: input.customerUserId,
+      idempotencyKey: input.idempotencyKey,
+      idempotencyFingerprint: input.idempotencyFingerprint,
       status: "pending",
       currency: input.currency,
       subtotalAmountCents: input.subtotalAmountCents,
@@ -417,10 +432,20 @@ class FakeOrderRepository implements OrderRepository {
     );
     const record: OrderWithDetailsRecord = { order, addresses, items };
     this.orders.set(record.order.id, record);
+    // Mirrors the schema's unique (customer_user_id, idempotency_key) index: the
+    // key is what a retry looks the order up by.
+    this.ordersByKey.set(`${input.customerUserId}\u0000${input.idempotencyKey}`, record);
     const list = this.recordsByUser.get(input.customerUserId) ?? [];
     list.push(record);
     this.recordsByUser.set(input.customerUserId, list);
     return { ok: true, order, addresses, items };
+  }
+
+  async findByIdempotencyKeyForCustomer(
+    customerUserId: string,
+    idempotencyKey: string,
+  ): Promise<OrderWithDetailsRecord | null> {
+    return this.ordersByKey.get(`${customerUserId}\u0000${idempotencyKey}`) ?? null;
   }
 
   async findByIdForCustomer(customerUserId: string, orderId: string): Promise<OrderWithDetailsRecord | null> {
@@ -587,15 +612,21 @@ describe("orders routes", () => {
     });
   });
 
+  /**
+   * Checkout requires an `Idempotency-Key`, so every POST here carries one by
+   * default; `opts.headers` can still override it to test the header contract.
+   */
   function method(
     method: "GET" | "POST",
     path: string,
-    opts: { cookie?: string; csrfToken?: string; body?: unknown; headers?: Record<string, string> } = {},
+    opts: { cookie?: string; csrfToken?: string; body?: unknown; headers?: Record<string, string>; idempotencyKey?: string | null } = {},
   ): Promise<Response> {
+    const idempotencyKey = opts.idempotencyKey === undefined ? CHECKOUT_KEY : opts.idempotencyKey;
     return app.request(path, {
       method,
       headers: {
         "Content-Type": "application/json",
+        ...(idempotencyKey === null ? {} : { "Idempotency-Key": idempotencyKey }),
         ...(opts.cookie === undefined ? {} : { Cookie: opts.cookie }),
         ...(opts.csrfToken === undefined ? {} : { "X-Zelora-CSRF": opts.csrfToken }),
         ...(opts.headers ?? {}),
@@ -978,12 +1009,16 @@ describe("orders routes", () => {
     const cookie = extractSessionCookie(register);
     const csrfToken = registerBody.data.session.csrfToken;
 
+    let rateLimitAttempt = 0;
     const post = (): Promise<Response> =>
       limitedApp.request("/api/orders", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "X-Test-IP": "203.0.113.50",
+          // A distinct key per attempt: the rate-limit budget, not idempotency,
+          // is what must stop the third of these.
+          "Idempotency-Key": `rate-limit-key-${rateLimitAttempt++}`,
           Cookie: cookie,
           "X-Zelora-CSRF": csrfToken,
         },
@@ -1069,4 +1104,136 @@ describe("orders routes", () => {
     });
     expect(persisted.addresses.map((address) => address.kind)).toEqual(["shipping", "billing"]);
   });
+
+/**
+ * The `Idempotency-Key` header contract.
+ *
+ * Checkout is a money-moving write that browsers and proxies retry on their own,
+ * so the header is what makes a repeat safe. These tests pin the wire behaviour:
+ * the key is required, it is validated, it reaches the write, and a repeat or a
+ * reuse of it produces the documented answer.
+ */
+describe("POST /api/orders Idempotency-Key contract", () => {
+  it("rejects a checkout with no Idempotency-Key as a 422 and creates nothing", async () => {
+    const { cookie, csrfToken, userId } = await registerSession();
+    catalogRepository.seedSellable({ id: "variant-1" });
+    await cartRepository.seedCart(userId, [{ variantId: "variant-1", quantity: 1 }]);
+
+    const response = await method("POST", "/api/orders", {
+      cookie,
+      csrfToken,
+      idempotencyKey: null,
+      body: { shippingAddress: validShipping },
+    });
+
+    // Refusing is the only safe answer: an order placed without a key cannot be
+    // recognised as a retry, so the client's next attempt would double-charge.
+    const failure = await expectFailure(response, "VALIDATION_ERROR", 422);
+    expect(failure.error.fields?.idempotencyKey).toBeDefined();
+    expect(orderRepository.createCalls).toHaveLength(0);
+    const cart = await cartRepository.getCartByUserId(userId);
+    expect(cart?.items).toHaveLength(1);
+  });
+
+  it("rejects keys that are too short or carry characters outside the allowed set", async () => {
+    const { cookie, csrfToken, userId } = await registerSession();
+    catalogRepository.seedSellable({ id: "variant-1" });
+    await cartRepository.seedCart(userId, [{ variantId: "variant-1", quantity: 1 }]);
+
+    // A NUL byte is deliberately absent here: the fetch layer rejects it before
+    // any handler runs, so the pattern test in the validator is where it belongs.
+    for (const key of ["short", "a".repeat(65), "has space here", "has/slash/here"]) {
+      const response = await method("POST", "/api/orders", {
+        cookie,
+        csrfToken,
+        idempotencyKey: key,
+        body: { shippingAddress: validShipping },
+      });
+      const failure = await expectFailure(response, "VALIDATION_ERROR", 422);
+      expect(failure.error.fields?.idempotencyKey).toBeDefined();
+    }
+    expect(orderRepository.createCalls).toHaveLength(0);
+  });
+
+  it("persists the caller's key and a server-computed fingerprint with the order", async () => {
+    const { cookie, csrfToken, userId } = await registerSession();
+    catalogRepository.seedSellable({ id: "variant-1" });
+    await cartRepository.seedCart(userId, [{ variantId: "variant-1", quantity: 2 }]);
+
+    await method("POST", "/api/orders", {
+      cookie,
+      csrfToken,
+      idempotencyKey: "order-attempt-2f9c",
+      body: { shippingAddress: validShipping },
+    });
+
+    const persisted = orderRepository.createCalls[0]!;
+    expect(persisted.idempotencyKey).toBe("order-attempt-2f9c");
+    expect(persisted.idempotencyFingerprint).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("answers a repeat of the same request with the original order and one write", async () => {
+    const { cookie, csrfToken, userId } = await registerSession();
+    catalogRepository.seedSellable({ id: "variant-1" });
+    await cartRepository.seedCart(userId, [{ variantId: "variant-1", quantity: 2 }]);
+
+    const first = await method("POST", "/api/orders", {
+      cookie,
+      csrfToken,
+      body: { shippingAddress: validShipping },
+    });
+    expect(first.status).toBe(201);
+    const firstBody = (await first.json()) as { data: OrderDetailDto };
+
+    // The retry arrives after the first attempt committed and emptied the cart,
+    // which is exactly the situation that produces a double charge without a key.
+    const retry = await method("POST", "/api/orders", {
+      cookie,
+      csrfToken,
+      body: { shippingAddress: validShipping },
+    });
+
+    expect(retry.status).toBe(201);
+    const retryBody = (await retry.json()) as { data: OrderDetailDto };
+    expect(retryBody.data.id).toBe(firstBody.data.id);
+    expect(orderRepository.createCalls).toHaveLength(1);
+  });
+
+  it("answers a reused key carrying a different request with a 409 conflict", async () => {
+    const { cookie, csrfToken, userId } = await registerSession();
+    catalogRepository.seedSellable({ id: "variant-1" });
+    await cartRepository.seedCart(userId, [{ variantId: "variant-1", quantity: 2 }]);
+
+    await method("POST", "/api/orders", {
+      cookie,
+      csrfToken,
+      body: { shippingAddress: validShipping },
+    });
+
+    const reused = await method("POST", "/api/orders", {
+      cookie,
+      csrfToken,
+      body: { shippingAddress: { ...validShipping, line1: "99 Different Road" } },
+    });
+
+    await expectFailure(reused, "IDEMPOTENCY_CONFLICT", 409);
+    expect(orderRepository.createCalls).toHaveLength(1);
+  });
+
+  it("advertises the header in CORS so a browser client can send it", async () => {
+    const response = await app.request("/api/orders", {
+      method: "OPTIONS",
+      headers: {
+        Origin: "https://app.example.com",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "content-type,x-csrf,idempotency-key",
+      },
+    });
+
+    // Without this the browser strips the key before the request leaves the page,
+    // and every checkout fails validation in production only.
+    const allowed = response.headers.get("access-control-allow-headers") ?? "";
+    expect(allowed.toLowerCase()).toContain("idempotency-key");
+  });
+});
 });

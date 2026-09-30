@@ -174,8 +174,8 @@ export function buildSeedStatements(): string[] {
   for (const order of FIXTURE_ORDERS) {
     const variantIn = ORDER_VARIANT_IDS.map(sqlStr).join(", ");
     statements.push(
-      `INSERT INTO orders (id, customer_user_id, status, currency, subtotal_amount_cents, shipping_amount_cents, discount_amount_cents, total_amount_cents, created_at, updated_at) ` +
-        `SELECT ${sqlStr(order.id)}, u.id, ${sqlStr(order.status)}, ${sqlStr(order.currency)}, ${order.subtotalAmountCents}, ${order.shippingAmountCents}, ${order.discountAmountCents}, ${order.totalAmountCents}, ${TS}, ${TS} ` +
+      `INSERT INTO orders (id, customer_user_id, idempotency_key, idempotency_fingerprint, status, currency, subtotal_amount_cents, shipping_amount_cents, discount_amount_cents, total_amount_cents, created_at, updated_at) ` +
+        `SELECT ${sqlStr(order.id)}, u.id, ${sqlStr(order.idempotencyKey)}, ${sqlStr(order.idempotencyFingerprint)}, ${sqlStr(order.status)}, ${sqlStr(order.currency)}, ${order.subtotalAmountCents}, ${order.shippingAmountCents}, ${order.discountAmountCents}, ${order.totalAmountCents}, ${TS}, ${TS} ` +
         `FROM users u WHERE u.email = ${sqlStr(FIXTURE_USERS[0]!.email)} ` +
         `AND NOT EXISTS (SELECT 1 FROM order_items WHERE variant_id IN (${variantIn})) ` +
         `AND NOT EXISTS (SELECT 1 FROM orders WHERE id = ${sqlStr(order.id)})`,

@@ -222,6 +222,9 @@ const inertOrderRepository: OrderRepository = {
   createOrder: () => {
     throw new Error("unexpected order call");
   },
+  findByIdempotencyKeyForCustomer: () => {
+    throw new Error("unexpected order call");
+  },
   findByIdForCustomer: () => {
     throw new Error("unexpected order call");
   },

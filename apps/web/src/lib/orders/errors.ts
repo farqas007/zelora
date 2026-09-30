@@ -22,6 +22,11 @@ export function resolveOrderFailure(error: unknown): string {
         return "Your cart contains items priced in different currencies. Please remove one before checking out.";
       case ORDER_ERROR_CODES.ORDER_NOT_FOUND:
         return "This order could not be found.";
+      case ORDER_ERROR_CODES.IDEMPOTENCY_CONFLICT:
+        // The key already placed a *different* order, so this page's key belongs
+        // to a checkout that is finished. Retrying would keep colliding, and the
+        // shopper has to deliberately start a new one instead.
+        return "This checkout has already been placed with different details. Review your orders, then start a new checkout.";
       case AUTH_ERROR_CODES.SESSION_EXPIRED:
         return "Your session has expired. Please sign in again.";
       case AUTH_ERROR_CODES.CSRF_FAILED:

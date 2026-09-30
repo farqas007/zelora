@@ -3,16 +3,13 @@ import type { Context } from "hono";
 import type { AppConfig } from "@zelora/core";
 import type { AuthSessionRepository } from "@zelora/db/auth";
 import type { UserRepository } from "@zelora/db/users";
-import type {
-  GetOrderEnvelope,
-  ListOrdersEnvelope,
-  PlaceOrderEnvelope,
-} from "@zelora/shared";
+import { IDEMPOTENCY_HEADER, type GetOrderEnvelope, type ListOrdersEnvelope, type PlaceOrderEnvelope } from "@zelora/shared";
 import type { AppEnv } from "../context";
 import { createAuthMiddleware } from "../middleware/auth";
 import { createCsrfMiddleware } from "../middleware/csrf";
 import { createIpRateLimitMiddleware } from "../middleware/rate-limit";
 import type { OrderService } from "../services/orders";
+import { parseIdempotencyKey } from "../services/validation";
 import type { Clock } from "../services/clock";
 import type { ClientIpResolver } from "../services/client-ip";
 import type { RateLimiter } from "../services/rate-limit";
@@ -28,10 +25,16 @@ import type { RateLimiter } from "../services/rate-limit";
  * stack in the same order as every other authenticated write: session auth,
  * CSRF synchronizer-token check, then a dedicated per-IP
  * `order-place` budget before the handler. The handler stays thin — it reads
- * the raw body and hands it to the injected {@link OrderService}, which owns
- * all of the address validation, cart re-pricing, atomic persistence and
- * cart clearing. Identity always comes from the session; nothing in the
- * request body is an owner.
+ * the raw body and the `Idempotency-Key` header and hands both to the injected
+ * {@link OrderService}, which owns all of the address validation, cart
+ * re-pricing, atomic persistence and cart clearing. Identity always comes from
+ * the session; nothing in the request body is an owner.
+ *
+ * The key is required, and it is required from the client: the server has no
+ * safe way to invent one (anything it generated would differ per attempt and
+ * turn every retry into a second order). Reading it here rather than deep in
+ * the service keeps it in the transport layer where it belongs — a header, not
+ * a field of the priced order.
  *
  * The rate limit deliberately runs before the body is parsed, so a caller
  * over budget is refused without buffering a payload — checkout is the most
@@ -99,8 +102,12 @@ export function createOrderRoutes(dependencies: OrderRoutesDependencies): Hono<A
 
   app.post("/", requireAuth, requireCsrf, orderPlaceRateLimit, async (c) => {
     const auth = c.get("auth");
+    // The idempotency key is validated before the body is even read: it is
+    // transport-level, and refusing a checkout that could not be replayed is
+    // cheaper than parsing a payload we are going to reject anyway.
+    const idempotencyKey = parseIdempotencyKey(c.req.header(IDEMPOTENCY_HEADER));
     const body = await readJsonBody(c);
-    const data = await orderService.placeOrder(auth.user, body);
+    const data = await orderService.placeOrder(auth.user, body, idempotencyKey);
     return c.json<PlaceOrderEnvelope>({ ok: true, data }, 201);
   });
 

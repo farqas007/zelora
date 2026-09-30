@@ -43,6 +43,16 @@ import { ORDER_ADDRESS_KINDS, ORDER_ITEM_STATUSES, ORDER_STATUSES } from "./enum
  * key and an all-zero fingerprint. The zeroes are not a reachable SHA-256
  * output, so such a row can only ever answer "conflict" and never replays an
  * order that did not exist when the key was sent.
+ *
+ * Migration 0008 adds both columns to the live `orders` table rather than
+ * recreating it, because `order_items` and `order_addresses` reference it with
+ * `ON DELETE RESTRICT` and dropping it fails on a populated database. The
+ * `notNull()` declarations below are therefore true of every row but are
+ * enforced by BEFORE INSERT/UPDATE triggers rather than by a column flag: SQLite
+ * cannot add `NOT NULL` to an existing column without rebuilding the table. The
+ * length CHECKs are added inline with the columns, so they are real table
+ * constraints under exactly the names declared here. See the migration file for
+ * the full rationale.
  */
 
 export const orders = sqliteTable("orders", {

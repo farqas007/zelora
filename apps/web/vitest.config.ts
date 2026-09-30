@@ -13,11 +13,19 @@ import react from "@vitejs/plugin-react";
  * The React plugin is reused from the build config so JSX in a `.tsx` test is
  * transformed the same way it is in `src`, instead of relying on esbuild's
  * default JSX handling.
+ *
+ * `pool: "vmThreads"` builds the jsdom environment once per worker instead of
+ * once per file. Under the default `forks` pool each of the 13 test files got
+ * its own worker and therefore its own jsdom, which accounted for ~38% of this
+ * suite's wall clock for no isolation benefit: `vmThreads` still gives every
+ * file a fresh module registry and a fresh global scope, so files still cannot
+ * see each other's state.
  */
 export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
+    pool: "vmThreads",
     include: ["src/**/*.test.{ts,tsx}"],
   },
 });

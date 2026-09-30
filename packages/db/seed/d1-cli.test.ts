@@ -17,9 +17,11 @@ import { FIXTURE_CREATED_AT_MS, FIXTURE_IMAGES, FIXTURE_USERS } from "./fixture"
  * `--config` (audit F), and the remote gate is exercised fully offline with
  * no `--remote` flag anywhere (audit G).
  *
- * NOTE: each local wrangler D1 call boots a fresh workerd runtime, so this
- * file is intentionally slow (~10 min on an unloaded box; longer under load).
- * sql check: the rehearsal Miniflare suite in `./d1.test.ts` stays fast.
+ * NOTE: this file spawns the real `wrangler` and `tsx` CLIs, and every local
+ * wrangler D1 call boots a fresh workerd runtime — so its floor is set by
+ * process boots, not by assertions. Keep one invocation per distinct thing
+ * being proven and batch statements into a single `d1 execute --file` (see
+ * `wranglerFile`) rather than paying a boot per statement.
  */
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -56,6 +58,45 @@ function wrangler(args: string[]): CliRun {
     cwd: REPO_ROOT,
   });
   return { status: result.status ?? -1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+}
+
+/**
+ * Run one or more statements in a **single** `wrangler d1 execute --file`.
+ *
+ * Every local wrangler D1 call boots a fresh workerd runtime, so issuing the
+ * statements one `--command` at a time pays that boot once per statement. One
+ * `--file` runs them all in one boot and, with `--json`, still reports one
+ * result entry per statement, which is what `assertStatementsApplied` checks.
+ */
+function wranglerFile(dir: string, statements: readonly string[]): D1JsonRun {
+  const file = join(dir, "drift.sql");
+  writeFileSync(file, `${statements.join("\n")}\n`);
+  const run = wrangler(["d1", "execute", "zelora", "--local", "--persist-to", dir, "--file", file, "--json"]);
+  return { ...run, entries: parseWranglerJson(run.stdout) };
+}
+
+interface D1JsonRun extends CliRun {
+  /** One entry per statement in the `--file`, in order. */
+  entries: Array<{ success?: boolean }>;
+}
+
+/** The `--json` payload wrangler prints on stdout, or `[]` when there is none. */
+function parseWranglerJson(stdout: string): Array<{ success?: boolean }> {
+  const start = stdout.indexOf("[");
+  if (start === -1) return [];
+  try {
+    const parsed: unknown = JSON.parse(stdout.slice(start));
+    return Array.isArray(parsed) ? (parsed as Array<{ success?: boolean }>) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Every statement in the file ran, and the file really held all of them. */
+function assertStatementsApplied(run: D1JsonRun, expected: number): void {
+  expect(run.status).toBe(0);
+  expect(run.entries).toHaveLength(expected);
+  expect(run.entries.every((entry) => entry.success === true)).toBe(true);
 }
 
 /** Run the seed CLI via tsx. ZELORA_REMOTE_SEED_ALLOW is always stripped so a
@@ -187,20 +228,16 @@ describe("remote D1 seed CLI (hermetic, audits E/F/G/H)", () => {
     // Drift each image row onto its legacy URL by deterministic id, exactly as
     // the live database is. Pinned as literals, index-aligned with
     // FIXTURE_IMAGES, so this rehearsal does not take its input from the code
-    // it is exercising.
-    LEGACY_IMAGE_URLS.forEach((legacy, index) => {
-      const drifted = wrangler([
-        "d1",
-        "execute",
-        "zelora",
-        "--local",
-        "--persist-to",
-        dir,
-        "--command",
-        `UPDATE product_images SET url = '${legacy}' WHERE id = '${FIXTURE_IMAGES[index]!.id}'`,
-      ]);
-      expect(drifted.status).toBe(0);
-    });
+    // it is exercising. All four in one `d1 execute --file`: four separate
+    // invocations would boot workerd four times over for the same four writes.
+    const drifted = wranglerFile(
+      dir,
+      LEGACY_IMAGE_URLS.map(
+        (legacy, index) =>
+          `UPDATE product_images SET url = '${legacy}' WHERE id = '${FIXTURE_IMAGES[index]!.id}';`,
+      ),
+    );
+    assertStatementsApplied(drifted, LEGACY_IMAGE_URLS.length);
 
     const refresh = seedCli(["refresh-images", "--database", "zelora", "--local", "--persist-to", dir]);
     expect(refresh.status).toBe(0);

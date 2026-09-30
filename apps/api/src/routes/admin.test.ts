@@ -709,7 +709,7 @@ describe("POST /api/admin/sellers/:userId/activate", () => {
     expect(userRepository.getUser(targetId)?.role).toBe("admin");
     expect(sellerRepository.seededProfile(profileId)?.status).toBe("pending");
     expect(
-      auditLogRepository.entries.filter((entry) => entry.input.action === "seller.activate"),
+      auditLogRepository.entries.filter((entry) => entry.action === "seller.activate"),
     ).toHaveLength(0);
   });
 });

@@ -69,34 +69,19 @@ type D1Binding = Awaited<ReturnType<Miniflare["getD1Database"]>>;
 let miniflare: Miniflare;
 let binding: D1Binding;
 
-/** Drop every table so `applyMigrations` rebuilds a pristine schema. */
-async function resetD1(database: D1Binding): Promise<void> {
-  for (const name of REVERSE_DEPENDENCY_ORDER) {
-    await database.exec(`DROP TABLE IF EXISTS "${name}"`);
-  }
-  await applyMigrations(database);
+/**
+ * Apply the committed migrations to a D1 database in a single transaction.
+ *
+ * Each test gets a brand-new Miniflare (`d1Persist: false`), so the database
+ * starts with no tables at all: there is nothing to drop first, and applying the
+ * migrations through one `batch()` is both one round-trip to workerd and atomic
+ * — a partially migrated schema can never be left behind for the test to
+ * discover.
+ */
+async function applyMigrations(database: D1Binding): Promise<void> {
+  const statements = await readMigrationStatements();
+  await database.batch(statements.map((statement) => database.prepare(statement)));
 }
-
-const REVERSE_DEPENDENCY_ORDER = [
-  "audit_logs",
-  "auth_sessions",
-  "cart_items",
-  "carts",
-  "order_items",
-  "order_addresses",
-  "orders",
-  "addresses",
-  "product_media",
-  "media_objects",
-  "product_images",
-  "inventory",
-  "product_variants",
-  "products",
-  "categories",
-  "stores",
-  "seller_profiles",
-  "users",
-] as const;
 
 /**
  * Miniflare's `exec()` rejects multi-line input, so run each generated
@@ -110,17 +95,32 @@ async function applySql(database: D1Binding, statements: readonly string[]): Pro
   }
 }
 
-async function applyMigrations(database: D1Binding): Promise<void> {
-  const files = (await readdir(MIGRATIONS_DIR)).filter((file) => /^\d+_.+\.sql$/.test(file)).sort();
-  for (const file of files) {
-    const sql = await readFile(join(MIGRATIONS_DIR, file), "utf8");
-    for (const block of sql.split("--> statement-breakpoint")) {
-      const statement = block.trim().replace(/\s+/g, " ");
-      if (statement !== "") {
-        await database.exec(statement.endsWith(";") ? statement : `${statement};`);
+/**
+ * The committed `migrations/` folder as a flat list of single-line statements,
+ * read once and memoised: every test migrates a fresh database, and the files
+ * never change while the suite runs.
+ *
+ * Statements are collapsed onto one line because Miniflare's `exec()` rejects
+ * multi-line input.
+ */
+let migrationStatements: Promise<string[]> | undefined;
+
+function readMigrationStatements(): Promise<string[]> {
+  migrationStatements ??= (async () => {
+    const files = (await readdir(MIGRATIONS_DIR)).filter((file) => /^\d+_.+\.sql$/.test(file)).sort();
+    const statements: string[] = [];
+    for (const file of files) {
+      const sql = await readFile(join(MIGRATIONS_DIR, file), "utf8");
+      for (const block of sql.split("--> statement-breakpoint")) {
+        const statement = block.trim().replace(/\s+/g, " ");
+        if (statement !== "") {
+          statements.push(statement.endsWith(";") ? statement : `${statement};`);
+        }
       }
     }
-  }
+    return statements;
+  })();
+  return migrationStatements;
 }
 
 async function count(database: D1Binding, table: string): Promise<number> {
@@ -361,7 +361,8 @@ async function counts(database: D1Binding): Promise<typeof SEED_SUMMARY> {
 
 describe("remote D1 seed tooling (rehearsal, generated SQL verbatim)", () => {
   /** A fresh Miniflare instance per test: workerd never leaks a write lock
-   * from an earlier test's deliberate D1 error into the next test's reset. */
+   * from an earlier test's deliberate D1 error into the next test's reset.
+   * The instance is empty, so migrating it is all the setup a test needs. */
   beforeEach(async () => {
     miniflare = new Miniflare({
       modules: true,
@@ -370,7 +371,7 @@ describe("remote D1 seed tooling (rehearsal, generated SQL verbatim)", () => {
       d1Persist: false,
     });
     binding = await miniflare.getD1Database("DB");
-    await resetD1(binding);
+    await applyMigrations(binding);
   }, 30_000);
 
   afterEach(async () => {

@@ -42,17 +42,23 @@ function tokenHash(seed: number): string {
 
 type D1Binding = Awaited<ReturnType<Miniflare["getD1Database"]>>;
 
-/** One worker hosts the single D1 database; every test resets it fresh. */
+/** One worker hosts the single D1 database; every test starts from empty tables. */
 let miniflare: Miniflare;
 let binding: D1Binding;
 
-beforeAll(() => {
+beforeAll(async () => {
   miniflare = new Miniflare({
     modules: true,
     script: "export default {}",
     d1Databases: { DB: "zelora-test" },
     d1Persist: false,
   });
+  binding = await miniflare.getD1Database("DB");
+  // The committed migrations are applied exactly once, here. Every test below
+  // runs against the schema they produce — the real D1 runtime, the real
+  // migration SQL, foreign keys ON — and is isolated from its neighbours by
+  // emptying every table, not by re-running the DDL.
+  await applyMigrations(binding);
 });
 
 afterAll(async () => {
@@ -60,27 +66,36 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  binding = await miniflare.getD1Database("DB");
-  await resetD1(binding);
+  await emptyEveryTable(binding);
 });
 
 function setup(): D1Harness {
   return { db: createD1Client(binding) };
 }
 
-/** Drop every table so `applyMigrations` rebuilds a pristine schema. */
-async function resetD1(database: D1Binding): Promise<void> {
-  for (const name of REVERSE_DEPENDENCY_ORDER) {
-    await database.exec(`DROP TABLE IF EXISTS "${name}"`);
-  }
-  await applyMigrations(database);
+/**
+ * Empty every table in a single atomic batch, so the next test starts from the
+ * same pristine state the first one saw.
+ *
+ * `batch()` is a transaction: if any statement fails, none of them are applied,
+ * so a reset can never leave the schema half-truncated for the next test. That
+ * is both faster and safer than the drop-every-table-then-re-migrate loop it
+ * replaces — re-running 56 `CREATE`/`CREATE INDEX` statements per test was the
+ * single largest cost in this file.
+ */
+async function emptyEveryTable(database: D1Binding): Promise<void> {
+  await database.batch(
+    REVERSE_DEPENDENCY_ORDER.map((name) => database.prepare(`DELETE FROM "${name}"`)),
+  );
 }
 
 /**
- * Tables created by the committed migrations, children first: D1 enforces
- * foreign keys against `DROP TABLE` via internal triggers even when
- * `PRAGMA foreign_keys` is off, so parents can only be dropped after every
- * referencing table is gone.
+ * Tables created by the committed migrations, children first.
+ *
+ * D1 enforces foreign keys against `DROP TABLE` via internal triggers even when
+ * `PRAGMA foreign_keys` is off, so a parent can only be emptied once every
+ * referencing table is gone; the same children-first order is what keeps
+ * `DELETE` legal with foreign keys ON.
  */
 const REVERSE_DEPENDENCY_ORDER = [
   "audit_logs",
@@ -104,21 +119,36 @@ const REVERSE_DEPENDENCY_ORDER = [
 ] as const;
 
 /**
- * Apply the committed `migrations/` folder to a D1 database, normalized for
- * Miniflare's `exec()` (which rejects multi-line input): each statement is
- * collapsed onto one line and terminated with a semicolon.
+ * The committed `migrations/` folder as a flat list of single-line statements,
+ * read once and memoised.
+ *
+ * Statements are collapsed onto one line because Miniflare's `exec()` rejects
+ * multi-line input; they are applied with `batch()` rather than one `exec()` per
+ * statement so a migrate is a single round-trip to workerd and one transaction.
  */
-async function applyMigrations(database: D1Binding): Promise<void> {
-  const files = (await readdir(MIGRATIONS_DIR)).filter((file) => /^\d+_.+\.sql$/.test(file)).sort();
-  for (const file of files) {
-    const sql = await readFile(join(MIGRATIONS_DIR, file), "utf8");
-    for (const block of sql.split("--> statement-breakpoint")) {
-      const statement = block.trim().replace(/\s+/g, " ");
-      if (statement !== "") {
-        await database.exec(statement.endsWith(";") ? statement : `${statement};`);
+let migrationStatements: Promise<string[]> | undefined;
+
+function readMigrationStatements(): Promise<string[]> {
+  migrationStatements ??= (async () => {
+    const files = (await readdir(MIGRATIONS_DIR)).filter((file) => /^\d+_.+\.sql$/.test(file)).sort();
+    const statements: string[] = [];
+    for (const file of files) {
+      const sql = await readFile(join(MIGRATIONS_DIR, file), "utf8");
+      for (const block of sql.split("--> statement-breakpoint")) {
+        const statement = block.trim().replace(/\s+/g, " ");
+        if (statement !== "") {
+          statements.push(statement.endsWith(";") ? statement : `${statement};`);
+        }
       }
     }
-  }
+    return statements;
+  })();
+  return migrationStatements;
+}
+
+async function applyMigrations(database: D1Binding): Promise<void> {
+  const statements = await readMigrationStatements();
+  await database.batch(statements.map((statement) => database.prepare(statement)));
 }
 
 describe("D1 runtime with committed migrations", () => {

@@ -87,13 +87,36 @@ Other scripts:
 | Command              | Description                                     |
 | -------------------- | ----------------------------------------------- |
 | `pnpm build`         | Builds runnable artifacts (web + API bundle)    |
-| `pnpm test`          | Runs the test suites (API and database)         |
+| `pnpm test`          | Runs every test in the workspace (complete)     |
+| `pnpm test:fast`     | Runs every test except the real-D1 integration layer |
+| `pnpm test:d1`       | Runs only the real-D1 integration layer of `packages/db` |
 | `pnpm lint`          | ESLint over the whole workspace (no warnings)   |
 | `pnpm typecheck`     | `tsc --noEmit` for every package                |
 | `pnpm db:generate`   | Generate a new migration from `packages/db` schema |
 | `pnpm db:migrate`    | Apply migrations to the local dev SQLite file   |
 | `pnpm db:seed`       | Load clearly-marked dev/test seed data (blocked in production) |
 | `pnpm db:studio`     | Open Drizzle Studio against the local dev DB    |
+
+### Test layers
+
+`pnpm test` is the complete suite and is what you should run before calling work
+done. CI splits it into two steps against that same complete coverage, because
+`packages/db` contains a small set of tests that boot a real Cloudflare
+D1 / workerd runtime (in-process through Miniflare, or by spawning the real
+`wrangler` CLI) and they cost far more than everything else combined.
+
+- `pnpm test:fast` — every test except those. The signal that has to land on
+  every commit: unit behaviour, D1/local parity, schema invariants.
+- `pnpm test:d1` — only those. They are the sole coverage of the committed
+  migration SQL on the runtime and dialect production actually uses, so they run
+  on every push too, just as a separately attributable step.
+
+Which files belong to the D1 layer is decided by what each file does, not by its
+name, and the decision is enforced: `packages/db/vitest.layers.ts` holds the
+list and the criterion, and `packages/db/src/test/d1-layer-coverage.test.ts`
+fails the build if a D1 test is not listed, if a listed file no longer needs a
+workerd runtime, or if the two layers would stop covering every test file
+between them.
 
 The seeded demo product images are written under an origin taken from
 `ZELORA_SEED_IMAGE_BASE_URL` (default `http://localhost:5173`, the Vite dev

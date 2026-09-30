@@ -12,6 +12,8 @@
     "dev": "pnpm --parallel -r run dev",
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
+    "test:fast": "pnpm -r run test:fast",
+    "test:d1": "pnpm --filter @zelora/db run test:d1",
     "db:generate": "pnpm --filter @zelora/db run db:generate",
     "db:migrate": "pnpm --filter @zelora/db run db:migrate",
     "db:seed": "pnpm --filter @zelora/db run db:seed",

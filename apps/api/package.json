@@ -10,6 +10,7 @@
     "build": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=dist/index.js && pnpm run build:worker",
     "build:worker": "esbuild src/worker.ts --bundle --platform=neutral --target=es2022 --format=esm --outfile=dist/worker.js && node scripts/check-worker-bundle.mjs dist/worker.js",
     "test": "vitest run",
+    "test:fast": "vitest run",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

@@ -4,5 +4,13 @@
     "lib": ["ES2023"],
     "types": ["node"]
   },
-  "include": ["src", "seed", "drizzle.config.ts", "vitest.config.ts"]
+  "include": [
+    "src",
+    "seed",
+    "drizzle.config.ts",
+    "vitest.config.ts",
+    "vitest.fast.config.ts",
+    "vitest.d1.config.ts",
+    "vitest.layers.ts"
+  ]
 }

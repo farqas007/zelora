@@ -8,7 +8,21 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # This job is the only required gate, and it runs the complete test suite,
+    # so its budget is sized for the slowest layer rather than the fastest one.
+    #
+    # The two test steps below are both required: `Test (fast)` is the signal
+    # that has to land on every commit, and `Test (D1 integration)` is the only
+    # coverage of the committed migration SQL on the runtime and dialect
+    # production actually uses. Splitting them keeps each failure attributable
+    # to a layer instead of surfacing as one opaque slow step, and it is why
+    # this job is not sized to the fast layer alone.
+    #
+    # 30 minutes is sized with headroom over the measured total: install, lint,
+    # typecheck, the fast suite, the D1 suite, and build. The previous 15-minute
+    # budget was smaller than the test suite it contained, so the gate could not
+    # pass on its own merits. Re-measure before lowering it.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -32,8 +46,17 @@ jobs:
       - name: Typecheck
         run: pnpm typecheck
 
-      - name: Test
-        run: pnpm test
+      - name: Test (fast)
+        # Every workspace package's non-D1 tests. This is the PR-blocking
+        # signal: unit behaviour, D1/local parity, schema invariants.
+        run: pnpm test:fast
+
+      - name: Test (D1 integration)
+        # The real Cloudflare D1 / workerd layer of @zelora/db only, including
+        # the tests that spawn the real wrangler CLI. Slower than everything
+        # else combined; run explicitly so its cost and its failures are
+        # visible rather than averaged into a single number.
+        run: pnpm test:d1
 
       - name: Build
         run: pnpm build

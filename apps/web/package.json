@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:fast": "vitest run",
     "typecheck": "tsc --noEmit",
     "deploy": "pnpm build && pnpm -w exec wrangler deploy --config apps/web/wrangler.jsonc"
   },

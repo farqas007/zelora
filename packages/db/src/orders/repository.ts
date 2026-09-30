@@ -14,13 +14,14 @@ import type { OrderAddressKind, OrderItemStatus, OrderStatus } from "../schema/e
  * orders are created for (and later resolved by) the authenticated session's
  * user id.
  *
- * Order creation is atomic and inventory is decremented as part of the same
- * transaction/batch as the order rows. The idempotency key is written by that
- * same statement, which is what makes checkout retryable: the key is consumed
- * exactly when the order commits, and a rolled-back checkout leaves the key
- * unused. Stock is never *checked* separately: each line is an unconditional
- * `quantity - n` decrement guarded by the `inventory_quantity_non_negative`
- * CHECK constraint, so an undershoot aborts the whole operation and surfaces as
+ * Order creation is atomic: the order rows, the inventory decrements and the
+ * emptying of the purchased cart are one transaction/batch, committed or rolled
+ * back together. The idempotency key is written by that same write, which is
+ * what makes checkout retryable: the key is consumed exactly when the order
+ * commits, and a rolled-back checkout leaves the key unused. Stock is never
+ * *checked* separately: each line is an unconditional `quantity - n` decrement
+ * guarded by the `inventory_quantity_non_negative` CHECK constraint, so an
+ * undershoot aborts the whole operation and surfaces as
  * the driver-neutral {@link CreateOrderConflictReason.INSUFFICIENT_STOCK}
  * result — no partial decrement, no order without lines, and no oversell even
  * under concurrent checkouts. A foreign-key violation on a line (the only FK
@@ -29,6 +30,12 @@ import type { OrderAddressKind, OrderItemStatus, OrderStatus } from "../schema/e
  * {@link CreateOrderConflictReason.VARIANT_NOT_FOUND}, and a concurrent request
  * that already inserted the same `(customer, key)` surfaces as
  * {@link CreateOrderConflictReason.DUPLICATE_IDEMPOTENCY_KEY}.
+ *
+ * The cart is emptied by {@link CreateOrderInput.clearCartId} rather than by a
+ * second call afterwards, so a checkout can never leave an order and a
+ * decremented inventory behind a cart the shopper still sees as buyable: the
+ * three writes share one commit point, and a failure in any of them takes all
+ * three with it.
  *
  * Order rows are append-only: `createOrder` never updates or deletes a
  * previous order, and the schema's RESTRICT referential actions make orders
@@ -153,6 +160,14 @@ export interface CreateOrderLineInput {
  * same atomic write that decrements inventory, so a key is consumed by a
  * checkout that committed and is still free after one that rolled back.
  *
+ * `clearCartId` is the cart whose items this checkout empties. The delete runs
+ * inside the same transaction/batch as the order rows and the stock
+ * decrements — that is the entire point: clearing the cart afterwards would
+ * leave a window in which an order exists and the cart still looks buyable, so
+ * a failure there would show the shopper their cart again and let them buy the
+ * same goods twice. Pass `null` when the order is not sourced from a cart (a
+ * caller with no cart to empty); a checkout always passes the cart it read.
+ *
  * Precondition: `addresses` and `lines` must each be non-empty. The service
  * guarantees that (a checkout always carries a shipping snapshot and at least
  * one line); a caller violating it gets an error rather than a half-written
@@ -169,6 +184,8 @@ export interface CreateOrderInput {
   totalAmountCents: number;
   addresses: CreateOrderAddressInput[];
   lines: CreateOrderLineInput[];
+  /** The cart to empty in the same atomic write, or `null` when there is none. */
+  clearCartId: string | null;
 }
 
 /**
@@ -192,10 +209,12 @@ export type CreateOrderResult =
 
 export interface OrderRepository {
   /**
-   * Atomically decrement inventory and write the order, its address snapshots
-   * and its lines. On a stock undershoot, a missing variant or an
-   * already-taken `(customer, idempotency key)` the entire operation rolls back
-   * and a conflict reason is returned; no order is ever left behind.
+   * Atomically decrement inventory, write the order with its address snapshots
+   * and its lines, and empty {@link CreateOrderInput.clearCartId}. On a stock
+   * undershoot, a missing variant or an already-taken `(customer, idempotency
+   * key)` the entire operation rolls back and a conflict reason is returned;
+   * no order is ever left behind, no stock is ever spent, and the cart is left
+   * exactly as the shopper left it so the same key can be retried.
    */
   createOrder(input: CreateOrderInput): Promise<CreateOrderResult>;
   /**

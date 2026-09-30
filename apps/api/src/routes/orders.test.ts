@@ -324,6 +324,12 @@ class FakeOrderRepository implements OrderRepository {
 
   createCalls: CreateOrderInput[] = [];
   forceConflict: CreateOrderConflictReason | null = null;
+  /**
+   * Stands in for the cart emptying the real order repository performs inside
+   * the same transaction/batch as the order write: it runs on commit only, so a
+   * conflict above leaves the cart exactly as the shopper left it.
+   */
+  onCommit: ((clearCartId: string | null) => Promise<void>) | null = null;
 
   seed(
     customerUserId: string,
@@ -438,6 +444,7 @@ class FakeOrderRepository implements OrderRepository {
     const list = this.recordsByUser.get(input.customerUserId) ?? [];
     list.push(record);
     this.recordsByUser.set(input.customerUserId, list);
+    await this.onCommit?.(input.clearCartId);
     return { ok: true, order, addresses, items };
   }
 
@@ -571,6 +578,11 @@ describe("orders routes", () => {
     cartRepository = new FakeCartRepository();
     catalogRepository = new FakeCatalogRepository();
     orderRepository = new FakeOrderRepository();
+    orderRepository.onCommit = async (clearCartId) => {
+      if (clearCartId !== null) {
+        await cartRepository.clearCart(clearCartId);
+      }
+    };
     app = createApp({
       config: baseConfig,
       userRepository,
@@ -836,6 +848,39 @@ describe("orders routes", () => {
     });
 
     await expectFailure(response, "STOCK_CHANGED", 409);
+  });
+
+  it("B: a failed checkout leaves the cart intact and no order behind", async () => {
+    // Z-05: the cart is emptied by the same write that creates the order, so a
+    // refused checkout is a no-op on the shopper's cart as well as on the
+    // database. Emptied outside that write, a conflict would still leave the
+    // cart here — the shopper would see it gone and unable to retry.
+    const { cookie, csrfToken, userId } = await registerSession();
+    catalogRepository.seedSellable({ id: "variant-1", availableQuantity: 100 });
+    await cartRepository.seedCart(userId, [{ variantId: "variant-1", quantity: 2 }]);
+    orderRepository.forceConflict = "INSUFFICIENT_STOCK";
+
+    const response = await method("POST", "/api/orders", {
+      cookie,
+      csrfToken,
+      body: { shippingAddress: validShipping },
+    });
+
+    await expectFailure(response, "STOCK_CHANGED", 409);
+    const cart = await cartRepository.getCartByUserId(userId);
+    expect(cart!.items).toMatchObject([{ variantId: "variant-1", quantity: 2 }]);
+
+    // The same key is still usable: the retry is a real checkout that empties
+    // the cart exactly once.
+    orderRepository.forceConflict = null;
+    const retry = await method("POST", "/api/orders", {
+      cookie,
+      csrfToken,
+      body: { shippingAddress: validShipping },
+    });
+    expect(retry.status).toBe(201);
+    expect((await cartRepository.getCartByUserId(userId))!.items).toHaveLength(0);
+    expect(orderRepository.createCalls).toHaveLength(2);
   });
 
   it("B: an invalid address is refused with a 422 validation envelope naming the field", async () => {

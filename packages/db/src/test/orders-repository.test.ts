@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import * as schema from "../schema";
 import { createTestDatabase } from "./helpers";
 import { createChain, type Chain } from "./fixtures";
+import { createLocalCartRepository } from "../cart/local-repository";
 import { createLocalOrderRepository } from "../orders/local-repository";
 import { createId } from "../ids";
 import type { CreateOrderInput } from "../orders/repository";
@@ -37,11 +38,18 @@ function addAddresses(input: CreateOrderInput, recipientName: string): CreateOrd
 const CHECKOUT_KEY = "checkout-key-0001";
 const CHECKOUT_FINGERPRINT = "a".repeat(64);
 
-/** A two-line USD checkout against a fresh `createChain` (camera qty 1, lens qty 1). */
+/**
+ * A two-line USD checkout against a fresh `createChain` (camera qty 1, lens qty 1).
+ *
+ * `clearCartId` is the cart this checkout empties in the same transaction as the
+ * order and the stock decrements; it defaults to `null` for the tests that are
+ * about the order write alone.
+ */
 function twoLineCheckout(
   chain: Chain,
   quantity = 1,
   idempotency: { key?: string; fingerprint?: string } = {},
+  clearCartId: string | null = null,
 ): CreateOrderInput {
   return addAddresses(
     {
@@ -53,6 +61,7 @@ function twoLineCheckout(
       shippingAmountCents: 0,
       discountAmountCents: 0,
       totalAmountCents: 84_998,
+      clearCartId,
       addresses: [],
       lines: [
         {
@@ -85,6 +94,40 @@ function twoLineCheckout(
 
 function inventoryQuantity(db: ReturnType<typeof createTestDatabase>["db"], variantId: string): number {
   return db.select().from(schema.inventory).where(eq(schema.inventory.variantId, variantId)).get()!.quantity;
+}
+
+/**
+ * A cart for `customerUserId` holding both chain variants, the shape a real
+ * checkout arrives with. Returns the cart id so it can be handed to
+ * `createOrder` as the cart to empty.
+ */
+function seedChainCart(db: ReturnType<typeof createTestDatabase>["db"], chain: Chain): string {
+  const cart = db
+    .insert(schema.carts)
+    .values({ userId: chain.customerUserId })
+    .returning({ id: schema.carts.id })
+    .get();
+  db.insert(schema.cartItems)
+    .values([
+      { cartId: cart.id, variantId: chain.cameraVariantId, quantity: 2 },
+      { cartId: cart.id, variantId: chain.lensVariantId, quantity: 1 },
+    ])
+    .run();
+  return cart.id;
+}
+
+/** The item rows currently in a cart, as `(variant, quantity)` pairs. */
+function cartContents(
+  db: ReturnType<typeof createTestDatabase>["db"],
+  cartId: string,
+): Array<[string, number]> {
+  return db
+    .select()
+    .from(schema.cartItems)
+    .where(eq(schema.cartItems.cartId, cartId))
+    .all()
+    .map((row) => [row.variantId, row.quantity] as [string, number])
+    .sort(([a], [b]) => (a < b ? -1 : 1));
 }
 
 describe("orders repository: createOrder", () => {
@@ -137,9 +180,10 @@ describe("orders repository: createOrder", () => {
     const { db } = createTestDatabase();
     const chain = createChain(db);
     const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
 
     // Chain inventory starts at 10 for the camera; 11 units must undershoot.
-    const result = await repo.createOrder(twoLineCheckout(chain, 11));
+    const result = await repo.createOrder(twoLineCheckout(chain, 11, {}, cartId));
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
@@ -150,6 +194,12 @@ describe("orders repository: createOrder", () => {
     expect(db.select().from(schema.orderItems).all()).toHaveLength(0);
     expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(10);
     expect(inventoryQuantity(db, chain.lensVariantId)).toBe(5);
+    // The cart emptying was part of the transaction that just rolled back, so
+    // the shopper is left holding exactly what they were holding.
+    expect(cartContents(db, cartId)).toEqual([
+      [chain.cameraVariantId, 2],
+      [chain.lensVariantId, 1],
+    ]);
   });
 
   it("rejects a reused (customer, key) as DUPLICATE_IDEMPOTENCY_KEY and writes nothing", async () => {
@@ -159,24 +209,28 @@ describe("orders repository: createOrder", () => {
     const { db } = createTestDatabase();
     const chain = createChain(db);
     const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
 
-    const first = await repo.createOrder(twoLineCheckout(chain));
+    const first = await repo.createOrder(twoLineCheckout(chain, 1, {}, cartId));
     if (!first.ok) {
       throw new Error("expected a successful order create");
     }
 
     // Same customer, same key, different fingerprint (a materially different checkout).
     const replay = await repo.createOrder(
-      twoLineCheckout(chain, 1, { fingerprint: "b".repeat(64) }),
+      twoLineCheckout(chain, 1, { fingerprint: "b".repeat(64) }, cartId),
     );
     expect(replay).toEqual({ ok: false, reason: "DUPLICATE_IDEMPOTENCY_KEY" });
 
-    // Nothing from the rejected attempt survived: still one order, and stock was
-    // decremented exactly once.
+    // Nothing from the rejected attempt survived: still one order, stock was
+    // decremented exactly once, and the losing attempt's cart delete rolled
+    // back with the rest of its transaction rather than emptying a cart the
+    // winner's order already emptied.
     expect(db.select().from(schema.orders).all()).toHaveLength(1);
     expect(db.select().from(schema.orderItems).all()).toHaveLength(2);
     expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(9);
     expect(inventoryQuantity(db, chain.lensVariantId)).toBe(4);
+    expect(cartContents(db, cartId)).toEqual([]);
   });
 
   it("keeps the idempotency key consumed by the committed order", async () => {
@@ -223,8 +277,9 @@ describe("orders repository: createOrder", () => {
     const { db } = createTestDatabase();
     const chain = createChain(db);
     const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
 
-    const input = twoLineCheckout(chain);
+    const input = twoLineCheckout(chain, 1, {}, cartId);
     const missing = { ...input, lines: [{ ...input.lines[0]!, variantId: createId() }] };
 
     const result = await repo.createOrder(missing);
@@ -238,6 +293,203 @@ describe("orders repository: createOrder", () => {
     expect(db.select().from(schema.orderItems).all()).toHaveLength(0);
     expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(10);
     expect(inventoryQuantity(db, chain.lensVariantId)).toBe(5);
+    expect(cartContents(db, cartId)).toEqual([
+      [chain.cameraVariantId, 2],
+      [chain.lensVariantId, 1],
+    ]);
+  });
+});
+
+/**
+ * Z-05: the purchased cart is emptied by the same transaction that writes the
+ * order and spends the stock.
+ *
+ * Before this, the service cleared the cart in a second call after
+ * `createOrder` had already committed. That made "order placed" and "cart
+ * emptied" two separate facts with a window between them, and a failure in
+ * that window left an order and a decremented inventory behind a cart the
+ * shopper could still check out. These tests pin the three writes to one
+ * commit point: together on success, and none of them on any rollback.
+ */
+describe("orders repository: the cart is cleared inside the order transaction", () => {
+  it("empties the cart in the same transaction that writes the order", async () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
+
+    const result = await repo.createOrder(twoLineCheckout(chain, 1, {}, cartId));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // All three effects are visible together, from one committed write.
+    expect(result.items).toHaveLength(2);
+    expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(9);
+    expect(inventoryQuantity(db, chain.lensVariantId)).toBe(4);
+    expect(cartContents(db, cartId)).toEqual([]);
+    // The cart row itself survives, exactly as `clearCart` has always behaved,
+    // so the shopper keeps a stable cart id across checkouts.
+    expect(db.select().from(schema.carts).where(eq(schema.carts.id, cartId)).get()).toBeDefined();
+  });
+
+  it("empties the cart exactly once across a committed checkout", async () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
+    const carts = createLocalCartRepository(db);
+
+    await repo.createOrder(twoLineCheckout(chain, 1, {}, cartId));
+
+    // A second attempt under the same key is refused (it is the same key), and a
+    // replay answered from the committed order must not clear anything again.
+    expect(await repo.createOrder(twoLineCheckout(chain, 1, {}, cartId))).toEqual({
+      ok: false,
+      reason: "DUPLICATE_IDEMPOTENCY_KEY",
+    });
+    expect(await carts.clearCart(cartId)).toBe(0);
+    expect(cartContents(db, cartId)).toEqual([]);
+  });
+
+  it("empties only the cart it was given, leaving other carts alone", async () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
+
+    // A second customer with a cart of their own, in the same database.
+    const interloper = db
+      .insert(schema.users)
+      .values({ email: "cart-interloper@example.test", name: "Interloper" })
+      .returning({ id: schema.users.id })
+      .get();
+    const otherCart = db
+      .insert(schema.carts)
+      .values({ userId: interloper.id })
+      .returning({ id: schema.carts.id })
+      .get();
+    db.insert(schema.cartItems)
+      .values({ cartId: otherCart.id, variantId: chain.lensVariantId, quantity: 1 })
+      .run();
+
+    await repo.createOrder(twoLineCheckout(chain, 1, {}, cartId));
+
+    expect(cartContents(db, cartId)).toEqual([]);
+    expect(cartContents(db, otherCart.id)).toEqual([[chain.lensVariantId, 1]]);
+  });
+
+  it("leaves no partial order when the stock decrement aborts the transaction", async () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
+
+    // The first line fits in stock, the second does not: the transaction has to
+    // undo the first line's decrement and every row it wrote.
+    const input = twoLineCheckout(chain, 1, {}, cartId);
+    const over = {
+      ...input,
+      lines: [
+        { ...input.lines[0]!, quantity: 1 },
+        { ...input.lines[1]!, quantity: 99 },
+      ],
+    };
+
+    expect(await repo.createOrder(over)).toEqual({ ok: false, reason: "INSUFFICIENT_STOCK" });
+
+    expect(db.select().from(schema.orders).all()).toHaveLength(0);
+    expect(db.select().from(schema.orderAddresses).all()).toHaveLength(0);
+    expect(db.select().from(schema.orderItems).all()).toHaveLength(0);
+    expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(10);
+    expect(inventoryQuantity(db, chain.lensVariantId)).toBe(5);
+    expect(cartContents(db, cartId)).toEqual([
+      [chain.cameraVariantId, 2],
+      [chain.lensVariantId, 1],
+    ]);
+  });
+
+  it("rolls the order and the stock back when emptying the cart fails", async () => {
+    // The one failure that separates an atomic checkout from a two-step one:
+    // the cart delete itself failing. A BEFORE DELETE trigger is the
+    // deterministic way to produce it. If the clear ran in its own statement
+    // after the order had committed, this test would find an order and a spent
+    // inventory behind an untouched cart — exactly the inconsistency Z-05 is
+    // about.
+    const { db, sqlite } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
+
+    sqlite.exec(
+      "CREATE TRIGGER refuse_cart_clear BEFORE DELETE ON cart_items BEGIN SELECT RAISE(ABORT, 'cart clear failed'); END;",
+    );
+
+    try {
+      await expect(
+        repo.createOrder(twoLineCheckout(chain, 1, {}, cartId)),
+      ).rejects.toThrow(/cart clear failed/);
+
+      // The clear is not a conflict the mapper knows about, so it propagates —
+      // and the transaction it belonged to took every other write with it.
+      expect(db.select().from(schema.orders).all()).toHaveLength(0);
+      expect(db.select().from(schema.orderAddresses).all()).toHaveLength(0);
+      expect(db.select().from(schema.orderItems).all()).toHaveLength(0);
+      expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(10);
+      expect(inventoryQuantity(db, chain.lensVariantId)).toBe(5);
+      expect(cartContents(db, cartId)).toEqual([
+        [chain.cameraVariantId, 2],
+        [chain.lensVariantId, 1],
+      ]);
+      // The key is free again, so the shopper can retry once the cart can be
+      // emptied at all.
+      expect(await repo.findByIdempotencyKeyForCustomer(chain.customerUserId, CHECKOUT_KEY)).toBeNull();
+    } finally {
+      sqlite.exec("DROP TRIGGER refuse_cart_clear;");
+    }
+  });
+
+  it("keeps a failed checkout retryable: the same key then commits and clears the cart", async () => {
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
+
+    // Stock runs out, so nothing commits and the shopper still has their cart.
+    expect(await repo.createOrder(twoLineCheckout(chain, 11, {}, cartId))).toEqual({
+      ok: false,
+      reason: "INSUFFICIENT_STOCK",
+    });
+    expect(cartContents(db, cartId)).toEqual([
+      [chain.cameraVariantId, 2],
+      [chain.lensVariantId, 1],
+    ]);
+
+    // The retry uses the very same key and a quantity that fits.
+    const retried = await repo.createOrder(twoLineCheckout(chain, 1, {}, cartId));
+
+    expect(retried.ok).toBe(true);
+    if (!retried.ok) return;
+    expect(retried.order.idempotencyKey).toBe(CHECKOUT_KEY);
+    expect(inventoryQuantity(db, chain.cameraVariantId)).toBe(9);
+    expect(cartContents(db, cartId)).toEqual([]);
+  });
+
+  it("is a no-op for the cart when the order is not sourced from one", async () => {
+    // `clearCartId: null` is the explicit "there is no cart to empty" case: it
+    // must neither fail nor invent a cart.
+    const { db } = createTestDatabase();
+    const chain = createChain(db);
+    const repo = createLocalOrderRepository(db);
+    const cartId = seedChainCart(db, chain);
+
+    const result = await repo.createOrder(twoLineCheckout(chain));
+
+    expect(result.ok).toBe(true);
+    expect(cartContents(db, cartId)).toEqual([
+      [chain.cameraVariantId, 2],
+      [chain.lensVariantId, 1],
+    ]);
   });
 });
 

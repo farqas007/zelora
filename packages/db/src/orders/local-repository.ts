@@ -1,6 +1,7 @@
 import { and, asc, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import type { LocalDatabase } from "../client";
 import { createId } from "../ids";
+import { cartItems } from "../schema/cart";
 import { inventory } from "../schema/catalog";
 import { orderAddresses, orderItems, orders } from "../schema/orders";
 import { mapCreateOrderConflict } from "./conflicts";
@@ -18,18 +19,22 @@ import type {
  * Local (better-sqlite3) implementation of the order repository.
  *
  * Order creation is one database transaction: every line's inventory is
- * decremented unconditionally and the inventory `CHECK (quantity >= 0)`
- * constraint is the stock guard — if any line would drive a variant negative,
- * SQLite aborts the whole transaction before the order, address or line rows
- * are written, and the conflict is surfaced as the driver-neutral
- * {@link CreateOrderConflictReason} result. This keeps local behavior byte
- * identical to the D1 twin, which cannot inspect intermediate `batch()`
- * results and relies on the same CHECK instead.
+ * decremented unconditionally, the order/address/line rows are written, and
+ * the purchased cart is emptied — all inside the same `db.transaction`
+ * callback. The inventory `CHECK (quantity >= 0)` constraint is the stock
+ * guard: if any line would drive a variant negative, SQLite aborts the whole
+ * transaction before anything commits, and the conflict is surfaced as the
+ * driver-neutral {@link CreateOrderConflictReason} result. Nothing else can
+ * abort mid-way (the remaining statements touch only rows this transaction
+ * owns), so the cart delete is as atomic as the stock decrement. This keeps
+ * local behavior byte identical to the D1 twin, which cannot inspect
+ * intermediate `batch()` results and relies on the same CHECK instead.
  *
  * The idempotency key is inserted by that same transaction, so it is
  * consumed only by a checkout that committed: a stock or variant conflict rolls
- * the key back with the stock decrements, and the caller's retry starts from an
- * unused key rather than being mistaken for a replay.
+ * the key back with the stock decrements and the cart emptying, and the
+ * caller's retry starts from an unused key and an untouched cart rather than
+ * being mistaken for a replay.
  */
 export function createLocalOrderRepository(db: LocalDatabase): OrderRepository {
   return {
@@ -83,6 +88,17 @@ export function createLocalOrderRepository(db: LocalDatabase): OrderRepository {
             .values(input.lines.map((line) => ({ ...line, orderId: order.id, status: "pending" as const })))
             .returning()
             .all();
+
+          // Empty the purchased cart last, still inside the transaction. Doing
+          // it here rather than after the commit is what makes "order created"
+          // and "cart emptied" a single fact: the shopper can never be left
+          // holding a cart whose stock has already been spent by an order they
+          // can place again.
+          if (input.clearCartId !== null) {
+            tx.delete(cartItems)
+              .where(eq(cartItems.cartId, input.clearCartId))
+              .run();
+          }
 
           return { order, addresses, items };
         });

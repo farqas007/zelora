@@ -2,6 +2,7 @@ import { and, asc, desc, eq, inArray, lt, or, sql } from "drizzle-orm";
 import { type DrizzleD1Database } from "drizzle-orm/d1";
 import type { DatabaseSchema } from "../client";
 import { createId } from "../ids";
+import { cartItems } from "../schema/cart";
 import { inventory } from "../schema/catalog";
 import { orderAddresses, orderItems, orders } from "../schema/orders";
 import { mapCreateOrderConflict } from "./conflicts";
@@ -29,12 +30,19 @@ import type {
  * drive a variant negative the whole batch rolls back and the conflict is
  * surfaced as the driver-neutral {@link CreateOrderConflictReason} result.
  *
+ * The purchased cart is emptied by a `DELETE` statement in that same batch,
+ * which is D1's only way to make the three writes share a commit point —
+ * there is no transaction to defer it to. A batch that aborts on stock, a
+ * missing variant or a taken idempotency key therefore leaves the cart exactly
+ * as it was, so the shopper can fix the problem and retry with the same key.
+ *
  * The idempotency key travels in the order insert statement of that same batch,
  * which is what gives D1 the same guarantee the local transaction has: the key
  * is committed with the order and nothing else, and a rolled-back batch leaves
  * it free. Two checkouts that race on the same `(customer, key)` are separated
  * by the unique index — the loser's whole batch is rejected and reported as
- * {@link CreateOrderConflictReason.DUPLICATE_IDEMPOTENCY_KEY}.
+ * {@link CreateOrderConflictReason.DUPLICATE_IDEMPOTENCY_KEY}, cart delete
+ * included, so the winner's checkout is the only one that empties the cart.
  *
  * Worker-safe: only the Drizzle D1 driver and the order contract are imported
  * (conflict mapping lives in a pure, driver-free module); the Node-only
@@ -53,7 +61,7 @@ export function createD1OrderRepository(
         // can reference the order id before any statement runs. The fixed lead
         // of the batch keeps the tuple typing tractable; a stock undershoot or
         // missing variant aborts the whole batch before it commits.
-        const [orderRows, addressRows, itemRows, ...decrementResults] = await db.batch([
+        const [orderRows, addressRows, itemRows, ...mutationResults] = await db.batch([
           db
             .insert(orders)
             .values({
@@ -86,16 +94,24 @@ export function createD1OrderRepository(
               })
               .where(eq(inventory.variantId, line.variantId)),
           ),
+          // Emptying the purchased cart is the last statement of the same
+          // batch, so it commits with the order and the stock decrement or not
+          // at all. A `null` cart id (an order not sourced from a cart) simply
+          // contributes no statement, keeping the batch's shape a pure function
+          // of the input.
+          ...(input.clearCartId === null
+            ? []
+            : [db.delete(cartItems).where(eq(cartItems.cartId, input.clearCartId))]),
         ]);
 
         const order = orderRows[0];
         if (order === undefined) {
           throw new Error("order insert returned no row");
         }
-        // Referenced to keep the tuple-deconstruction honest: the decrement
-        // results carry per-variant D1 write metas, which change-count parity
-        // with the input is not required to inspect.
-        void decrementResults;
+        // Referenced to keep the tuple-deconstruction honest: the decrement and
+        // cart-clear results carry per-statement D1 write metas, whose
+        // change-count parity with the input is not required to inspect.
+        void mutationResults;
 
         return { ok: true, order, addresses: addressRows, items: itemRows };
       } catch (error) {

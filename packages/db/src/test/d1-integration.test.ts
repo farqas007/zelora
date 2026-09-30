@@ -1889,6 +1889,7 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
       customerUserId,
       idempotencyKey: "d1-checkout-0001",
       idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+      clearCartId: null,
       currency: "USD",
       subtotalAmountCents: priceAmountCents * 2,
       shippingAmountCents: 0,
@@ -1941,6 +1942,7 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
       customerUserId,
       idempotencyKey: "d1-checkout-0002",
       idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+      clearCartId: null,
       currency: "USD",
       subtotalAmountCents: priceAmountCents * 6,
       shippingAmountCents: 0,
@@ -1979,6 +1981,7 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
       customerUserId,
       idempotencyKey: "d1-checkout-0003",
       idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+      clearCartId: null,
       currency: "USD",
       subtotalAmountCents: 1_500,
       shippingAmountCents: 0,
@@ -2018,6 +2021,7 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
       customerUserId,
       idempotencyKey: "d1-checkout-key-1",
       idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+      clearCartId: null,
       currency: "USD",
       subtotalAmountCents: priceAmountCents,
       shippingAmountCents: 0,
@@ -2076,6 +2080,7 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
       customerUserId,
       idempotencyKey: "d1-checkout-key-2",
       idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+      clearCartId: null,
       currency: "USD",
       subtotalAmountCents: priceAmountCents * 4,
       shippingAmountCents: 0,
@@ -2128,6 +2133,7 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
         customerUserId: customer.customerUserId,
         idempotencyKey: shared,
         idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+        clearCartId: null,
         currency: "USD",
         subtotalAmountCents: customer.priceAmountCents,
         shippingAmountCents: 0,
@@ -2175,6 +2181,7 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
         // Distinct keys: the unique index is per (customer, key).
         idempotencyKey: `d1-checkout-${id}`,
         idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+        clearCartId: null,
         currency: "USD",
         subtotalAmountCents: priceAmountCents,
         shippingAmountCents: 0,
@@ -2223,5 +2230,286 @@ describe("D1 order repository (atomic batch + inventory CHECK guard)", () => {
     const interloper = await repo.listByCustomer(createId(), { limit: 10, cursor: null });
     expect(interloper.items).toEqual([]);
     expect(await repo.findByIdForCustomer(createId(), first)).toBeNull();
+  });
+});
+/**
+ * Z-05 parity: D1 empties the purchased cart in the same batch that writes the
+ * order and spends the stock.
+ *
+ * D1 has no `BEGIN`, so `batch()` is the only atomic primitive available — which
+ * makes the cart delete a *statement of the batch*, not a call made after it.
+ * These tests pin the D1 side of the same contract the local SQLite transaction
+ * gives: three effects on commit, none of them on rollback.
+ */
+describe("D1 order repository (the cart is cleared inside the batch)", () => {
+  const CHECKOUT_FINGERPRINT = "a".repeat(64);
+
+  /** A seller with one sellable variant holding `quantity` units, plus a customer. */
+  async function seedSellable(
+    db: DrizzleD1Database<DatabaseSchema>,
+    seed: number,
+    quantity: number,
+  ): Promise<{ customerUserId: string; storeId: string; variantId: string; priceAmountCents: number }> {
+    const users = createD1UserRepository(db);
+    const sellers = createD1SellerRepository(db);
+    const seller = await users.create({
+      email: `cart-order-seller-${seed}@example.test`,
+      name: `Cart Order Seller ${seed}`,
+      passwordHash: tokenHash(240 + seed),
+    });
+    const onboarding = await sellers.createOnboarding({
+      userId: seller.id,
+      profileSlug: `cart-order-profile-${seed}`,
+      displayName: `Cart Order ${seed}`,
+      storeName: `Cart Order Store ${seed}`,
+      storeSlug: `cart-order-store-${seed}`,
+    });
+    if (!onboarding.ok) {
+      throw new Error("expected a successful onboarding");
+    }
+    await sellers.activateSeller(seller.id);
+
+    const customer = await users.create({
+      email: `cart-order-customer-${seed}@example.test`,
+      name: `Cart Order Customer ${seed}`,
+      passwordHash: tokenHash(250 + seed),
+    });
+    const product = await db
+      .insert(schema.products)
+      .values({
+        storeId: onboarding.store.id,
+        name: `Cart Order Product ${seed}`,
+        slug: `cart-order-product-${seed}`,
+        status: "active",
+      })
+      .returning()
+      .get();
+    const variant = await db
+      .insert(schema.productVariants)
+      .values({
+        productId: product.id,
+        name: `Cart Order Variant ${seed}`,
+        sku: `cart-order-variant-${seed}`,
+        priceAmountCents: 2_500,
+        currency: "USD",
+        status: "active",
+      })
+      .returning()
+      .get();
+    await db.insert(schema.inventory).values({ variantId: variant.id, quantity });
+
+    return {
+      customerUserId: customer.id,
+      storeId: onboarding.store.id,
+      variantId: variant.id,
+      priceAmountCents: variant.priceAmountCents,
+    };
+  }
+
+  /** A cart for the customer holding `quantity` of the variant; returns its id. */
+  async function seedCart(
+    db: DrizzleD1Database<DatabaseSchema>,
+    customerUserId: string,
+    variantId: string,
+    quantity: number,
+  ): Promise<string> {
+    const created = await createD1CartRepository(db).createCart(customerUserId);
+    if (!created.ok) {
+      throw new Error("expected a successful cart creation");
+    }
+    const added = await createD1CartRepository(db).addItem({
+      cartId: created.cart.id,
+      variantId,
+      quantity,
+    });
+    if (!added.ok) {
+      throw new Error("expected a successful cart item insert");
+    }
+    return created.cart.id;
+  }
+
+  /** The `(variant, quantity)` pairs a cart currently holds. */
+  async function cartContents(
+    db: DrizzleD1Database<DatabaseSchema>,
+    cartId: string,
+  ): Promise<Array<[string, number]>> {
+    const rows = await db
+      .select()
+      .from(schema.cartItems)
+      .where(eq(schema.cartItems.cartId, cartId))
+      .all();
+    return rows
+      .map((row) => [row.variantId, row.quantity] as [string, number])
+      .sort(([a], [b]) => (a < b ? -1 : 1));
+  }
+
+  async function inventoryQuantity(db: DrizzleD1Database<DatabaseSchema>, variantId: string): Promise<number> {
+    const row = await db.select().from(schema.inventory).where(eq(schema.inventory.variantId, variantId)).get();
+    return row!.quantity;
+  }
+
+  function checkoutFor(
+    sellable: { customerUserId: string; storeId: string; variantId: string; priceAmountCents: number },
+    opts: { key: string; quantity: number; clearCartId: string | null },
+  ) {
+    return {
+      customerUserId: sellable.customerUserId,
+      idempotencyKey: opts.key,
+      idempotencyFingerprint: CHECKOUT_FINGERPRINT,
+      clearCartId: opts.clearCartId,
+      currency: "USD",
+      subtotalAmountCents: sellable.priceAmountCents * opts.quantity,
+      shippingAmountCents: 0,
+      discountAmountCents: 0,
+      totalAmountCents: sellable.priceAmountCents * opts.quantity,
+      addresses: [
+        { kind: "shipping" as const, recipientName: "Cart Order Customer", phone: null, line1: "1 D1 Way", line2: null, city: "Workerd", region: null, postalCode: null, countryCode: "US" },
+      ],
+      lines: [
+        {
+          variantId: sellable.variantId,
+          storeId: sellable.storeId,
+          productName: "Cart Order Product",
+          variantName: "Cart Order Variant",
+          sku: null,
+          quantity: opts.quantity,
+          unitAmountCents: sellable.priceAmountCents,
+          lineTotalAmountCents: sellable.priceAmountCents * opts.quantity,
+          currency: "USD",
+        },
+      ],
+    };
+  }
+
+  it("empties the cart in the same batch that writes the order and spends the stock", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const sellable = await seedSellable(db, 1, 5);
+    const cartId = await seedCart(db, sellable.customerUserId, sellable.variantId, 2);
+
+    const result = await repo.createOrder(checkoutFor(sellable, { key: "d1-cart-0001", quantity: 2, clearCartId: cartId }));
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.items).toHaveLength(1);
+    expect(await inventoryQuantity(db, sellable.variantId)).toBe(3);
+    expect(await cartContents(db, cartId)).toEqual([]);
+    // The cart row is kept so the shopper keeps a stable cart id, exactly as
+    // `CartRepository.clearCart` has always behaved.
+    expect(await db.select().from(schema.carts).where(eq(schema.carts.id, cartId)).get()).toBeDefined();
+  });
+
+  it("leaves the cart and the stock untouched when the batch rolls back", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const sellable = await seedSellable(db, 2, 3);
+    const cartId = await seedCart(db, sellable.customerUserId, sellable.variantId, 2);
+
+    // Only 3 in stock: the batch aborts on the CHECK, cart delete included.
+    expect(
+      await repo.createOrder(checkoutFor(sellable, { key: "d1-cart-0002", quantity: 9, clearCartId: cartId })),
+    ).toEqual({ ok: false, reason: "INSUFFICIENT_STOCK" });
+
+    expect(await db.select().from(schema.orders).all()).toHaveLength(0);
+    expect(await db.select().from(schema.orderAddresses).all()).toHaveLength(0);
+    expect(await db.select().from(schema.orderItems).all()).toHaveLength(0);
+    expect(await inventoryQuantity(db, sellable.variantId)).toBe(3);
+    expect(await cartContents(db, cartId)).toEqual([[sellable.variantId, 2]]);
+  });
+
+  it("aborts the whole batch when emptying the cart fails", async () => {
+    // The D1 half of the local transaction-rollback test: a cart delete that
+    // fails for a reason of its own. A BEFORE DELETE trigger is the
+    // deterministic way to produce one, and it is the only failure that tells
+    // an atomic checkout apart from a two-step one — with the delete in its own
+    // statement after the batch, the order and the stock decrement would already
+    // be committed and the shopper would still be holding their cart.
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const sellable = await seedSellable(db, 5, 5);
+    const cartId = await seedCart(db, sellable.customerUserId, sellable.variantId, 2);
+    const key = "d1-cart-0005";
+
+    await binding
+      .prepare("CREATE TRIGGER refuse_cart_clear BEFORE DELETE ON cart_items BEGIN SELECT RAISE(ABORT, 'cart clear failed'); END;")
+      .run();
+
+    try {
+      const failure = await repo
+        .createOrder(checkoutFor(sellable, { key, quantity: 2, clearCartId: cartId }))
+        .catch((error: unknown) => error);
+
+      // Not a conflict the mapper knows about, so it propagates — and the batch
+      // it belonged to took every other statement with it.
+      expect(String(failure)).toMatch(/cart clear failed/i);
+
+      expect(await db.select().from(schema.orders).all()).toHaveLength(0);
+      expect(await db.select().from(schema.orderAddresses).all()).toHaveLength(0);
+      expect(await db.select().from(schema.orderItems).all()).toHaveLength(0);
+      expect(await inventoryQuantity(db, sellable.variantId)).toBe(5);
+      expect(await cartContents(db, cartId)).toEqual([[sellable.variantId, 2]]);
+      expect(await repo.findByIdempotencyKeyForCustomer(sellable.customerUserId, key)).toBeNull();
+    } finally {
+      // The shared reset empties `cart_items` before every test, so the trigger
+      // has to go before this test returns.
+      await binding.prepare("DROP TRIGGER refuse_cart_clear").run();
+    }
+  });
+
+  it("keeps a failed checkout retryable: the same key then commits and empties the cart", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const sellable = await seedSellable(db, 3, 3);
+    const cartId = await seedCart(db, sellable.customerUserId, sellable.variantId, 2);
+    const key = "d1-cart-0003";
+
+    expect(
+      await repo.createOrder(checkoutFor(sellable, { key, quantity: 9, clearCartId: cartId })),
+    ).toEqual({ ok: false, reason: "INSUFFICIENT_STOCK" });
+    expect(await repo.findByIdempotencyKeyForCustomer(sellable.customerUserId, key)).toBeNull();
+    expect(await cartContents(db, cartId)).toEqual([[sellable.variantId, 2]]);
+
+    const retried = await repo.createOrder(
+      checkoutFor(sellable, { key, quantity: 2, clearCartId: cartId }),
+    );
+
+    expect(retried.ok).toBe(true);
+    if (!retried.ok) return;
+    expect(retried.order.idempotencyKey).toBe(key);
+    expect(await inventoryQuantity(db, sellable.variantId)).toBe(1);
+    expect(await cartContents(db, cartId)).toEqual([]);
+  });
+
+  it("empties the cart once: a duplicate insert rolls its own cart delete back", async () => {
+    const { db } = await setup();
+    const repo = createD1OrderRepository(db);
+    const sellable = await seedSellable(db, 4, 10);
+    const cartId = await seedCart(db, sellable.customerUserId, sellable.variantId, 1);
+
+    // The first checkout commits and empties the cart.
+    const first = await repo.createOrder(
+      checkoutFor(sellable, { key: "d1-cart-0004", quantity: 1, clearCartId: cartId }),
+    );
+    expect(first.ok).toBe(true);
+    expect(await cartContents(db, cartId)).toEqual([]);
+
+    // The shopper refills and re-sends the same key: the loser's batch is
+    // rejected whole, so the new item must still be there afterwards — a cart
+    // delete that survived the rollback would silently destroy their next
+    // checkout.
+    const refilled = await createD1CartRepository(db).addItem({
+      cartId,
+      variantId: sellable.variantId,
+      quantity: 1,
+    });
+    expect(refilled.ok).toBe(true);
+
+    expect(
+      await repo.createOrder(checkoutFor(sellable, { key: "d1-cart-0004", quantity: 1, clearCartId: cartId })),
+    ).toEqual({ ok: false, reason: "DUPLICATE_IDEMPOTENCY_KEY" });
+
+    expect(await cartContents(db, cartId)).toEqual([[sellable.variantId, 1]]);
+    expect(await db.select().from(schema.orders).all()).toHaveLength(1);
+    expect(await inventoryQuantity(db, sellable.variantId)).toBe(9);
   });
 });

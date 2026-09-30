@@ -130,6 +130,7 @@ interface CreateOrderCall {
   totalAmountCents: number;
   addresses: Array<{ kind: "shipping" | "billing"; recipientName: string; line1: string }>;
   lines: Array<{ variantId: string; quantity: number }>;
+  clearCartId: string | null;
 }
 
 class FakeOrderRepository implements OrderRepository {
@@ -159,6 +160,14 @@ class FakeOrderRepository implements OrderRepository {
    * should report a conflict).
    */
   private raceWinnerFingerprint: string | null | undefined = undefined;
+  /**
+   * Stands in for the cart emptying the real order repository performs in the
+   * same atomic write that creates the order. Wired to the cart fake so a
+   * *committed* checkout really empties the cart and a rolled-back one really
+   * leaves it alone — which is the whole of Z-05. The service itself must never
+   * clear the cart: it has no transaction of its own to fail.
+   */
+  onCommit: ((clearCartId: string | null) => Promise<void>) | null = null;
 
   /** Make the next `createOrder` lose the insert race for its idempotency key. */
   raceWithWinner(winnerFingerprint: string | null = null): void {
@@ -201,6 +210,11 @@ class FakeOrderRepository implements OrderRepository {
       `${call.customerUserId}\u0000${call.idempotencyKey}`,
       record,
     );
+    // The commit is the point at which the cart is emptied, because in the real
+    // repository the delete is one statement of the same batch. Every early
+    // return above — a forced conflict, a lost race — is a rollback, so the cart
+    // must survive them.
+    await this.onCommit?.(call.clearCartId ?? null);
     return { ok: true, order: record.order, addresses: record.addresses, items: record.items };
   }
 
@@ -385,6 +399,14 @@ class FakeCartRepository implements CartRepository {
     };
     this.items.set(item.id, item);
   }
+
+  /**
+   * What a user's cart holds right now, so a test can assert not only how many
+   * clears were requested but what the shopper is actually left holding.
+   */
+  async itemsFor(userId: string): Promise<CartItemRecord[]> {
+    return (await this.getCartByUserId(userId))?.items ?? [];
+  }
 }
 
 function buildService(overrides: Partial<OrderServiceDependencies> = {}): {
@@ -399,8 +421,17 @@ function buildService(overrides: Partial<OrderServiceDependencies> = {}): {
   // Both fakes read from the same sellable projections so the created-order
   // projection reflects the same live prices the service used to re-price.
   orders.sellables = catalog.sellables;
+  const cartRepository = overrides.cartRepository ?? cart;
+  // Mirror the real repository's atomic boundary: the cart is emptied by the
+  // same write that creates the order, so it happens on commit and never on
+  // rollback.
+  orders.onCommit = async (clearCartId) => {
+    if (clearCartId !== null) {
+      await cartRepository.clearCart(clearCartId);
+    }
+  };
   const service = new OrderService({
-    cartRepository: overrides.cartRepository ?? cart,
+    cartRepository,
     catalogRepository: overrides.catalogRepository ?? catalog,
     orderRepository: overrides.orderRepository ?? orders,
   });
@@ -706,9 +737,11 @@ describe("OrderService.placeOrder ignores client-supplied money and catalog fiel
     expect(persisted.addresses[1]!.recipientName).toBe("Mallory");
     // No field of the create call was copied wholesale from the request body.
     // The idempotency pair is the only addition: it comes from the header and
-    // the server's own fingerprint, never from the body.
+    // the server's own fingerprint, never from the body. `clearCartId` is the
+    // other server-derived addition — the session cart, not a body field.
     expect(Object.keys(persisted).sort()).toEqual([
       "addresses",
+      "clearCartId",
       "currency",
       "customerUserId",
       "discountAmountCents",
@@ -871,6 +904,123 @@ describe("OrderService.placeOrder idempotency", () => {
     orders.raceWithWinner("b".repeat(64));
 
     await expectCodeError(service.placeOrder(user, tamperedBody(), CHECKOUT_KEY), "IDEMPOTENCY_CONFLICT", 409);
+  });
+});
+
+/**
+ * Z-05: the cart is emptied by the same write that creates the order.
+ *
+ * `placeOrder` used to call `cartRepository.clearCart` *after* `createOrder`
+ * had already committed, which made "order placed" and "cart emptied" two
+ * separate facts with a window between them: a failure in that window left an
+ * order and a decremented inventory behind a cart the shopper could still check
+ * out. The cart id now travels into `createOrder` as `clearCartId`, so the
+ * delete is part of the transaction/batch. These tests pin the service side of
+ * that contract; the repository suites pin the commit itself.
+ */
+describe("OrderService.placeOrder clears the cart inside the order write", () => {
+  it("empties the cart exactly once, as part of committing the order", async () => {
+    const { service, cart, orders, user } = seededCheckout();
+    const cartId = (await cart.getCartByUserId(user.id))!.cart.id;
+
+    await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+
+    expect(await cart.itemsFor(user.id)).toEqual([]);
+    // The cart is named to the atomic write, not cleared beside it — and one
+    // clear means one, so the service cannot also be clearing it itself.
+    const call = orders.createCalls[0] as { clearCartId: string | null };
+    expect(call.clearCartId).toBe(cartId);
+    expect(cart.clearCalls).toEqual([cartId]);
+  });
+
+  it("leaves the cart intact when the atomic write reports a stock conflict", async () => {
+    const { service, cart, orders, user } = seededCheckout();
+    const before = await cart.itemsFor(user.id);
+    orders.forceCreateConflict = "INSUFFICIENT_STOCK";
+
+    await expectCodeError(
+      service.placeOrder(user, tamperedBody(), CHECKOUT_KEY),
+      "STOCK_CHANGED",
+      409,
+    );
+
+    expect(await cart.itemsFor(user.id)).toEqual(before);
+    expect(cart.clearCalls).toEqual([]);
+  });
+
+  it("leaves the cart intact when the atomic write reports a variant conflict", async () => {
+    const { service, cart, orders, user } = seededCheckout();
+    const before = await cart.itemsFor(user.id);
+    orders.forceCreateConflict = "VARIANT_NOT_FOUND";
+
+    await expectCodeError(
+      service.placeOrder(user, tamperedBody(), CHECKOUT_KEY),
+      "LINE_UNAVAILABLE",
+      409,
+    );
+
+    expect(await cart.itemsFor(user.id)).toEqual(before);
+    expect(cart.clearCalls).toEqual([]);
+  });
+
+  it("leaves the cart intact when checkout fails before the order write", async () => {
+    const built = buildService();
+    const user = makeUser();
+    // One unit in stock against a cart holding five: the failure lands in the
+    // re-pricing pass, long before anything is written.
+    built.catalog.sellables.set(
+      "variant-1",
+      makeVariant({ id: "variant-1", availableQuantity: 1 }),
+    );
+    built.cart.seedCart(user.id, "variant-1", 5);
+    const before = await built.cart.itemsFor(user.id);
+
+    await expectCodeError(
+      built.service.placeOrder(user, tamperedBody(), CHECKOUT_KEY),
+      "STOCK_CHANGED",
+      409,
+    );
+
+    expect(await built.cart.itemsFor(user.id)).toEqual(before);
+    expect(built.cart.clearCalls).toEqual([]);
+    expect(built.orders.createCalls).toHaveLength(0);
+  });
+
+  it("keeps a failed checkout retryable: the same key succeeds and clears the cart once", async () => {
+    const { service, cart, orders, user } = seededCheckout();
+    orders.forceCreateConflict = "INSUFFICIENT_STOCK";
+
+    await expectCodeError(
+      service.placeOrder(user, tamperedBody(), CHECKOUT_KEY),
+      "STOCK_CHANGED",
+      409,
+    );
+    // The shopper still owns their cart, so the retry is a real checkout.
+    expect(await cart.itemsFor(user.id)).toHaveLength(1);
+    expect(cart.clearCalls).toEqual([]);
+
+    orders.forceCreateConflict = null;
+    const retried = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+
+    expect(retried.id).toBe(ORDER_ID);
+    expect(await cart.itemsFor(user.id)).toEqual([]);
+    expect(cart.clearCalls).toHaveLength(1);
+    expect(orders.createCalls).toHaveLength(2);
+  });
+
+  it("leaves the cart alone on the losing side of a duplicate checkout", async () => {
+    // The winner already emptied the cart; the loser must not empty it a second
+    // time, and must not empty whatever the shopper has put there since.
+    const { service, orders, cart, user } = seededCheckout();
+    await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+    cart.seedCart(user.id, "variant-1", 1);
+    orders.raceWithWinner();
+
+    const data = await service.placeOrder(user, tamperedBody(), CHECKOUT_KEY);
+
+    expect(data.id).toBe(ORDER_ID);
+    expect(await cart.itemsFor(user.id)).toHaveLength(1);
+    expect(cart.clearCalls).toHaveLength(1);
   });
 });
 

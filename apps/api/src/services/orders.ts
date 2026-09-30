@@ -49,13 +49,13 @@ import { parsePlaceOrderRequest } from "./validation";
  *
  * Checkout is idempotent. Each call carries a client-generated
  * `idempotencyKey`, and the key is written by the same atomic insert that
- * decrements inventory — so the key is consumed exactly when an order commits,
- * and a checkout that rolled back leaves it free for the shopper to retry. A
- * repeat of the same key and request returns the original order untouched
- * (including not clearing the cart again); a repeat of the same key with a
- * different request is refused with `IDEMPOTENCY_CONFLICT` rather than being
- * answered with the wrong order. See {@link fingerprintCheckoutRequest} for
- * what makes two requests "the same".
+ * decrements inventory and empties the cart — so the key is consumed exactly
+ * when an order commits, and a checkout that rolled back leaves it free for the
+ * shopper to retry. A repeat of the same key and request returns the original
+ * order untouched (including not clearing the cart again); a repeat of the same
+ * key with a different request is refused with `IDEMPOTENCY_CONFLICT` rather
+ * than being answered with the wrong order. See
+ * {@link fingerprintCheckoutRequest} for what makes two requests "the same".
  *
  * Money is always present at checkout but the cart itself stays money-free —
  * the shared {@link CartDto} never carries a price, and the subtotal the web
@@ -233,9 +233,12 @@ export class OrderService {
    *   `STOCK_CHANGED` (409);
    * - lines priced in different currencies → `CURRENCY_MIX` (422).
    *
-   * On success the order + addresses + lines are written atomically while
-   * inventory is decremented, then the cart is cleared. The returned detail
-   * always carries both address snapshots (billing defaults to shipping).
+   * On success the order + addresses + lines are written atomically, the
+   * inventory is decremented and the cart is emptied — one commit, or none of
+   * the three. A failure anywhere in that write leaves the cart exactly as it
+   * was, which is what makes the failed attempt retryable with the same key.
+   * The returned detail always carries both address snapshots (billing
+   * defaults to shipping).
    */
   async placeOrder(
     user: UserRecord,
@@ -339,6 +342,12 @@ export class OrderService {
         toCreateOrderAddressInput(billingAddress, "billing"),
       ],
       lines,
+      // The cart is emptied by the same atomic write that creates the order and
+      // spends the stock. Clearing it afterwards — as a separate call that can
+      // fail, or not run at all — would leave a window in which an order exists
+      // and inventory is already decremented while the shopper's cart still
+      // looks buyable, so the very next attempt would place it again.
+      clearCartId: cart.cart.id,
     });
 
     if (!createOrderResult.ok) {
@@ -350,8 +359,9 @@ export class OrderService {
       // A line the service believed buyable ran out of stock (or its variant
       // was removed) in the narrow window before the atomic write. Map the
       // driver-neutral conflict back to the customer-facing code. The
-      // idempotency key was rolled back with the write, so the shopper can
-      // retry with it once the cart is fixed.
+      // idempotency key and the cart's emptying were rolled back with the
+      // write, so the shopper can retry with the same key once the cart is
+      // fixed.
       if (createOrderResult.reason === "INSUFFICIENT_STOCK") {
         throw new AppError(
           ORDER_ERROR_CODES.STOCK_CHANGED,
@@ -366,7 +376,6 @@ export class OrderService {
       );
     }
 
-    await this.cartRepository.clearCart(cart.cart.id);
     return toOrderDetailDto(
       createOrderResult.order,
       createOrderResult.addresses,
